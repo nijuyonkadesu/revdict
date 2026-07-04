@@ -1,3 +1,5 @@
+import os
+
 from revdict import cli
 from revdict.picker import PickerError
 
@@ -24,6 +26,28 @@ def test_main_routes_the_build_index_subcommand(monkeypatch):
 
     assert code == 0
     assert called["skip_confirm"] is True
+
+
+def test_build_index_subcommand_does_not_force_offline_mode(monkeypatch):
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.setattr(cli, "build", lambda skip_confirm: None)
+
+    cli.main(["build-index", "--yes"])
+
+    assert "HF_HUB_OFFLINE" not in os.environ
+
+
+def test_query_path_sets_offline_and_quiet_env_vars_before_searching(monkeypatch):
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.delenv("HF_HUB_DISABLE_PROGRESS_BARS", raising=False)
+    monkeypatch.delenv("TRANSFORMERS_VERBOSITY", raising=False)
+    monkeypatch.setattr(cli, "_index_exists", lambda: False)
+
+    cli.main(["happy"])
+
+    assert os.environ["HF_HUB_OFFLINE"] == "1"
+    assert os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] == "1"
+    assert os.environ["TRANSFORMERS_VERBOSITY"] == "error"
 
 
 def test_run_query_warns_and_returns_0_on_blank_query(capsys):

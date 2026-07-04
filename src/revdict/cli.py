@@ -1,3 +1,4 @@
+import os
 import shutil
 import sys
 
@@ -86,12 +87,23 @@ def _run_query(query: str, top_n: int, interactive: bool) -> int:
     return 0
 
 
+def _quiet_query_time_model_loading() -> None:
+    # Query time must never hit the network (build-index is the only step
+    # that downloads anything) and shouldn't clutter the terminal right
+    # before fzf takes over the screen.
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
 
     if argv and argv[0] == "build-index":
         build(skip_confirm="--yes" in argv)
         return 0
+
+    _quiet_query_time_model_loading()
 
     if not argv:
         if not _index_exists():
