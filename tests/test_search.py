@@ -2,6 +2,7 @@
 import numpy as np
 
 from revdict.search import (
+    absolute_relevance,
     cosine_top_k,
     dedupe_by_headword,
     exclude_headword,
@@ -53,6 +54,47 @@ def test_relative_relevance_min_max_scales_and_handles_equal_scores():
     assert relative_relevance([0.2, 0.6, 1.0]) == [0, 50, 100]
     assert relative_relevance([0.5, 0.5]) == [50, 50]
     assert relative_relevance([]) == []
+
+
+def test_absolute_relevance_maps_high_confidence_scores_to_high_percentages():
+    """Real raw ms-marco-MiniLM-L-6-v2 cross-encoder scores observed against
+    the live index for an excellent query match ("feeling of intense
+    annoyance" -> harassment/torment, near-perfect gloss matches)."""
+    scores = [8.5017, 4.7611, 4.2976, 3.6611, 3.4583]
+
+    result = absolute_relevance(scores)
+
+    assert all(value >= 95 for value in result[:2])
+    assert all(value > 50 for value in result)
+
+
+def test_absolute_relevance_maps_all_low_gibberish_scores_to_all_low_percentages():
+    """The case relative_relevance structurally cannot handle: a gibberish
+    query's best candidate is still the "best of a bad bunch" and would read
+    100% under pure min-max normalization within the returned set. Real raw
+    scores observed for the gibberish query "asdkjfhqwoeiruty"."""
+    scores = [-6.3086, -10.3728, -10.4662, -10.4662, -10.6007, -10.8346]
+
+    result = absolute_relevance(scores)
+
+    assert all(value <= 5 for value in result)
+    # Contrast with relative_relevance, which shows a 0-100 spread regardless
+    # of how bad every candidate in the set actually is -- this is exactly
+    # the spec gap Fix 5 closes.
+    assert relative_relevance(scores)[0] == 100
+
+
+def test_absolute_relevance_maps_a_neutral_zero_score_to_fifty_percent():
+    assert absolute_relevance([0.0]) == [50]
+
+
+def test_absolute_relevance_handles_empty_list():
+    assert absolute_relevance([]) == []
+
+
+def test_absolute_relevance_does_not_overflow_on_extreme_scores():
+    result = absolute_relevance([-1000.0, 1000.0])
+    assert result == [0, 100]
 
 
 class _FakeClassifier:

@@ -1,4 +1,6 @@
 # src/revdict/search.py
+import math
+
 import numpy as np
 
 from revdict import dictionary
@@ -54,6 +56,40 @@ def relative_relevance(scores: list[float]) -> list[int]:
     if hi == lo:
         return [50] * len(scores)
     return [round(100 * (score - lo) / (hi - lo)) for score in scores]
+
+
+def _stable_sigmoid(x: float) -> float:
+    """A numerically-stable logistic sigmoid: never calls math.exp on a
+    positive argument, so it can't overflow regardless of how extreme the
+    input is."""
+    if x >= 0:
+        z = math.exp(-x)
+        return 1.0 / (1.0 + z)
+    z = math.exp(x)
+    return z / (1.0 + z)
+
+
+def absolute_relevance(scores: list[float]) -> list[int]:
+    """Maps each raw cross-encoder score independently -- NOT relative to the
+    rest of the candidate pool -- to a 0-100 display value, so a
+    gibberish/low-confidence query reads as genuinely low-confidence even
+    when comparing the "best of a bad bunch" within one query's result set.
+    (relative_relevance's pure min-max normalization always stretches the
+    top candidate to 100% and the bottom to 0%, regardless of whether every
+    candidate is actually a garbage match -- this is the real spec gap Fix 5
+    closes: querying "asdkjfhqwoeiruty" must not show a 100% top result.)
+
+    Calibrated against real ms-marco-MiniLM-L-6-v2 scores observed live
+    against this corpus (see final-review-fixes-report.md for the full
+    investigation): excellent gloss matches and common-word matches land
+    roughly in +3 to +8.5, while gibberish/non-matches land roughly in -6 to
+    -11. The cross-encoder's raw output is itself a relevance logit (trained
+    with a sigmoid-based loss), so an un-scaled sigmoid is both the
+    theoretically appropriate transform and, empirically, places the real
+    observed good/bad boundaries at sensible points without needing any
+    extra scale or offset tuning.
+    """
+    return [round(100 * _stable_sigmoid(score)) for score in scores]
 
 
 def _load_state() -> dict:
@@ -122,7 +158,11 @@ def search(query: str, top_n: int = 10) -> dict:
 
     deduped = dedupe_by_headword(scored, metadata)
     deduped = exclude_headword(deduped, metadata, exact_headword)[:top_n]
-    relevances = relative_relevance([score for _, score in deduped])
+    # absolute_relevance (not relative_relevance) drives the displayed
+    # confidence: it reflects genuine absolute match quality, so a
+    # low-confidence/gibberish query reads as visibly low across the board
+    # instead of always showing a 0-100 spread regardless of match quality.
+    relevances = absolute_relevance([score for _, score in deduped])
 
     candidates = []
     for (row_index, _), relevance in zip(deduped, relevances):
