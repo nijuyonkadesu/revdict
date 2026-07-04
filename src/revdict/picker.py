@@ -37,6 +37,10 @@ def _render_exact_preview(exact_match: dict) -> str:
     lines = [f"Exact match — {exact_match['headword']}", ""]
     for sense in exact_match["senses"]:
         lines.append(f"({sense['pos']}) {sense['definition']}")
+        lines.append(f"Emotion: {sense['label']} · {sense['polarity']}")
+        synonyms = sense.get("synonyms")
+        if synonyms:
+            lines.append(f"Synonyms: {', '.join(synonyms)}")
         for example in sense["examples"]:
             lines.append(f'    "{example}"')
         lines.append("")
@@ -78,8 +82,8 @@ def run_picker(candidates: list[dict], exact_match: dict | None) -> str | None:
                     exact_match["headword"],
                     first_sense["pos"],
                     first_sense["definition"],
-                    "exact match",
-                    "n/a",
+                    first_sense["label"],
+                    first_sense["polarity"],
                     100,
                     index=index,
                     is_exact=True,

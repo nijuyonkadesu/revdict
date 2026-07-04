@@ -29,8 +29,16 @@ def _print_static_results(result: dict) -> None:
         table = Table(title=f"Exact match — {result['exact_match']['headword']}")
         table.add_column("POS")
         table.add_column("Definition")
+        table.add_column("Emotion")
+        table.add_column("Synonyms")
         for sense in result["exact_match"]["senses"]:
-            table.add_row(sense["pos"], sense["definition"])
+            synonyms = sense.get("synonyms")
+            table.add_row(
+                sense["pos"],
+                sense["definition"],
+                f"{sense['label']} · {sense['polarity']}",
+                ", ".join(synonyms) if synonyms else "",
+            )
         console.print(table)
 
     table = Table(title="Related words you might mean")

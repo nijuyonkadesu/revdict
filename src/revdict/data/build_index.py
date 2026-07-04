@@ -37,6 +37,19 @@ def group_by_definition(records: list[dict]) -> tuple[list[str], list[list[int]]
     return unique_texts, index_groups
 
 
+def build_metadata_record(record: dict) -> dict:
+    return {
+        "headword": record["headword"],
+        "pos": record["pos"],
+        "definition": record["definition"],
+        "examples": record["examples"],
+        "source": record["source"],
+        "sentiwordnet": record.get("sentiwordnet"),
+        "emolex": list(record["emolex"]) if record.get("emolex") else None,
+        "synonyms": record.get("synonyms"),
+    }
+
+
 def build(skip_confirm: bool = False) -> None:
     print("Loading WordNet + SentiWordNet...")
     try:
@@ -108,15 +121,7 @@ def build(skip_confirm: bool = False) -> None:
     word_index: dict[str, list[int]] = {}
     with (INDEX_DIR / "metadata.jsonl").open("w", encoding="utf-8") as f:
         for position, record in enumerate(records):
-            meta = {
-                "headword": record["headword"],
-                "pos": record["pos"],
-                "definition": record["definition"],
-                "examples": record["examples"],
-                "source": record["source"],
-                "sentiwordnet": record.get("sentiwordnet"),
-                "emolex": list(record["emolex"]) if record.get("emolex") else None,
-            }
+            meta = build_metadata_record(record)
             f.write(json.dumps(meta) + "\n")
             word_index.setdefault(record["headword"].lower(), []).append(position)
 

@@ -57,6 +57,40 @@ def _get_classifier(state: dict) -> EmotionClassifier:
     return state["classifier"]
 
 
+def tag_exact_match_senses(exact_match_raw: dict | None, classifier_factory) -> dict | None:
+    """Tags each sense of an exact-match lookup (dictionary.lookup_exact's raw
+    output) with the same label/polarity shape candidates use, so the
+    exact-match headword gets the emotion badge too, not just candidates.
+
+    SentiWordNet is per-synset, so tagging happens per-sense (a word like
+    "happy" can have senses with different definitions/emotions).
+    """
+    if exact_match_raw is None:
+        return None
+
+    tagged_senses = []
+    for sense in exact_match_raw["senses"]:
+        record = {
+            "source": sense.get("source"),
+            "definition": sense.get("definition"),
+            "sentiwordnet": sense.get("sentiwordnet"),
+            "emolex": frozenset(sense["emolex"]) if sense.get("emolex") else None,
+        }
+        emotion = tag_emotion(record, classifier_factory=classifier_factory)
+        tagged_senses.append(
+            {
+                "pos": sense["pos"],
+                "definition": sense["definition"],
+                "examples": sense["examples"],
+                "source": sense["source"],
+                "synonyms": sense.get("synonyms"),
+                "label": emotion["label"],
+                "polarity": emotion["polarity"],
+            }
+        )
+    return {"headword": exact_match_raw["headword"], "senses": tagged_senses}
+
+
 def search(query: str, top_n: int = 10) -> dict:
     state = _load_state()
     metadata = state["metadata"]
@@ -88,5 +122,8 @@ def search(query: str, top_n: int = 10) -> dict:
             }
         )
 
-    exact_match = dictionary.lookup_exact(query.strip(), state["word_index"], metadata)
+    exact_match_raw = dictionary.lookup_exact(query.strip(), state["word_index"], metadata)
+    exact_match = tag_exact_match_senses(
+        exact_match_raw, classifier_factory=lambda: _get_classifier(state)
+    )
     return {"exact_match": exact_match, "candidates": candidates}

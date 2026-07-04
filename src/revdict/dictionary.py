@@ -25,6 +25,9 @@ def lookup_exact(word: str, word_index: dict[str, list[int]], metadata: list[dic
             "definition": metadata[i]["definition"],
             "examples": metadata[i]["examples"],
             "source": metadata[i]["source"],
+            "sentiwordnet": metadata[i].get("sentiwordnet"),
+            "emolex": metadata[i].get("emolex"),
+            "synonyms": metadata[i].get("synonyms"),
         }
         for i in indices
     ]
