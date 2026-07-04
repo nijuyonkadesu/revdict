@@ -166,3 +166,25 @@ def test_run_picker_parses_a_normal_selection_on_success(monkeypatch):
     result = run_picker(_CANDIDATE_FIXTURE, None)
 
     assert result == "joyful"
+
+
+def test_run_picker_pins_the_exact_match_with_a_real_emotion_badge_not_placeholders(monkeypatch):
+    """Fix 1: the pinned exact-match fzf line previously hardcoded
+    "exact match" / "n/a" instead of a real badge. Capture the actual input
+    fed to fzf and assert it carries the real per-sense label/polarity."""
+    captured = {}
+
+    def fake_run(*args, **kwargs):
+        captured["input"] = kwargs["input"]
+        return _FakeCompletedProcess(returncode=0, stdout="whatever\t0\n")
+
+    monkeypatch.setattr(picker.shutil, "which", lambda name: "/usr/bin/fzf")
+    monkeypatch.setattr(picker.subprocess, "run", fake_run)
+
+    result = run_picker(_CANDIDATE_FIXTURE, _EXACT_MATCH_FIXTURE)
+
+    pinned_line = captured["input"].splitlines()[0]
+    assert "joy · positive" in pinned_line
+    assert "exact match" not in pinned_line
+    assert "n/a" not in pinned_line
+    assert result == "happy"
