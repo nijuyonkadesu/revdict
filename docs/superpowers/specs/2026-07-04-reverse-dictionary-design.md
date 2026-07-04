@@ -46,25 +46,47 @@ re-embedding, at query time.
    (one sense per line: word, POS, gloss, examples). This avoids writing a
    MediaWiki wikitext parser ourselves, while still getting Wiktionary's
    larger vocabulary (slang, modern usage, more conversational definitions,
-   example sentences).
-3. **Merge**: combine both sources into one corpus of `(headword, part of
-   speech, definition, source, examples)` records, deduplicating near-identical
-   senses between WordNet and Wiktionary for the same word.
-4. **Embed**: every definition/gloss is embedded with a small sentence-embedding
+   example sentences). The raw extract is filtered before use: drop
+   non-English-target entries, drop pure inflected/"form of" entries (plurals,
+   verb conjugations that just point back to a lemma — these would otherwise
+   flood the corpus with near-duplicate senses), but keep multi-word
+   entries/idioms, since a phrase like "green with envy" is a legitimate
+   reverse-dictionary answer.
+3. **Sentiment/emotion lexicons** — **SentiWordNet** (positive/negative/
+   objective scores *per WordNet synset* — free, tiny, and aligns directly
+   with the WordNet senses already being loaded) and the **NRC Emotion
+   Lexicon (EmoLex)** (word-level association with 8 emotions + 2 sentiments,
+   ~14k English words). These are looked up directly, no model inference
+   needed, and are the *primary* source of the emotion tag (see Query flow
+   step 5 for why).
+4. **Merge**: combine WordNet + Wiktionary into one corpus of `(headword, part
+   of speech, definition, source, examples)` records, deduplicating
+   near-identical senses between the two sources for the same word.
+5. **Embed**: every definition/gloss is embedded with a small sentence-embedding
    model, **BAAI/bge-small-en-v1.5** (~130MB, 384-dim, CPU-fast). This model is
    chosen specifically because it's tuned for *asymmetric* retrieval (a short
    query describing a meaning → a longer passage/definition that matches),
    which is exactly the reverse-dictionary task — as opposed to symmetric
    similarity models tuned for comparing two sentences of similar length.
-5. **Store**: the resulting embedding matrix + corpus metadata is saved to
+   Passages (definitions) are encoded as-is; queries are encoded with the
+   model's recommended instruction prefix prepended (see Query flow step 1) —
+   asymmetric models like this one need that prefix on the query side to
+   retrieve well.
+6. **Store**: the resulting embedding matrix + corpus metadata is saved to
    `~/.cache/rev_dictionary/index/` (a `.npy` matrix + a small metadata table).
    No FAISS/hnswlib dependency is needed — brute-force numpy cosine similarity
    over a few hundred thousand rows runs in well under 100ms on this hardware,
    so we keep the dependency footprint minimal.
 
-This build step is the only slow part of the system (likely 30-90 minutes,
-one-time, using all 16 cores). It is only re-run if the user wants to refresh
-the underlying data later.
+**Build time is not yet known and won't be committed to as a number here** —
+bge-small's throughput on CPU for short definition text, and the actual size
+of the corpus after kaikki filtering, both need to be measured. The
+implementation plan should benchmark encoding throughput on a small sample
+(~1k definitions) first, then extrapolate to the full corpus; if that
+projects to too long a build, the fallback options are tighter kaikki
+filtering, ONNX export, or int8 quantization of the bi-encoder. This build
+step is a one-time cost (or refresh-on-demand), not part of the per-query
+path.
 
 ## Query flow
 
@@ -72,7 +94,10 @@ Everyday use loads the prebuilt index + three small local models into memory
 (a few seconds) and then serves queries with no network access:
 
 1. **Embed** the user's input (word or phrase) with the same bi-encoder used
-   to build the index.
+   to build the index, with the model's recommended query-instruction prefix
+   prepended (e.g. "Represent this sentence for searching relevant passages: ")
+   — definitions were embedded without this prefix at index-build time, so
+   the asymmetry is what makes retrieval work well.
 2. **Retrieve** the top ~75 candidates by cosine similarity against the whole
    corpus.
 3. **Rerank** those ~75 with a small cross-encoder,
@@ -81,15 +106,26 @@ Everyday use loads the prebuilt index + three small local models into memory
    embedding similarity alone gives.
 4. **Dedupe** by headword (a word may have multiple matching senses; keep its
    best-scoring sense) and take the top 10 (`-n` to override).
-5. **Emotion tag** each shown word's definition using
-   **j-hartmann/emotion-english-distilroberta-base** (~330MB, 7 categories:
-   joy, anger, disgust, fear, sadness, surprise, neutral). The emotion label
-   itself is always shown (e.g. "Surprise"), and a fixed mapping additionally
-   derives a strict positive/negative/neutral summary from it: joy → positive;
-   anger/disgust/fear/sadness → negative; neutral → neutral; surprise →
-   neutral (surprise alone doesn't indicate valence, so it doesn't get bucketed
-   as positive or negative). The badge shown to the user always displays both,
-   e.g. "Joy · positive" or "Surprise · neutral".
+5. **Emotion tag** each shown word using a **lexicon-first, classifier-fallback**
+   approach — not a classifier run on definition text alone. The reasoning:
+   the goal is the word's own *connotation* (e.g. "stingy" reads negative,
+   "frugal" reads neutral-to-positive, even though both could share a similar
+   dictionary definition), not the emotional content of its dictionary gloss —
+   a classifier run on the *definition* often can't tell those apart, since it
+   only sees denotative text. So:
+   - If the word (for WordNet senses, the specific synset) has a **SentiWordNet**
+     score, use that for the positive/negative/neutral polarity.
+   - If the word is in the **NRC EmoLex** list, use its associated emotions for
+     the 7-category-style label (anger, anticipation, disgust, fear, joy,
+     sadness, surprise, trust, plus the lexicon's own positive/negative flags).
+   - Only for words in neither lexicon (mostly Wiktionary-only entries, e.g.
+     slang or very obscure terms) fall back to running
+     **j-hartmann/emotion-english-distilroberta-base** (~330MB) on the
+     definition text, as a best-effort approximation, clearly still useful but
+     acknowledged as weaker signal than the lexicons.
+   - The badge shown to the user always displays both an emotion/category label
+     and a derived positive/negative/neutral summary, e.g. "Negative (stingy)"
+     or "Joy · positive".
 6. If the literal input string is itself a real headword in the corpus, its
    full entry (all definitions across all part-of-speech senses, synonyms) is
    pulled separately as an **"exact match"** and pinned first.
@@ -117,14 +153,26 @@ shelling out to real fzf gets fuzzy filtering, arrow-key navigation, and a
 live preview pane for free, battle-tested, with far less custom UI code than
 reimplementing similar behavior in a Python TUI library.
 
-- The candidate list (headword + one-line gloss + emotion badge + relevance
-  %) is fed to `fzf` as input lines. The "exact match" entry, if the input is
-  a real word, is pinned as the first line and visually marked.
+- The candidate list (headword + one-line gloss + emotion badge + a relative
+  relevance indicator) is fed to `fzf` as input lines. The "exact match" entry,
+  if the input is a real word, is pinned as the first line and visually
+  marked. The relevance indicator is a **rank-based/relative** signal (e.g.
+  min-max scaled within the current result set, or a simple bar/star display)
+  rather than a calibrated percentage — cross-encoder scores are logits, not
+  probabilities, so presenting them as "92%" would overstate precision that
+  isn't there. It communicates "this one is closer than that one," not
+  "92% confidence."
 - `fzf --preview` shows, live as the user arrows through candidates, the full
   detail for the highlighted word: all definitions grouped by part-of-speech
-  (WordNet + Wiktionary merged), synonyms/related words, the full 7-category
-  emotion breakdown with percentages plus the derived positive/negative/
-  neutral summary, and an example sentence when available.
+  (WordNet + Wiktionary merged), synonyms/related words, the emotion/connotation
+  detail from step 5 above, and an example sentence when available. **Open
+  question for review:** the user described wanting to "select one to see
+  further details, expand and then collapse" — this spec implements that as
+  an always-visible live preview pane (updates automatically as you move the
+  selection). `fzf` can alternatively bind a key (e.g. `?`) to toggle the
+  preview pane on/off on demand, which may match "expand then collapse" more
+  literally. Confirm which behavior is wanted, or whether both (live-by-default,
+  toggleable) is fine.
 - Typing into fzf fuzzy-filters the candidate list by word or gloss text.
 - Pressing Enter on a highlighted candidate prints that word to stdout and
   exits — this also makes the tool pipeable/scriptable, e.g.
@@ -143,9 +191,12 @@ described in the data pipeline section above.
 Because matching is similarity-based rather than exact, there is always some
 ranking to show — there's no hard "invalid word" cutoff like the existing
 bash script's API-error case. The top 10 are always shown; if the input is
-gibberish or very obscure, the relevance percentages are simply visibly low
-(e.g. under 30%), which communicates weak confidence without refusing to
-answer.
+gibberish or very obscure, the relative relevance indicator (see CLI section)
+is simply visibly low for all candidates, which communicates weak confidence
+without refusing to answer. The exact cutoff for "visibly low" is an empirical
+threshold determined during implementation (by looking at real cross-encoder
+scores for known-good vs. known-gibberish queries), not a number fixed in
+advance.
 
 ## Components
 
@@ -153,14 +204,20 @@ answer.
 revdict/
   data/
     wordnet_source.py      # load WordNet via `wn`, extract sense records
-    wiktionary_source.py   # stream-parse kaikki.org English JSONL extract
+    wiktionary_source.py   # stream-parse + filter kaikki.org English JSONL
+    sentiwordnet_source.py  # load SentiWordNet pos/neg/obj scores per synset
+    nrc_emolex_source.py     # load NRC EmoLex word -> emotion/sentiment table
     corpus.py               # merge + dedupe WordNet & Wiktionary senses
     build_index.py          # orchestrates corpus build + embedding + save
   models/
     embedder.py              # bge-small-en-v1.5 bi-encoder wrapper
+                              # (separate encode_query / encode_passage,
+                              # query side gets the instruction prefix)
     reranker.py               # ms-marco-MiniLM-L-6-v2 cross-encoder wrapper
-    emotion.py                 # emotion-english-distilroberta-base wrapper
-                                # + fixed emotion -> polarity mapping
+    emotion.py                 # lexicon-first (SentiWordNet + NRC EmoLex)
+                                # lookup, classifier fallback
+                                # (emotion-english-distilroberta-base) for
+                                # words in neither lexicon
   search.py                # embed -> cosine top-75 -> rerank -> top-10,
                              # dedupe by headword, attach emotion tags
   dictionary.py             # exact-match lookup (all senses/POS/synonyms
@@ -189,9 +246,10 @@ pyproject.toml
 ## Testing
 
 - Unit tests for all deterministic glue code, using small fake/injected data
-  (no real model loads in tests): corpus merge/dedupe logic, emotion-label →
-  positive/negative/neutral mapping, candidate dedup-by-headword and ranking
-  logic, fzf input-line formatting and selection parsing.
+  (no real model loads in tests): corpus merge/dedupe logic, the lexicon-first/
+  classifier-fallback emotion lookup logic (including the "word in neither
+  lexicon" fallback path), candidate dedup-by-headword and ranking logic,
+  fzf input-line formatting and selection parsing.
 - ML ranking/embedding quality itself is not meaningfully unit-testable; it is
   validated manually during implementation by running `build-index` once and
   then exercising real queries (a plain word, a near-synonym, a full
