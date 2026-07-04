@@ -3,6 +3,27 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+# fzf's documented exit codes (see `man fzf` EXIT STATUS): 0 = normal, 1 = no
+# match, 2 = error, 130 = interrupted (Ctrl-C or Esc). 1 and 130 both mean
+# "the user didn't make a selection" (cancellation or filtering down to
+# nothing) and should be treated as a quiet non-error. Anything else nonzero
+# (observed empirically in this environment as 2, with stderr "inappropriate
+# ioctl for device" when there's no controlling terminal) is a genuine
+# runtime failure that must not be silently swallowed.
+_CANCELLED_RETURN_CODES = {1, 130}
+
+
+class PickerError(RuntimeError):
+    """Raised when fzf ran but exited with a genuine runtime error -- as
+    opposed to the user simply cancelling (Esc/Ctrl-C) or filtering to no
+    matches. Callers should catch this and fall back to a non-interactive
+    rendering rather than let the picker silently produce no output."""
+
+    def __init__(self, returncode: int, stderr: str):
+        super().__init__(f"fzf exited with code {returncode}: {stderr.strip() or '(no stderr)'}")
+        self.returncode = returncode
+        self.stderr = stderr
+
 
 def format_candidate_line(
     headword: str,
@@ -126,6 +147,11 @@ def run_picker(candidates: list[dict], exact_match: dict | None) -> str | None:
             capture_output=True,
             text=True,
         )
+
+        if result.returncode != 0:
+            if result.returncode in _CANCELLED_RETURN_CODES:
+                return None
+            raise PickerError(result.returncode, result.stderr)
 
         selection_index = parse_selection(result.stdout)
         if selection_index is None:

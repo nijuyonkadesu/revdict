@@ -7,7 +7,7 @@ from rich.table import Table
 from revdict import search as search_mod
 from revdict.data.build_index import build
 from revdict.paths import INDEX_DIR
-from revdict.picker import run_picker
+from revdict.picker import PickerError, run_picker
 
 console = Console()
 
@@ -66,7 +66,15 @@ def _run_query(query: str, top_n: int, interactive: bool) -> int:
     result = search_mod.search(query, top_n=top_n)
 
     if interactive:
-        selected = run_picker(result["candidates"], result["exact_match"])
+        try:
+            selected = run_picker(result["candidates"], result["exact_match"])
+        except PickerError as error:
+            console.print(
+                f"[yellow]fzf exited unexpectedly (code {error.returncode}): "
+                f"{error.stderr.strip() or 'no error output'}[/yellow]"
+            )
+            _print_static_results(result)
+            return 0
         if selected is None and _fzf_missing():
             _print_static_results(result)
             return 0
@@ -90,7 +98,7 @@ def main(argv: list[str] | None = None) -> int:
             _print_no_index_error()
             return 1
         query = console.input("[bold]> [/bold]")
-        return _run_query(query, top_n=10, interactive=True)
+        return _run_query(query, top_n=10, interactive=sys.stdout.isatty())
 
     no_interactive = "--no-interactive" in argv
     args = [arg for arg in argv if arg != "--no-interactive"]

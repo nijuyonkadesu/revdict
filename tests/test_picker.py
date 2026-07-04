@@ -1,9 +1,33 @@
 # tests/test_picker.py
+import pytest
+
+from revdict import picker
 from revdict.picker import (
+    PickerError,
     _render_exact_preview,
     format_candidate_line,
     parse_selection,
+    run_picker,
 )
+
+_CANDIDATE_FIXTURE = [
+    {
+        "headword": "joyful",
+        "pos": "adjective",
+        "definition": "feeling great happiness",
+        "examples": [],
+        "label": "joy",
+        "polarity": "positive",
+        "relevance": 90,
+    }
+]
+
+
+class _FakeCompletedProcess:
+    def __init__(self, returncode, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
 
 _EXACT_MATCH_FIXTURE = {
     "headword": "happy",
@@ -69,3 +93,76 @@ def test_render_exact_preview_shows_real_per_sense_emotion_badge_and_synonyms():
     assert "Synonyms: \n" not in preview
     assert "Synonyms:\n" not in preview
     assert preview.count("Synonyms:") == 1
+
+
+def test_run_picker_returns_none_when_fzf_binary_is_missing(monkeypatch):
+    monkeypatch.setattr(picker.shutil, "which", lambda name: None)
+
+    result = run_picker(_CANDIDATE_FIXTURE, None)
+
+    assert result is None
+
+
+def test_run_picker_returns_none_on_user_cancellation_without_raising(monkeypatch):
+    """fzf's documented exit codes: 130 = interrupted (Ctrl-C or Esc). This
+    must be treated as a quiet cancellation, not an error -- no fallback,
+    no warning, just None."""
+    monkeypatch.setattr(picker.shutil, "which", lambda name: "/usr/bin/fzf")
+    monkeypatch.setattr(
+        picker.subprocess,
+        "run",
+        lambda *a, **k: _FakeCompletedProcess(returncode=130, stdout=""),
+    )
+
+    result = run_picker(_CANDIDATE_FIXTURE, None)
+
+    assert result is None
+
+
+def test_run_picker_returns_none_on_no_match_exit_code(monkeypatch):
+    """Exit code 1 = "no match" (e.g. user filtered to zero results and hit
+    enter) -- also a quiet, non-error cancellation-like outcome."""
+    monkeypatch.setattr(picker.shutil, "which", lambda name: "/usr/bin/fzf")
+    monkeypatch.setattr(
+        picker.subprocess,
+        "run",
+        lambda *a, **k: _FakeCompletedProcess(returncode=1, stdout=""),
+    )
+
+    result = run_picker(_CANDIDATE_FIXTURE, None)
+
+    assert result is None
+
+
+def test_run_picker_raises_picker_error_on_genuine_runtime_failure(monkeypatch):
+    """A nonzero exit that isn't cancellation (e.g. fzf's exit code 2 "Error",
+    observed empirically in this environment for "no controlling terminal")
+    must be distinguishable from cancellation so the caller can fall back
+    instead of silently returning nothing."""
+    monkeypatch.setattr(picker.shutil, "which", lambda name: "/usr/bin/fzf")
+    monkeypatch.setattr(
+        picker.subprocess,
+        "run",
+        lambda *a, **k: _FakeCompletedProcess(
+            returncode=2, stdout="", stderr="inappropriate ioctl for device"
+        ),
+    )
+
+    with pytest.raises(PickerError) as excinfo:
+        run_picker(_CANDIDATE_FIXTURE, None)
+
+    assert excinfo.value.returncode == 2
+    assert "ioctl" in excinfo.value.stderr
+
+
+def test_run_picker_parses_a_normal_selection_on_success(monkeypatch):
+    monkeypatch.setattr(picker.shutil, "which", lambda name: "/usr/bin/fzf")
+    monkeypatch.setattr(
+        picker.subprocess,
+        "run",
+        lambda *a, **k: _FakeCompletedProcess(returncode=0, stdout="whatever\t0\n"),
+    )
+
+    result = run_picker(_CANDIDATE_FIXTURE, None)
+
+    assert result == "joyful"
