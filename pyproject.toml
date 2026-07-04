@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "revdict"
+version = "0.1.0"
+description = "Local offline reverse-dictionary CLI"
+requires-python = ">=3.11"
+dependencies = [
+    "nltk>=3.9",
+    "sentence-transformers>=5.0",
+    "transformers>=5.0",
+    "nrclex>=4.1",
+    "numpy>=1.26",
+    "rich>=13.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+revdict = "revdict.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
