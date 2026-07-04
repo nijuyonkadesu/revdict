@@ -1,14 +1,26 @@
 import os
-import shutil
 import sys
 
-from rich.console import Console
-from rich.table import Table
+# huggingface_hub/transformers snapshot these into module-level constants the
+# moment they're first imported, so they must be set before that import
+# happens anywhere in the process — not merely before model construction.
+# `revdict.data.build_index` (imported below) transitively imports them, so
+# this has to run first, at true module-load time, based on real sys.argv
+# (not the `argv` parameter `main()` accepts for testability).
+if not (len(sys.argv) > 1 and sys.argv[1] == "build-index"):
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 
-from revdict import search as search_mod
-from revdict.data.build_index import build
-from revdict.paths import INDEX_DIR
-from revdict.picker import PickerError, run_picker
+import shutil  # noqa: E402
+
+from rich.console import Console  # noqa: E402
+from rich.table import Table  # noqa: E402
+
+from revdict import search as search_mod  # noqa: E402
+from revdict.data.build_index import build  # noqa: E402
+from revdict.paths import INDEX_DIR  # noqa: E402
+from revdict.picker import PickerError, run_picker  # noqa: E402
 
 console = Console()
 
@@ -87,23 +99,12 @@ def _run_query(query: str, top_n: int, interactive: bool) -> int:
     return 0
 
 
-def _quiet_query_time_model_loading() -> None:
-    # Query time must never hit the network (build-index is the only step
-    # that downloads anything) and shouldn't clutter the terminal right
-    # before fzf takes over the screen.
-    os.environ.setdefault("HF_HUB_OFFLINE", "1")
-    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
-    os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
-
-
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
 
     if argv and argv[0] == "build-index":
         build(skip_confirm="--yes" in argv)
         return 0
-
-    _quiet_query_time_model_loading()
 
     if not argv:
         if not _index_exists():

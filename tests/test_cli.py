@@ -1,4 +1,6 @@
+import importlib
 import os
+import sys
 
 from revdict import cli
 from revdict.picker import PickerError
@@ -28,26 +30,31 @@ def test_main_routes_the_build_index_subcommand(monkeypatch):
     assert called["skip_confirm"] is True
 
 
-def test_build_index_subcommand_does_not_force_offline_mode(monkeypatch):
-    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
-    monkeypatch.setattr(cli, "build", lambda skip_confirm: None)
-
-    cli.main(["build-index", "--yes"])
-
-    assert "HF_HUB_OFFLINE" not in os.environ
-
-
-def test_query_path_sets_offline_and_quiet_env_vars_before_searching(monkeypatch):
+def test_module_load_sets_offline_and_quiet_env_vars_for_a_query_invocation(monkeypatch):
+    # huggingface_hub/transformers snapshot these env vars into module-level
+    # constants at import time, so the guard in cli.py must run before any
+    # other import in the file — this test proves that by re-triggering
+    # module load (via reload) with real sys.argv set to a query invocation,
+    # the same way the actual `revdict happy` console-script entry point does.
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
     monkeypatch.delenv("HF_HUB_DISABLE_PROGRESS_BARS", raising=False)
     monkeypatch.delenv("TRANSFORMERS_VERBOSITY", raising=False)
-    monkeypatch.setattr(cli, "_index_exists", lambda: False)
+    monkeypatch.setattr(sys, "argv", ["revdict", "happy"])
 
-    cli.main(["happy"])
+    importlib.reload(cli)
 
     assert os.environ["HF_HUB_OFFLINE"] == "1"
     assert os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] == "1"
     assert os.environ["TRANSFORMERS_VERBOSITY"] == "error"
+
+
+def test_module_load_does_not_force_offline_mode_for_build_index_invocation(monkeypatch):
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.setattr(sys, "argv", ["revdict", "build-index", "--yes"])
+
+    importlib.reload(cli)
+
+    assert "HF_HUB_OFFLINE" not in os.environ
 
 
 def test_run_query_warns_and_returns_0_on_blank_query(capsys):
