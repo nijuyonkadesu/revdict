@@ -82,6 +82,29 @@ def test_tag_emotion_builds_classifier_only_when_emolex_has_no_specific_category
     assert factory_should_be_skipped.construct_calls == 0
 
 
+def test_tag_emotion_invokes_classifier_when_emolex_has_only_bare_sentiment_flag():
+    """A bare EmoLex sentiment flag (e.g. {"positive"}) is not a *specific*
+    emotion category, so the classifier fallback must still fire to supply the
+    category label -- this is the exact scenario the classifier-fallback design
+    correction targeted, and it must stay covered so a future simplification of
+    `_emolex_has_specific_category` (e.g. to `bool(emolex_labels)`) can't silently
+    reintroduce the bug."""
+    record = {
+        "source": "wiktionary",
+        "definition": "x",
+        "sentiwordnet": None,
+        "emolex": frozenset({"positive"}),
+    }
+    factory = FakeClassifierFactory(FakeClassifier(("fear", "negative")))
+    result = tag_emotion(record, classifier_factory=factory)
+    assert factory.construct_calls == 1
+    assert factory._classifier.calls == 1
+    # Category comes from the classifier fallback; polarity still comes from
+    # EmoLex's bare "positive" flag, since _resolve_polarity checks EmoLex
+    # before ever looking at the classifier result.
+    assert result == {"label": "fear", "polarity": "positive", "emotion_source": "classifier"}
+
+
 def test_tag_emotion_returns_neutral_none_when_nothing_available():
     record = {"source": "wiktionary", "definition": "x", "sentiwordnet": None, "emolex": None}
     result = tag_emotion(record, classifier_factory=None)
