@@ -75,7 +75,7 @@ def _render_candidate_preview(candidate: dict) -> str:
         candidate["definition"],
         "",
         f"Emotion: {candidate['label']} · {candidate['polarity']}",
-        f"Relative match: {candidate['relevance']}%",
+        f"Match confidence: {candidate['relevance']}%",
     ]
     if candidate["examples"]:
         lines.append("")
