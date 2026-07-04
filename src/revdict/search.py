@@ -31,6 +31,22 @@ def dedupe_by_headword(
     return sorted(best.values(), key=lambda pair: -pair[1])
 
 
+def exclude_headword(
+    scored_rows: list[tuple[int, float]], metadata: list[dict], headword: str | None
+) -> list[tuple[int, float]]:
+    """Drops any row whose headword (case-insensitively) matches `headword`.
+    Used to keep the exact-match word from also showing up redundantly in
+    the candidate list. A no-op when `headword` is None/falsy."""
+    if not headword:
+        return scored_rows
+    excluded = headword.lower()
+    return [
+        (index, score)
+        for index, score in scored_rows
+        if metadata[index]["headword"].lower() != excluded
+    ]
+
+
 def relative_relevance(scores: list[float]) -> list[int]:
     if not scores:
         return []
@@ -101,7 +117,11 @@ def search(query: str, top_n: int = 10) -> dict:
     rerank_scores = state["reranker"].score(query, definitions)
     scored = [(retrieved[i][0], rerank_scores[i]) for i in range(len(retrieved))]
 
-    deduped = dedupe_by_headword(scored, metadata)[:top_n]
+    exact_match_raw = dictionary.lookup_exact(query.strip(), state["word_index"], metadata)
+    exact_headword = exact_match_raw["headword"] if exact_match_raw is not None else None
+
+    deduped = dedupe_by_headword(scored, metadata)
+    deduped = exclude_headword(deduped, metadata, exact_headword)[:top_n]
     relevances = relative_relevance([score for _, score in deduped])
 
     candidates = []
@@ -122,7 +142,6 @@ def search(query: str, top_n: int = 10) -> dict:
             }
         )
 
-    exact_match_raw = dictionary.lookup_exact(query.strip(), state["word_index"], metadata)
     exact_match = tag_exact_match_senses(
         exact_match_raw, classifier_factory=lambda: _get_classifier(state)
     )

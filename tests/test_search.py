@@ -4,6 +4,7 @@ import numpy as np
 from revdict.search import (
     cosine_top_k,
     dedupe_by_headword,
+    exclude_headword,
     relative_relevance,
     tag_exact_match_senses,
 )
@@ -26,6 +27,26 @@ def test_dedupe_by_headword_keeps_the_best_scoring_sense_per_word_case_insensiti
     result = dedupe_by_headword(scored, metadata)
 
     assert result == [(1, 0.9), (2, 0.7)]
+
+
+def test_exclude_headword_drops_matching_entries_case_insensitively():
+    """Fix 4: the exact-match headword must not also reappear in the
+    candidate list (e.g. querying "happy" pinning "happy" as the exact match
+    and then showing it again as one of the related-word candidates)."""
+    metadata = [{"headword": "Happy"}, {"headword": "joyful"}, {"headword": "glad"}]
+    scored = [(0, 0.9), (1, 0.7), (2, 0.5)]
+
+    result = exclude_headword(scored, metadata, "happy")
+
+    assert result == [(1, 0.7), (2, 0.5)]
+
+
+def test_exclude_headword_is_a_noop_when_headword_is_none_or_absent():
+    metadata = [{"headword": "Happy"}, {"headword": "joyful"}]
+    scored = [(0, 0.9), (1, 0.7)]
+
+    assert exclude_headword(scored, metadata, None) == scored
+    assert exclude_headword(scored, metadata, "nonexistent") == scored
 
 
 def test_relative_relevance_min_max_scales_and_handles_equal_scores():
