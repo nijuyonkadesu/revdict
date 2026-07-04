@@ -1,4 +1,3 @@
-# src/revdict/search.py
 import math
 
 import numpy as np

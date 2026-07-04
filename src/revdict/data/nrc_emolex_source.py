@@ -1,4 +1,3 @@
-# src/revdict/data/nrc_emolex_source.py
 import importlib.resources
 import json
 

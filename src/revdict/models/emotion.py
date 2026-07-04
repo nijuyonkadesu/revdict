@@ -1,4 +1,5 @@
-# src/revdict/models/emotion.py
+from typing import cast
+
 EMOTION_POLARITY = {
     "joy": "positive",
     "trust": "positive",
@@ -43,7 +44,11 @@ class EmotionClassifier:
         )
 
     def classify(self, text: str) -> tuple[str, str]:
-        results = self._pipe(text)[0]
+        # transformers' pipeline stubs don't precisely type the top_k=None
+        # shape; at runtime this is a list of {"label": str, "score": float}
+        # dicts for the single input text (verified by the real model calls
+        # exercised in Task 14's manual validation).
+        results = cast(list[dict], self._pipe(text)[0])
         top = max(results, key=lambda item: item["score"])
         label = top["label"].lower()
         return label, EMOTION_POLARITY.get(label, "neutral")

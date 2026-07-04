@@ -24,13 +24,17 @@ def load_wordnet_senses() -> list[dict]:
 
         try:
             senti = swn.senti_synset(synset.name())
+        except (LookupError, ValueError):
+            senti = None
+
+        if senti is None:
+            sentiwordnet = None
+        else:
             sentiwordnet = {
                 "pos": senti.pos_score(),
                 "neg": senti.neg_score(),
                 "obj": senti.obj_score(),
             }
-        except (LookupError, ValueError):
-            sentiwordnet = None
 
         for lemma in lemma_names:
             records.append(

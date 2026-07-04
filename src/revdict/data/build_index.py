@@ -1,4 +1,3 @@
-# src/revdict/data/build_index.py
 import json
 import random
 import time
