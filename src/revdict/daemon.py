@@ -68,7 +68,7 @@ def send_query(query: str, top_n: int, timeout: float = 30.0) -> dict | None:
     return payload
 
 
-def ensure_daemon_running(startup_timeout: float = 10.0) -> bool:
+def ensure_daemon_running(startup_timeout: float = 20.0) -> bool:
     pid = _read_pid()
     if pid is not None and _process_is_alive(pid) and DAEMON_SOCKET_PATH.exists():
         return True
@@ -77,7 +77,7 @@ def ensure_daemon_running(startup_timeout: float = 10.0) -> bool:
     DAEMON_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(DAEMON_LOG_PATH, "a") as log_file:
         subprocess.Popen(
-            [sys.executable, "-m", "revdict.cli", "daemon", "start"],
+            [sys.executable, "-u", "-m", "revdict.cli", "daemon", "start"],
             stdout=log_file,
             stderr=log_file,
             stdin=subprocess.DEVNULL,
@@ -163,6 +163,8 @@ def run_server() -> None:
                             break
                         chunks.append(chunk)
                     request_text = b"".join(chunks).decode("utf-8")
+                    if not request_text.strip():
+                        continue
                     response_text = _handle_request(request_text, search_mod.search)
                     conn.sendall(response_text.encode("utf-8"))
             except Exception as error:
