@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Local offline reverse-dictionary CLI"
 requires-python = ">=3.11"
 dependencies = [
+    "torch>=2.9",
     "nltk>=3.9",
     "sentence-transformers>=5.0",
     "transformers>=5.0",
@@ -24,3 +25,11 @@ revdict = "revdict.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
