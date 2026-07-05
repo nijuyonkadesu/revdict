@@ -19,7 +19,12 @@ uv sync --all-extras
 ```
 
 This creates `.venv/` and installs everything, including a CPU-only PyTorch
-build (no CUDA download, regardless of platform).
+build (no CUDA download, regardless of platform). Symlink the entry point
+onto your `PATH` so you can drop the `.venv/bin/` prefix everywhere below:
+
+```bash
+ln -sf "$(pwd)/.venv/bin/revdict" ~/.local/bin/revdict
+```
 
 ## First-time setup
 
@@ -28,7 +33,7 @@ and a few small ML models; takes on the order of 30 minutes depending on
 your machine):
 
 ```bash
-.venv/bin/revdict build-index
+revdict build-index
 ```
 
 Re-run this any time you want to refresh the underlying data.
@@ -38,14 +43,14 @@ Re-run this any time you want to refresh the underlying data.
 ```bash
 # Interactive picker (fzf) — arrow keys + live preview, ? to toggle preview,
 # Enter to print the selected word
-.venv/bin/revdict "happy"
-.venv/bin/revdict "feeling of intense annoyance"
+revdict "happy"
+revdict "feeling of intense annoyance"
 
 # One-shot, plain-text output (no fzf) — good for scripting
-.venv/bin/revdict "happy" --no-interactive
+revdict "happy" --no-interactive
 
 # Show more/fewer candidates (default 30)
-.venv/bin/revdict "happy" --no-interactive -n 10
+revdict "happy" --no-interactive -n 10
 ```
 
 The first query in a while starts a background daemon that keeps the index
