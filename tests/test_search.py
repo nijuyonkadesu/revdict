@@ -160,3 +160,37 @@ def test_tag_exact_match_senses_tags_each_sense_and_preserves_display_fields():
     assert second["polarity"] == "negative"
     assert second["synonyms"] is None
     assert classifier.calls == 1
+
+
+def test_search_candidates_and_exact_match_senses_include_a_stress_key(monkeypatch):
+    """search() must always include a "stress" key on every candidate and
+    every exact-match sense -- None when stressmark isn't installed/fails,
+    a string when it succeeds -- so callers never need a .get() with a
+    default; the key is always present."""
+    import revdict.search as search_mod
+
+    monkeypatch.setattr(search_mod.stress, "mark", lambda word, pos: f"STRESS[{word}/{pos}]")
+
+    exact_match_raw = {
+        "headword": "happy",
+        "senses": [
+            {
+                "pos": "adjective",
+                "definition": "feeling pleasure",
+                "examples": [],
+                "source": "wordnet",
+                "sentiwordnet": None,
+                "emolex": None,
+                "synonyms": None,
+            }
+        ],
+    }
+
+    # classifier_factory=None (not a lambda) -- the fixture's record has no
+    # emolex/sentiwordnet data, so tag_emotion needs to know no classifier
+    # is available at all; passing a callable here (even one returning
+    # None) would make tag_emotion call it and then crash calling
+    # .classify() on the None it got back.
+    tagged = search_mod.tag_exact_match_senses(exact_match_raw, classifier_factory=None)
+
+    assert tagged["senses"][0]["stress"] == "STRESS[happy/adjective]"

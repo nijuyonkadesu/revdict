@@ -3,6 +3,7 @@ import math
 import numpy as np
 
 from revdict import dictionary
+from revdict.models import stress
 from revdict.models.embedder import Embedder
 from revdict.models.emotion import EmotionClassifier, tag_emotion
 from revdict.models.reranker import Reranker
@@ -137,6 +138,7 @@ def tag_exact_match_senses(exact_match_raw: dict | None, classifier_factory) -> 
                 "synonyms": sense.get("synonyms"),
                 "label": emotion["label"],
                 "polarity": emotion["polarity"],
+                "stress": stress.mark(exact_match_raw["headword"], sense["pos"]),
             }
         )
     return {"headword": exact_match_raw["headword"], "senses": tagged_senses}
@@ -183,6 +185,7 @@ def search(query: str, top_n: int = 10) -> dict:
                 "label": emotion["label"],
                 "polarity": emotion["polarity"],
                 "relevance": relevance,
+                "stress": stress.mark(record["headword"], record["pos"]),
             }
         )
 
