@@ -4,6 +4,51 @@ from revdict import cli
 from revdict.picker import PickerError
 
 
+def test_main_returns_1_with_clean_error_on_non_numeric_n_value(capsys):
+    """Regression guard: -n used to be parsed via manual list-slicing +
+    int(), which raised an uncaught ValueError for a non-numeric value
+    instead of a clean, handled error."""
+    code = cli.main(["happy", "-n", "not-a-number"])
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "invalid int value" in captured.out
+    assert "Traceback" not in captured.out
+
+
+def test_main_returns_1_with_clean_error_on_missing_n_value(capsys):
+    """Regression guard: -n with nothing after it used to raise an
+    uncaught IndexError instead of a clean, handled error."""
+    code = cli.main(["happy", "-n"])
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "expected one argument" in captured.out
+    assert "Traceback" not in captured.out
+
+
+def test_main_error_message_is_not_mangled_by_rich_markup(capsys):
+    """Regression guard: argparse's usage text contains literal square
+    brackets (e.g. "[query ...]"), which Rich would otherwise try to parse
+    as its own markup tags and silently swallow."""
+    code = cli.main(["happy", "-n", "abc"])
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "[query ...]" in captured.out
+
+
+def test_main_help_flag_exits_cleanly_and_prints_usage(capsys):
+    import pytest
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["--help"])
+
+    assert excinfo.value.code == 0
+    captured = capsys.readouterr()
+    assert "usage: revdict" in captured.out
+
+
 def test_main_prints_error_and_returns_1_when_index_missing(monkeypatch, capsys):
     monkeypatch.setattr(cli, "_index_exists", lambda: False)
 

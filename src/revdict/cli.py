@@ -1,3 +1,4 @@
+import argparse
 import shutil
 import sys
 
@@ -10,6 +11,60 @@ from revdict.paths import INDEX_DIR
 from revdict.picker import PickerError, run_picker
 
 console = Console()
+
+
+class _ArgumentError(Exception):
+    """Raised instead of argparse's default sys.exit(2) on a usage error, so
+    main() can return an ordinary exit code rather than aborting the whole
+    process -- important both for real callers and for tests that invoke
+    main() directly. --help's normal sys.exit(0) is left alone (that IS the
+    correct behavior for real interactive use)."""
+
+    def __init__(self, message: str, usage: str):
+        super().__init__(message)
+        self.message = message
+        self.usage = usage
+
+
+class _QuietArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise _ArgumentError(message, self.format_usage())
+
+
+def _build_index_parser() -> argparse.ArgumentParser:
+    parser = _QuietArgumentParser(
+        prog="revdict build-index", description="Build (or rebuild) the local search index."
+    )
+    parser.add_argument("--yes", action="store_true", help="Skip the confirmation prompt.")
+    return parser
+
+
+def _daemon_parser() -> argparse.ArgumentParser:
+    parser = _QuietArgumentParser(
+        prog="revdict daemon", description="Manage the background query daemon."
+    )
+    parser.add_argument("action", choices=["start", "stop", "status"])
+    return parser
+
+
+def _query_parser() -> argparse.ArgumentParser:
+    parser = _QuietArgumentParser(
+        prog="revdict",
+        description="Local offline reverse-dictionary CLI: look up a word, "
+        "or describe a meaning to get candidate words.",
+    )
+    parser.add_argument(
+        "query", nargs="*", help="Word or phrase to look up (omit to read from stdin)."
+    )
+    parser.add_argument(
+        "-n", type=int, default=30, metavar="N", help="Number of candidates to show (default: 30)."
+    )
+    parser.add_argument(
+        "--no-interactive",
+        action="store_true",
+        help="Print a plain table instead of launching the fzf picker.",
+    )
+    return parser
 
 
 def _index_exists() -> bool:
@@ -143,51 +198,51 @@ def _run_query(query: str, top_n: int, interactive: bool) -> int:
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
 
-    if argv and argv[0] == "build-index":
-        _build_index(skip_confirm="--yes" in argv)
-        return 0
+    try:
+        if argv and argv[0] == "build-index":
+            args = _build_index_parser().parse_args(argv[1:])
+            _build_index(skip_confirm=args.yes)
+            return 0
 
-    if argv and argv[0] == "daemon":
-        action = argv[1] if len(argv) > 1 else None
-        if action == "start":
-            _daemon_start()
-            return 0
-        if action == "stop":
-            if _daemon_stop():
-                console.print("Daemon stopped.")
-            else:
-                console.print("[yellow]Daemon was not running.[/yellow]")
-            return 0
-        if action == "status":
+        if argv and argv[0] == "daemon":
+            args = _daemon_parser().parse_args(argv[1:])
+            if args.action == "start":
+                _daemon_start()
+                return 0
+            if args.action == "stop":
+                if _daemon_stop():
+                    console.print("Daemon stopped.")
+                else:
+                    console.print("[yellow]Daemon was not running.[/yellow]")
+                return 0
             console.print(_daemon_status())
             return 0
-        console.print("[red]Usage: revdict daemon start|stop|status[/red]")
+
+        if not argv:
+            if not _index_exists():
+                _print_no_index_error()
+                return 1
+            query = console.input("[bold]> [/bold]")
+            return _run_query(query, top_n=30, interactive=sys.stdout.isatty())
+
+        args = _query_parser().parse_args(argv)
+    except _ArgumentError as error:
+        # markup=False: argparse's usage text contains literal square
+        # brackets (e.g. "[query ...]") that Rich would otherwise try to
+        # parse as its own markup tags, silently swallowing them.
+        console.print(
+            f"{error.usage.strip()}\nrevdict: error: {error.message}", style="red", markup=False
+        )
         return 1
 
-    if not argv:
-        if not _index_exists():
-            _print_no_index_error()
-            return 1
-        query = console.input("[bold]> [/bold]")
-        return _run_query(query, top_n=30, interactive=sys.stdout.isatty())
-
-    no_interactive = "--no-interactive" in argv
-    args = [arg for arg in argv if arg != "--no-interactive"]
-
-    top_n = 30
-    if "-n" in args:
-        position = args.index("-n")
-        top_n = int(args[position + 1])
-        args = args[:position] + args[position + 2 :]
-
-    query = " ".join(args)
+    query = " ".join(args.query)
 
     if not _index_exists():
         _print_no_index_error()
         return 1
 
-    interactive = not no_interactive and sys.stdout.isatty()
-    return _run_query(query, top_n, interactive)
+    interactive = not args.no_interactive and sys.stdout.isatty()
+    return _run_query(query, args.n, interactive)
 
 
 if __name__ == "__main__":
