@@ -71,10 +71,11 @@ def test_send_query_returns_none_on_malformed_json_response(tmp_path, monkeypatc
     socket_path = tmp_path / "daemon.sock"
     monkeypatch.setattr(daemon, "DAEMON_SOCKET_PATH", socket_path)
 
-    def _run_garbage_server():
+    def _run_garbage_server(socket_path, ready_event):
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(str(socket_path))
         server.listen(1)
+        ready_event.set()
         conn, _ = server.accept()
         with conn:
             while True:
@@ -85,15 +86,11 @@ def test_send_query_returns_none_on_malformed_json_response(tmp_path, monkeypatc
         server.close()
 
     ready_event = threading.Event()
-
-    def _run_and_signal():
-        ready_event.set()
-        _run_garbage_server()
-
-    server_thread = threading.Thread(target=_run_and_signal)
+    server_thread = threading.Thread(
+        target=_run_garbage_server, args=(socket_path, ready_event)
+    )
     server_thread.start()
     ready_event.wait(timeout=2)
-    time.sleep(0.1)  # give the server a moment to reach accept()
 
     result = daemon.send_query("happy", 10, timeout=2.0)
 
