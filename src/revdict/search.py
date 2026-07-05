@@ -146,8 +146,13 @@ def search(query: str, top_n: int = 10) -> dict:
     state = _load_state()
     metadata = state["metadata"]
 
+    # The retrieval pool must stay bigger than top_n even after dedup and
+    # exact-match exclusion shrink it, so a larger -n still has enough real
+    # candidates to draw from instead of silently returning fewer than asked.
+    retrieval_pool_size = max(75, top_n * 3)
+
     query_vec = state["embedder"].encode_query(query)
-    retrieved = cosine_top_k(query_vec, state["embeddings"], k=75)
+    retrieved = cosine_top_k(query_vec, state["embeddings"], k=retrieval_pool_size)
     definitions = [metadata[index]["definition"] for index, _ in retrieved]
     rerank_scores = state["reranker"].score(query, definitions)
     scored = [(retrieved[i][0], rerank_scores[i]) for i in range(len(retrieved))]

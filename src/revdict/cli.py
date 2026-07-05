@@ -111,12 +111,12 @@ def main(argv: list[str] | None = None) -> int:
             _print_no_index_error()
             return 1
         query = console.input("[bold]> [/bold]")
-        return _run_query(query, top_n=10, interactive=sys.stdout.isatty())
+        return _run_query(query, top_n=30, interactive=sys.stdout.isatty())
 
     no_interactive = "--no-interactive" in argv
     args = [arg for arg in argv if arg != "--no-interactive"]
 
-    top_n = 10
+    top_n = 30
     if "-n" in args:
         position = args.index("-n")
         top_n = int(args[position + 1])
