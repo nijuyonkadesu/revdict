@@ -63,3 +63,19 @@ revdict daemon stop     # stop it (e.g. before rebuilding the index)
 
 If you rebuild the index while a daemon is running, it keeps serving the old
 data until you stop it — `build-index` will remind you if this applies.
+
+## Optional: stress-marked pronunciation
+
+If you also have the [`emphasis`/`stressmark`](https://github.com/nijuyonkadesu/emphasis)
+project cloned locally, installing it into revdict's own venv adds a
+"Stress" column/line to results (e.g. `HAPpy`) showing primary/secondary
+syllable stress:
+
+```bash
+uv pip install -e /path/to/emphasis
+```
+
+This is a fully optional plugin — `stressmark` is never a declared
+dependency of `revdict`, so nothing changes for anyone who doesn't install
+it. Since the daemon loads it once at startup, run `revdict daemon stop`
+after installing or uninstalling it so the next query picks up the change.
