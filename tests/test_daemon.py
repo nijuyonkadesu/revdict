@@ -67,6 +67,40 @@ def test_send_query_returns_none_when_server_reports_an_error(tmp_path, monkeypa
     assert result is None
 
 
+def test_send_query_returns_none_on_malformed_json_response(tmp_path, monkeypatch):
+    socket_path = tmp_path / "daemon.sock"
+    monkeypatch.setattr(daemon, "DAEMON_SOCKET_PATH", socket_path)
+
+    def _run_garbage_server():
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(socket_path))
+        server.listen(1)
+        conn, _ = server.accept()
+        with conn:
+            while True:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    break
+            conn.sendall(b"not valid json {{{")
+        server.close()
+
+    ready_event = threading.Event()
+
+    def _run_and_signal():
+        ready_event.set()
+        _run_garbage_server()
+
+    server_thread = threading.Thread(target=_run_and_signal)
+    server_thread.start()
+    ready_event.wait(timeout=2)
+    time.sleep(0.1)  # give the server a moment to reach accept()
+
+    result = daemon.send_query("happy", 10, timeout=2.0)
+
+    server_thread.join(timeout=2)
+    assert result is None
+
+
 def test_handle_request_calls_search_fn_with_parsed_args_and_returns_json_result():
     calls = {}
 
