@@ -224,6 +224,32 @@ def test_run_query_prints_stress_column_when_present(monkeypatch, capsys):
     assert "HAPpy" in captured.out
 
 
+def test_run_query_prints_candidate_synonyms_column_when_present(monkeypatch, capsys):
+    fake_result = {
+        "exact_match": None,
+        "candidates": [
+            {
+                "headword": "joyful",
+                "pos": "adjective",
+                "definition": "feeling great happiness",
+                "examples": [],
+                "label": "joy",
+                "polarity": "positive",
+                "relevance": 90,
+                "stress": None,
+                "synonyms": ["glad", "elated"],
+            }
+        ],
+    }
+    monkeypatch.setattr(cli, "_get_search_result", lambda query, top_n: fake_result)
+
+    code = cli._run_query("happy", top_n=10, interactive=False)
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "glad" in captured.out and "elated" in captured.out
+
+
 def test_run_query_prints_static_results_when_not_interactive(monkeypatch, capsys):
     fake_result = {
         "exact_match": None,

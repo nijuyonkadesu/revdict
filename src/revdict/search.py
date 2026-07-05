@@ -186,6 +186,7 @@ def search(query: str, top_n: int = 10) -> dict:
                 "polarity": emotion["polarity"],
                 "relevance": relevance,
                 "stress": stress.mark(record["headword"], record["pos"]),
+                "synonyms": record.get("synonyms"),
             }
         )
 

@@ -50,15 +50,18 @@ def _print_static_results(result: dict) -> None:
     table.add_column("Definition")
     table.add_column("Stress")
     table.add_column("Emotion")
+    table.add_column("Synonyms")
     table.add_column("Relevance")
     for position, candidate in enumerate(result["candidates"], start=1):
         stress_text = Text.from_ansi(candidate["stress"]) if candidate.get("stress") else ""
+        synonyms = candidate.get("synonyms")
         table.add_row(
             str(position),
             candidate["headword"],
             candidate["definition"],
             stress_text,
             f"{candidate['label']} · {candidate['polarity']}",
+            ", ".join(synonyms) if synonyms else "",
             f"{candidate['relevance']}%",
         )
     console.print(table)

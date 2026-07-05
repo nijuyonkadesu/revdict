@@ -128,6 +128,28 @@ def test_render_candidate_preview_omits_stress_line_when_absent():
     assert "Stress:" not in preview
 
 
+def test_render_candidate_preview_shows_synonyms_when_present():
+    from revdict.picker import _render_candidate_preview
+
+    candidate = dict(_CANDIDATE_FIXTURE[0])
+    candidate["synonyms"] = ["glad", "content"]
+
+    preview = _render_candidate_preview(candidate)
+
+    assert "Synonyms: glad, content" in preview
+
+
+def test_render_candidate_preview_omits_synonyms_line_when_absent():
+    from revdict.picker import _render_candidate_preview
+
+    candidate = dict(_CANDIDATE_FIXTURE[0])
+    candidate["synonyms"] = None
+
+    preview = _render_candidate_preview(candidate)
+
+    assert "Synonyms:" not in preview
+
+
 def test_run_picker_returns_none_when_fzf_binary_is_missing(monkeypatch):
     monkeypatch.setattr(picker.shutil, "which", lambda name: None)
 

@@ -81,6 +81,9 @@ def _render_candidate_preview(candidate: dict) -> str:
         lines.append(f"Stress: {candidate['stress']}")
     lines.append(f"Emotion: {candidate['label']} · {candidate['polarity']}")
     lines.append(f"Match confidence: {candidate['relevance']}%")
+    synonyms = candidate.get("synonyms")
+    if synonyms:
+        lines.append(f"Synonyms: {', '.join(synonyms)}")
     if candidate["examples"]:
         lines.append("")
         for example in candidate["examples"]:
