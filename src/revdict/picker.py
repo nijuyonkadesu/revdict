@@ -58,6 +58,8 @@ def _render_exact_preview(exact_match: dict) -> str:
     lines = [f"Exact match — {exact_match['headword']}", ""]
     for sense in exact_match["senses"]:
         lines.append(f"({sense['pos']}) {sense['definition']}")
+        if sense.get("stress"):
+            lines.append(f"Stress: {sense['stress']}")
         lines.append(f"Emotion: {sense['label']} · {sense['polarity']}")
         synonyms = sense.get("synonyms")
         if synonyms:
@@ -74,9 +76,11 @@ def _render_candidate_preview(candidate: dict) -> str:
         "",
         candidate["definition"],
         "",
-        f"Emotion: {candidate['label']} · {candidate['polarity']}",
-        f"Match confidence: {candidate['relevance']}%",
     ]
+    if candidate.get("stress"):
+        lines.append(f"Stress: {candidate['stress']}")
+    lines.append(f"Emotion: {candidate['label']} · {candidate['polarity']}")
+    lines.append(f"Match confidence: {candidate['relevance']}%")
     if candidate["examples"]:
         lines.append("")
         for example in candidate["examples"]:

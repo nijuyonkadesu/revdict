@@ -95,6 +95,39 @@ def test_render_exact_preview_shows_real_per_sense_emotion_badge_and_synonyms():
     assert preview.count("Synonyms:") == 1
 
 
+def test_render_exact_preview_shows_stress_info_when_present():
+    fixture = {
+        "headword": "happy",
+        "senses": [
+            {
+                "pos": "adjective",
+                "definition": "feeling great pleasure",
+                "examples": [],
+                "source": "wordnet",
+                "synonyms": None,
+                "label": "joy",
+                "polarity": "positive",
+                "stress": "HAPpy",
+            }
+        ],
+    }
+
+    preview = _render_exact_preview(fixture)
+
+    assert "Stress: HAPpy" in preview
+
+
+def test_render_candidate_preview_omits_stress_line_when_absent():
+    from revdict.picker import _render_candidate_preview
+
+    candidate = dict(_CANDIDATE_FIXTURE[0])
+    candidate["stress"] = None
+
+    preview = _render_candidate_preview(candidate)
+
+    assert "Stress:" not in preview
+
+
 def test_run_picker_returns_none_when_fzf_binary_is_missing(monkeypatch):
     monkeypatch.setattr(picker.shutil, "which", lambda name: None)
 

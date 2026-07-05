@@ -3,6 +3,7 @@ import sys
 
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 from revdict import daemon
 from revdict.paths import INDEX_DIR
@@ -28,13 +29,16 @@ def _print_static_results(result: dict) -> None:
         table = Table(title=f"Exact match — {result['exact_match']['headword']}")
         table.add_column("POS")
         table.add_column("Definition")
+        table.add_column("Stress")
         table.add_column("Emotion")
         table.add_column("Synonyms")
         for sense in result["exact_match"]["senses"]:
             synonyms = sense.get("synonyms")
+            stress_text = Text.from_ansi(sense["stress"]) if sense.get("stress") else ""
             table.add_row(
                 sense["pos"],
                 sense["definition"],
+                stress_text,
                 f"{sense['label']} · {sense['polarity']}",
                 ", ".join(synonyms) if synonyms else "",
             )
@@ -44,13 +48,16 @@ def _print_static_results(result: dict) -> None:
     table.add_column("#")
     table.add_column("Word")
     table.add_column("Definition")
+    table.add_column("Stress")
     table.add_column("Emotion")
     table.add_column("Relevance")
     for position, candidate in enumerate(result["candidates"], start=1):
+        stress_text = Text.from_ansi(candidate["stress"]) if candidate.get("stress") else ""
         table.add_row(
             str(position),
             candidate["headword"],
             candidate["definition"],
+            stress_text,
             f"{candidate['label']} · {candidate['polarity']}",
             f"{candidate['relevance']}%",
         )
