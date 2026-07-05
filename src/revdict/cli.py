@@ -1,26 +1,12 @@
-import os
+import shutil
 import sys
 
-# huggingface_hub/transformers snapshot these into module-level constants the
-# moment they're first imported, so they must be set before that import
-# happens anywhere in the process — not merely before model construction.
-# `revdict.data.build_index` (imported below) transitively imports them, so
-# this has to run first, at true module-load time, based on real sys.argv
-# (not the `argv` parameter `main()` accepts for testability).
-if not (len(sys.argv) > 1 and sys.argv[1] == "build-index"):
-    os.environ.setdefault("HF_HUB_OFFLINE", "1")
-os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
-os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+from rich.console import Console
+from rich.table import Table
 
-import shutil  # noqa: E402
-
-from rich.console import Console  # noqa: E402
-from rich.table import Table  # noqa: E402
-
-from revdict import search as search_mod  # noqa: E402
-from revdict.data.build_index import build  # noqa: E402
-from revdict.paths import INDEX_DIR  # noqa: E402
-from revdict.picker import PickerError, run_picker  # noqa: E402
+from revdict import daemon
+from revdict.paths import INDEX_DIR
+from revdict.picker import PickerError, run_picker
 
 console = Console()
 
@@ -71,12 +57,57 @@ def _print_static_results(result: dict) -> None:
     console.print(table)
 
 
+def _local_search_fallback(query: str, top_n: int) -> dict:
+    from revdict.query_env import configure_offline_quiet_env
+
+    configure_offline_quiet_env()
+    from revdict import search as search_mod
+
+    return search_mod.search(query, top_n=top_n)
+
+
+def _get_search_result(query: str, top_n: int) -> dict:
+    result = daemon.send_query(query, top_n)
+    if result is not None:
+        return result
+    if daemon.ensure_daemon_running():
+        result = daemon.send_query(query, top_n)
+        if result is not None:
+            return result
+    return _local_search_fallback(query, top_n)
+
+
+def _build_index(skip_confirm: bool) -> None:
+    from revdict.data.build_index import build
+
+    build(skip_confirm=skip_confirm)
+
+    if "is running" in daemon.daemon_status():
+        console.print(
+            "[yellow]A revdict daemon is still running with the old index loaded — "
+            "run `revdict daemon stop` so your next query picks up the refreshed "
+            "data.[/yellow]"
+        )
+
+
+def _daemon_start() -> None:
+    daemon.run_server()
+
+
+def _daemon_stop() -> bool:
+    return daemon.stop_daemon()
+
+
+def _daemon_status() -> str:
+    return daemon.daemon_status()
+
+
 def _run_query(query: str, top_n: int, interactive: bool) -> int:
     if not query.strip():
         console.print("[yellow]Please enter a word or phrase.[/yellow]")
         return 0
 
-    result = search_mod.search(query, top_n=top_n)
+    result = _get_search_result(query, top_n)
 
     if interactive:
         try:
@@ -103,8 +134,25 @@ def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
 
     if argv and argv[0] == "build-index":
-        build(skip_confirm="--yes" in argv)
+        _build_index(skip_confirm="--yes" in argv)
         return 0
+
+    if argv and argv[0] == "daemon":
+        action = argv[1] if len(argv) > 1 else None
+        if action == "start":
+            _daemon_start()
+            return 0
+        if action == "stop":
+            if _daemon_stop():
+                console.print("Daemon stopped.")
+            else:
+                console.print("[yellow]Daemon was not running.[/yellow]")
+            return 0
+        if action == "status":
+            console.print(_daemon_status())
+            return 0
+        console.print("[red]Usage: revdict daemon start|stop|status[/red]")
+        return 1
 
     if not argv:
         if not _index_exists():
