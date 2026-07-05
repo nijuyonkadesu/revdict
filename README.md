@@ -53,7 +53,7 @@ revdict "happy" --no-interactive
 revdict "happy" --no-interactive -n 10
 ```
 
-The first query in a while starts a background daemon that keeps the index
+The first query when no daemon is running starts a background daemon that keeps the index
 and models warm in memory, so subsequent queries are fast:
 
 ```bash

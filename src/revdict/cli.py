@@ -82,7 +82,7 @@ def _build_index(skip_confirm: bool) -> None:
 
     build(skip_confirm=skip_confirm)
 
-    if "is running" in daemon.daemon_status():
+    if daemon.is_daemon_running():
         console.print(
             "[yellow]A revdict daemon is still running with the old index loaded — "
             "run `revdict daemon stop` so your next query picks up the refreshed "

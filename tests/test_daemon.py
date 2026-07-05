@@ -133,6 +133,67 @@ def test_handle_request_returns_error_payload_on_malformed_json():
     assert "error" in payload
 
 
+def test_socket_is_reachable_returns_false_when_socket_file_does_not_exist(tmp_path, monkeypatch):
+    monkeypatch.setattr(daemon, "DAEMON_SOCKET_PATH", tmp_path / "does-not-exist.sock")
+
+    assert daemon._socket_is_reachable() is False
+
+
+def test_socket_is_reachable_returns_true_for_a_real_listening_socket(tmp_path, monkeypatch):
+    socket_path = tmp_path / "daemon.sock"
+    monkeypatch.setattr(daemon, "DAEMON_SOCKET_PATH", socket_path)
+
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(socket_path))
+    server.listen(1)
+
+    try:
+        assert daemon._socket_is_reachable() is True
+    finally:
+        server.close()
+
+
+def test_run_server_bails_immediately_when_a_live_daemon_already_owns_the_socket(
+    tmp_path, monkeypatch
+):
+    """The core regression test for the bind-race bug: run_server() must not
+    attempt to steal/rebind the socket (which would orphan the live owner)
+    when one is already reachable -- it should return immediately, before
+    ever importing revdict.search or touching the PID/socket files."""
+    socket_path = tmp_path / "daemon.sock"
+    pid_path = tmp_path / "daemon.pid"
+    monkeypatch.setattr(daemon, "DAEMON_SOCKET_PATH", socket_path)
+    monkeypatch.setattr(daemon, "DAEMON_PID_PATH", pid_path)
+    pid_path.write_text("999999")  # a real "owner" PID, should be left untouched
+
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(socket_path))
+    server.listen(1)
+
+    try:
+        daemon.run_server()  # must return quickly, not hang or raise
+        # The "losing" run_server() must not have touched the live owner's files.
+        assert pid_path.read_text() == "999999"
+        assert socket_path.exists()
+    finally:
+        server.close()
+
+
+def test_is_daemon_running_true_only_with_live_pid_and_existing_socket(tmp_path, monkeypatch):
+    pid_path = tmp_path / "daemon.pid"
+    socket_path = tmp_path / "daemon.sock"
+    monkeypatch.setattr(daemon, "DAEMON_PID_PATH", pid_path)
+    monkeypatch.setattr(daemon, "DAEMON_SOCKET_PATH", socket_path)
+
+    assert daemon.is_daemon_running() is False  # no pid file at all
+
+    pid_path.write_text(str(os.getpid()))
+    assert daemon.is_daemon_running() is False  # pid alive but no socket file
+
+    socket_path.write_text("")
+    assert daemon.is_daemon_running() is True  # both present
+
+
 def test_ensure_daemon_running_returns_true_immediately_when_already_up(
     tmp_path, monkeypatch
 ):

@@ -37,6 +37,18 @@ def _remove_stale_files() -> None:
             pass
 
 
+def _socket_is_reachable() -> bool:
+    if not DAEMON_SOCKET_PATH.exists():
+        return False
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+            probe.settimeout(0.5)
+            probe.connect(str(DAEMON_SOCKET_PATH))
+        return True
+    except OSError:
+        return False
+
+
 def send_query(query: str, top_n: int, timeout: float = 30.0) -> dict | None:
     if not DAEMON_SOCKET_PATH.exists():
         return None
@@ -69,8 +81,7 @@ def send_query(query: str, top_n: int, timeout: float = 30.0) -> dict | None:
 
 
 def ensure_daemon_running(startup_timeout: float = 20.0) -> bool:
-    pid = _read_pid()
-    if pid is not None and _process_is_alive(pid) and DAEMON_SOCKET_PATH.exists():
+    if _socket_is_reachable():
         return True
     _remove_stale_files()
 
@@ -111,9 +122,14 @@ def stop_daemon() -> bool:
     return True
 
 
-def daemon_status() -> str:
+def is_daemon_running() -> bool:
     pid = _read_pid()
-    if pid is not None and _process_is_alive(pid) and DAEMON_SOCKET_PATH.exists():
+    return pid is not None and _process_is_alive(pid) and DAEMON_SOCKET_PATH.exists()
+
+
+def daemon_status() -> str:
+    if is_daemon_running():
+        pid = _read_pid()
         return f"revdict daemon is running (pid {pid})."
     return "revdict daemon is not running."
 
@@ -128,6 +144,12 @@ def _handle_request(request_text: str, search_fn) -> str:
 
 
 def run_server() -> None:
+    # Cheap early exit before paying for the model load: if a live daemon
+    # already owns the socket, we lost the spawn race -- bail immediately
+    # rather than wastefully loading a ~2GB index we'd just discard.
+    if _socket_is_reachable():
+        return
+
     from revdict.query_env import configure_offline_quiet_env
 
     configure_offline_quiet_env()
@@ -137,7 +159,18 @@ def run_server() -> None:
     _remove_stale_files()
 
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(str(DAEMON_SOCKET_PATH))
+    try:
+        server.bind(str(DAEMON_SOCKET_PATH))
+    except OSError:
+        # Lost a narrow race against a sibling daemon that bound the path
+        # between our reachability check and this bind. If it's now live,
+        # exit gracefully (the spec's bind-race-loser behavior); otherwise
+        # this is a genuine, unexpected bind failure -- propagate it.
+        if _socket_is_reachable():
+            server.close()
+            return
+        raise
+
     server.listen(5)
     DAEMON_PID_PATH.write_text(str(os.getpid()))
 

@@ -32,7 +32,7 @@ def test_build_index_warns_when_a_daemon_is_still_running_afterward(monkeypatch,
     import revdict.data.build_index as build_index_module
 
     monkeypatch.setattr(build_index_module, "build", lambda skip_confirm: None)
-    monkeypatch.setattr(cli.daemon, "daemon_status", lambda: "revdict daemon is running (pid 1).")
+    monkeypatch.setattr(cli.daemon, "is_daemon_running", lambda: True)
 
     cli._build_index(skip_confirm=True)
 
@@ -44,7 +44,7 @@ def test_build_index_says_nothing_when_no_daemon_is_running(monkeypatch, capsys)
     import revdict.data.build_index as build_index_module
 
     monkeypatch.setattr(build_index_module, "build", lambda skip_confirm: None)
-    monkeypatch.setattr(cli.daemon, "daemon_status", lambda: "revdict daemon is not running.")
+    monkeypatch.setattr(cli.daemon, "is_daemon_running", lambda: False)
 
     cli._build_index(skip_confirm=True)
 
