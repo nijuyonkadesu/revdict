@@ -3,6 +3,7 @@ import tempfile
 from pathlib import Path
 
 from revdict.data.wiktionary_source import (
+    _combine_glosses,
     parse_filtered_entries,
     stream_filtered_entries_from_gzip,
 )
@@ -21,14 +22,28 @@ ENGLISH_FORM_OF_LINE = (
     '"senses": [{"glosses": ["plural of dictionary"], "tags": ["form-of", "plural"], '
     '"form_of": [{"word": "dictionary"}]}]}'
 )
+# Real example found in the raw data: "bigge" tagged alt-of/obsolete, glosses
+# self-referentially restating the target word ("Obsolete spelling of big.")
+# -- these weren't caught by the form-of check (wiktextract treats
+# alternative/obsolete spellings as a distinct tag from inflectional forms).
+ENGLISH_ALT_OF_LINE = (
+    '{"word": "bigge", "pos": "adj", "lang": "English", "lang_code": "en", '
+    '"senses": [{"glosses": ["Obsolete spelling of big."], "tags": ["alt-of", "obsolete"]}]}'
+)
 NON_ENGLISH_LINE = (
     '{"word": "diccionario", "pos": "noun", "lang": "Spanish", "lang_code": "es", '
     '"senses": [{"glosses": ["Un diccionario"]}]}'
 )
 
 
-def test_parse_filtered_entries_keeps_english_drops_form_of_and_non_english():
-    lines = [ENGLISH_NOUN_LINE, ENGLISH_ADJ_LINE, ENGLISH_FORM_OF_LINE, NON_ENGLISH_LINE]
+def test_parse_filtered_entries_keeps_english_drops_form_of_alt_of_and_non_english():
+    lines = [
+        ENGLISH_NOUN_LINE,
+        ENGLISH_ADJ_LINE,
+        ENGLISH_FORM_OF_LINE,
+        ENGLISH_ALT_OF_LINE,
+        NON_ENGLISH_LINE,
+    ]
     records = parse_filtered_entries(lines)
     headwords = {r["headword"] for r in records}
     assert headwords == {"dictionary", "green with envy"}
@@ -41,6 +56,25 @@ def test_parse_filtered_entries_keeps_english_drops_form_of_and_non_english():
 
     idiom_record = next(r for r in records if r["headword"] == "green with envy")
     assert idiom_record["pos"] == "adjective"
+
+
+def test_combine_glosses_returns_the_single_gloss_unchanged():
+    assert _combine_glosses(["Very jealous."]) == "Very jealous."
+
+
+def test_combine_glosses_joins_a_two_level_hierarchy():
+    # Real example from the raw data: many senses of "free" all start with
+    # this same broad category gloss -- keeping only glosses[0] would make
+    # them all read identically and collapse together in corpus.py's dedup.
+    result = _combine_glosses(["Unconstrained.", "Not imprisoned or enslaved."])
+    assert result == "Unconstrained; Not imprisoned or enslaved."
+
+
+def test_combine_glosses_joins_a_three_level_hierarchy():
+    result = _combine_glosses(
+        ["Terms relating to animals.", "A mammal of the family Felidae.", "A house pet."]
+    )
+    assert result == "Terms relating to animals; A mammal of the family Felidae; A house pet."
 
 
 def test_stream_filtered_entries_from_gzip_reads_a_real_gz_file():

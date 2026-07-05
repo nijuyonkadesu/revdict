@@ -13,6 +13,21 @@ def _normalize_pos(pos: str) -> str:
     return _POS_NORMALIZATION.get(pos, pos)
 
 
+def _combine_glosses(glosses: list[str]) -> str:
+    """Wiktionary's `glosses` field is often a hierarchy, not a flat list --
+    e.g. ["Unconstrained.", "Not imprisoned or enslaved."] (broad category,
+    then the actual specific meaning). Taking only glosses[0] grabs the
+    vague category and throws away the specific part -- and since many
+    different senses of a word share the same broad first-level gloss (all
+    8 senses of "free" start with "Unconstrained."), doing so also made
+    corpus.py's definition-based dedup collapse genuinely different senses
+    into one. Joining the full hierarchy keeps each sense's text distinct
+    and preserves the specific meaning."""
+    if len(glosses) == 1:
+        return glosses[0]
+    return "; ".join(gloss.rstrip(".") for gloss in glosses) + "."
+
+
 def iter_filtered_entries(lines: Iterable[str]) -> Iterator[dict]:
     for line in lines:
         line = line.strip()
@@ -27,7 +42,7 @@ def iter_filtered_entries(lines: Iterable[str]) -> Iterator[dict]:
             continue
         for sense in entry.get("senses", []):
             tags = sense.get("tags") or []
-            if "form-of" in tags or "form_of" in sense:
+            if "form-of" in tags or "form_of" in sense or "alt-of" in tags:
                 continue
             glosses = sense.get("glosses") or []
             if not glosses:
@@ -40,7 +55,7 @@ def iter_filtered_entries(lines: Iterable[str]) -> Iterator[dict]:
             yield {
                 "headword": word,
                 "pos": _normalize_pos(pos),
-                "definition": glosses[0],
+                "definition": _combine_glosses(glosses),
                 "examples": examples,
                 "source": "wiktionary",
             }
