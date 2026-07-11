@@ -13,9 +13,20 @@ from revdict.paths import INDEX_DIR
 _state: dict = {}
 
 
-def cosine_top_k(query_vec: np.ndarray, matrix: np.ndarray, k: int) -> list[tuple[int, float]]:
+def cosine_top_k(
+    query_vec: np.ndarray,
+    matrix: np.ndarray,
+    k: int,
+    matrix_norms: np.ndarray | None = None,
+) -> list[tuple[int, float]]:
+    """`matrix_norms` should be `_load_state()`'s precomputed
+    `embedding_norms` in production -- computing it fresh here is a ~0.9s
+    cost over the full ~800K-row embedding matrix (measured), which used to
+    be paid on every single query. Recomputed on the fly only when omitted,
+    e.g. in tests with small matrices."""
     query_norm = query_vec / (np.linalg.norm(query_vec) + 1e-12)
-    matrix_norms = np.linalg.norm(matrix, axis=1) + 1e-12
+    if matrix_norms is None:
+        matrix_norms = np.linalg.norm(matrix, axis=1) + 1e-12
     scores = (matrix @ query_norm) / matrix_norms
     k = min(k, len(scores))
     top_indices = np.argpartition(-scores, k - 1)[:k]
@@ -137,6 +148,7 @@ def _load_literary_frequency() -> dict[str, float]:
 def _load_state() -> dict:
     if not _state:
         _state["embeddings"] = np.load(INDEX_DIR / "embeddings.npy")
+        _state["embedding_norms"] = np.linalg.norm(_state["embeddings"], axis=1) + 1e-12
         _state["metadata"] = dictionary.load_metadata(INDEX_DIR)
         _state["word_index"] = dictionary.load_word_index(INDEX_DIR)
         _state["embedder"] = Embedder()
@@ -197,7 +209,9 @@ def search(query: str, top_n: int = 10) -> dict:
     retrieval_pool_size = max(75, top_n * 3)
 
     query_vec = state["embedder"].encode_query(query)
-    retrieved = cosine_top_k(query_vec, state["embeddings"], k=retrieval_pool_size)
+    retrieved = cosine_top_k(
+        query_vec, state["embeddings"], k=retrieval_pool_size, matrix_norms=state["embedding_norms"]
+    )
     definitions = [metadata[index]["definition"] for index, _ in retrieved]
     rerank_scores = state["reranker"].score(query, definitions)
     literary_frequency = state["literary_frequency"]
