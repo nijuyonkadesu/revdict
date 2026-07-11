@@ -266,3 +266,68 @@ def test_run_picker_pins_the_exact_match_with_a_real_emotion_badge_not_placehold
     assert "exact match" not in pinned_line
     assert "n/a" not in pinned_line
     assert result == "happy"
+
+
+def test_build_live_session_args_includes_disabled_and_reload_bindings():
+    args = picker.build_live_session_args(
+        preview_dir=Path("/tmp/preview"),
+        history_path=Path("/tmp/history"),
+        python_executable="/usr/bin/python3",
+    )
+
+    assert "--disabled" in args
+    joined = " ".join(args)
+    assert "change:reload:sleep 0.1" in joined
+    assert "/usr/bin/python3 -u -m revdict.cli --query-only {q}" in joined
+    assert "start:reload:sleep 0.1" in joined
+
+
+def test_build_live_session_args_includes_history_file():
+    args = picker.build_live_session_args(
+        preview_dir=Path("/tmp/preview"),
+        history_path=Path("/tmp/history"),
+        python_executable="/usr/bin/python3",
+    )
+
+    assert "--history=/tmp/history" in args
+
+
+def test_build_live_session_args_rebinds_esc_enter_and_arrow_keys():
+    args = picker.build_live_session_args(
+        preview_dir=Path("/tmp/preview"),
+        history_path=Path("/tmp/history"),
+        python_executable="/usr/bin/python3",
+    )
+
+    joined = " ".join(args)
+    assert "esc:clear-query" in joined
+    assert "enter:execute-silent(echo {q} >> /tmp/history)+clear-query" in joined
+    assert "up:prev-history" in joined
+    assert "down:next-history" in joined
+    assert "ctrl-p:up" in joined
+    assert "ctrl-n:down" in joined
+
+
+def test_build_live_session_args_uses_the_given_debounce_and_threshold():
+    args = picker.build_live_session_args(
+        preview_dir=Path("/tmp/preview"),
+        history_path=Path("/tmp/history"),
+        python_executable="/usr/bin/python3",
+        debounce_seconds=0.25,
+        layout_threshold_columns=80,
+    )
+
+    joined = " ".join(args)
+    assert "sleep 0.25" in joined
+    assert "<80(up,50%)" in joined
+
+
+def test_build_live_session_args_preview_command_reads_from_the_preview_dir():
+    args = picker.build_live_session_args(
+        preview_dir=Path("/tmp/preview"),
+        history_path=Path("/tmp/history"),
+        python_executable="/usr/bin/python3",
+    )
+
+    joined = " ".join(args)
+    assert "cat /tmp/preview/{5}.txt" in joined

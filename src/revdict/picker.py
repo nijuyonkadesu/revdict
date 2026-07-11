@@ -181,3 +181,55 @@ def run_picker(candidates: list[dict], exact_match: dict | None) -> str | None:
                 return exact_match["headword"]
             return candidates[selection_index - 1]["headword"]
         return candidates[selection_index]["headword"]
+
+
+def build_live_session_args(
+    preview_dir: Path,
+    history_path: Path,
+    python_executable: str,
+    debounce_seconds: float = 0.1,
+    layout_threshold_columns: int = 100,
+) -> list[str]:
+    """Builds the fzf argument list for the persistent live-typing session
+    (see docs/superpowers/specs/2026-07-11-live-interactive-cli-design.md).
+    Pure and side-effect-free so the exact bindings are unit-testable
+    without a real terminal -- run_live_session is the thin wrapper that
+    actually invokes this as a subprocess."""
+    reload_command = (
+        f"sleep {debounce_seconds}; "
+        f"{python_executable} -u -m revdict.cli --query-only {{q}}"
+    )
+    return [
+        "fzf",
+        "--disabled",
+        "--delimiter",
+        "\t",
+        "--with-nth=1,2,3,4",
+        f"--history={history_path}",
+        "--preview",
+        f"cat {preview_dir}/{{5}}.txt",
+        "--preview-window",
+        f"right,50%,wrap,<{layout_threshold_columns}(up,50%)",
+        "--bind",
+        f"start:reload:{reload_command}",
+        "--bind",
+        f"change:reload:{reload_command}",
+        "--bind",
+        "esc:clear-query",
+        "--bind",
+        f"enter:execute-silent(echo {{q}} >> {history_path})+clear-query",
+        "--bind",
+        "ctrl-c:abort",
+        "--bind",
+        "ctrl-d:abort",
+        "--bind",
+        "up:prev-history",
+        "--bind",
+        "down:next-history",
+        "--bind",
+        "ctrl-p:up",
+        "--bind",
+        "ctrl-n:down",
+        "--bind",
+        "?:toggle-preview",
+    ]
