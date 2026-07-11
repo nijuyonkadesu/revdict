@@ -1,6 +1,8 @@
 import argparse
+import os
 import shutil
 import sys
+from pathlib import Path
 
 from rich.console import Console
 from rich.table import Table
@@ -8,9 +10,11 @@ from rich.text import Text
 
 from revdict import daemon
 from revdict.paths import INDEX_DIR
-from revdict.picker import PickerError, run_picker
+from revdict.picker import PickerError, run_picker, write_candidate_files
 
 console = Console()
+
+LIVE_SESSION_TOP_N = 15
 
 
 class _ArgumentError(Exception):
@@ -195,6 +199,18 @@ def _run_query(query: str, top_n: int, interactive: bool) -> int:
     return 0
 
 
+def _run_query_only(query: str) -> int:
+    if not query.strip():
+        return 0
+
+    preview_dir = Path(os.environ["REVDICT_LIVE_PREVIEW_DIR"])
+    result = _get_search_result(query, LIVE_SESSION_TOP_N)
+    lines = write_candidate_files(preview_dir, result["candidates"], result["exact_match"])
+    for line in lines:
+        print(line)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
 
@@ -217,6 +233,10 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             console.print(_daemon_status())
             return 0
+
+        if argv and argv[0] == "--query-only":
+            query = argv[1] if len(argv) > 1 else ""
+            return _run_query_only(query)
 
         if not argv:
             if not _index_exists():
