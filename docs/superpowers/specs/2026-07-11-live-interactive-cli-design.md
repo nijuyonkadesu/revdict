@@ -77,13 +77,23 @@ are rebound:
 | Esc | `abort` (quits) | `clear-query` | Esc should clear what you've typed and let you keep searching, not end the session. |
 | Ctrl-C, Ctrl-D | `abort` / `delete-char/eof` | `abort` (kept/confirmed) | These are the actual "quit revdict" keys. |
 | Enter | `accept` (selects highlighted item, exits) | `execute-silent(echo {q} >> HISTORY_FILE)+clear-query` | Enter finalizes the *typed query* into history and clears the box for the next search — it does not "select" a candidate and end the session. There is no separate select-and-exit action in this design: the preview pane already shows full detail (definition, synonyms, emotion, stress) for whatever candidate is highlighted, live, as you arrow through the list — no extra keypress needed to see it. |
-| Up / Down | `up`/`down` (move list cursor) | `prev-history` / `next-history` | Recalls previous queries from this session, like shell history. |
+| Up / Down | `up`/`down` (move list cursor) | `transform-query:tail -n 1 HISTORY_FILE` / `clear-query` | Up recalls the most recently committed query; Down clears the box. |
 | Ctrl-P / Ctrl-N | (not bound to list movement by default in this scheme) | `up` / `down` | List-cursor movement moves here since plain arrows are now history. |
 
 `HISTORY_FILE` is a new file under `CACHE_DIR` (e.g.
-`~/.cache/rev_dictionary/query_history`), passed to fzf via
-`--history=HISTORY_FILE` so `prev-history`/`next-history` have something to
-cycle through.
+`~/.cache/rev_dictionary/query_history`), self-managed entirely by the
+`enter` and `up` bindings above — fzf's own `--history=` flag is
+deliberately NOT used. That flag only loads history at process start and
+writes it back at exit, so it cannot recall a query committed by `enter`
+earlier in the *same* running session (confirmed empirically against the
+real fzf binary — see the implementation plan's fix note for detail).
+`transform-query` reads the file live and, confirmed empirically, also
+re-triggers the `change:reload` binding, so the result list refreshes to
+match the recalled query automatically. This does trade away multi-step
+history *cycling* (repeated presses of Up always show the same
+most-recently-committed query, not progressively older ones) — a
+deliberate, small scope reduction to avoid a stateful position-tracking
+mechanism for a "maybe" feature the user themselves hedged on.
 
 ### The `--query-only` entry point
 
