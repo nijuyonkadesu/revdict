@@ -8,3 +8,4 @@ RAW_NGRAM_FICTION_TOTALCOUNTS_PATH = CACHE_DIR / "raw-ngram-fiction-totalcounts.
 DAEMON_SOCKET_PATH = CACHE_DIR / "daemon.sock"
 DAEMON_PID_PATH = CACHE_DIR / "daemon.pid"
 DAEMON_LOG_PATH = CACHE_DIR / "daemon.log"
+QUERY_HISTORY_PATH = CACHE_DIR / "query_history"

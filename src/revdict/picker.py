@@ -91,50 +91,63 @@ def _render_candidate_preview(candidate: dict) -> str:
     return "\n".join(lines)
 
 
+def write_candidate_files(
+    tmp_path: Path, candidates: list[dict], exact_match: dict | None
+) -> list[str]:
+    """Writes one preview .txt file per row to tmp_path and returns the
+    matching tab-delimited fzf input lines. Shared by run_picker's one-shot
+    session (writes once, invokes fzf once) and the live session's
+    change:reload path (invoked repeatedly against the same tmp_path as the
+    query changes)."""
+    lines = []
+    index = 0
+
+    if exact_match is not None:
+        first_sense = exact_match["senses"][0]
+        (tmp_path / f"{index}.txt").write_text(
+            _render_exact_preview(exact_match), encoding="utf-8"
+        )
+        lines.append(
+            format_candidate_line(
+                exact_match["headword"],
+                first_sense["pos"],
+                first_sense["definition"],
+                first_sense["label"],
+                first_sense["polarity"],
+                100,
+                index=index,
+                is_exact=True,
+            )
+        )
+        index += 1
+
+    for candidate in candidates:
+        (tmp_path / f"{index}.txt").write_text(
+            _render_candidate_preview(candidate), encoding="utf-8"
+        )
+        lines.append(
+            format_candidate_line(
+                candidate["headword"],
+                candidate["pos"],
+                candidate["definition"],
+                candidate["label"],
+                candidate["polarity"],
+                candidate["relevance"],
+                index=index,
+            )
+        )
+        index += 1
+
+    return lines
+
+
 def run_picker(candidates: list[dict], exact_match: dict | None) -> str | None:
     if shutil.which("fzf") is None:
         return None
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
-        lines = []
-        index = 0
-
-        if exact_match is not None:
-            first_sense = exact_match["senses"][0]
-            (tmp_path / f"{index}.txt").write_text(
-                _render_exact_preview(exact_match), encoding="utf-8"
-            )
-            lines.append(
-                format_candidate_line(
-                    exact_match["headword"],
-                    first_sense["pos"],
-                    first_sense["definition"],
-                    first_sense["label"],
-                    first_sense["polarity"],
-                    100,
-                    index=index,
-                    is_exact=True,
-                )
-            )
-            index += 1
-
-        for candidate in candidates:
-            (tmp_path / f"{index}.txt").write_text(
-                _render_candidate_preview(candidate), encoding="utf-8"
-            )
-            lines.append(
-                format_candidate_line(
-                    candidate["headword"],
-                    candidate["pos"],
-                    candidate["definition"],
-                    candidate["label"],
-                    candidate["polarity"],
-                    candidate["relevance"],
-                    index=index,
-                )
-            )
-            index += 1
+        lines = write_candidate_files(tmp_path, candidates, exact_match)
 
         input_text = "\n".join(lines) + "\n"
         result = subprocess.run(

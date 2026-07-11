@@ -1,5 +1,7 @@
 # tests/test_picker.py
 import pytest
+import tempfile
+from pathlib import Path
 
 from revdict import picker
 from revdict.picker import (
@@ -8,6 +10,7 @@ from revdict.picker import (
     format_candidate_line,
     parse_selection,
     run_picker,
+    write_candidate_files,
 )
 
 _CANDIDATE_FIXTURE = [
@@ -52,6 +55,26 @@ _EXACT_MATCH_FIXTURE = {
         },
     ],
 }
+
+
+def test_write_candidate_files_returns_one_line_per_candidate_plus_exact_match():
+    with tempfile.TemporaryDirectory() as tmp:
+        lines = write_candidate_files(Path(tmp), _CANDIDATE_FIXTURE, _EXACT_MATCH_FIXTURE)
+
+        assert len(lines) == 2  # exact match + 1 candidate
+        assert lines[0].startswith("★")
+        assert (Path(tmp) / "0.txt").exists()
+        assert (Path(tmp) / "1.txt").exists()
+
+
+def test_write_candidate_files_with_no_exact_match_writes_only_candidates():
+    with tempfile.TemporaryDirectory() as tmp:
+        lines = write_candidate_files(Path(tmp), _CANDIDATE_FIXTURE, None)
+
+        assert len(lines) == 1
+        assert not lines[0].startswith("★")
+        assert (Path(tmp) / "0.txt").exists()
+        assert not (Path(tmp) / "1.txt").exists()
 
 
 def test_format_candidate_line_has_five_tab_fields_and_marks_exact_match():
