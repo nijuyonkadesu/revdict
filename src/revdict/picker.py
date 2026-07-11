@@ -192,13 +192,26 @@ def build_live_session_args(
     history_path: Path,
     python_executable: str,
     debounce_seconds: float = 0.1,
-    layout_threshold_columns: int = 100,
+    layout_threshold_columns: int = 50,
 ) -> list[str]:
     """Builds the fzf argument list for the persistent live-typing session
     (see docs/superpowers/specs/2026-07-11-live-interactive-cli-design.md).
     Pure and side-effect-free so the exact bindings are unit-testable
     without a real terminal -- run_live_session is the thin wrapper that
-    actually invokes this as a subprocess."""
+    actually invokes this as a subprocess.
+
+    layout_threshold_columns is in the units fzf itself uses for the
+    `<SIZE_THRESHOLD` clause of --preview-window: the width of the PREVIEW
+    WINDOW, not the full terminal (`man fzf`, PREVIEW WINDOW section). Since
+    the base layout below is `right,50%`, the preview window is ~half the
+    terminal's width, so this value should be about half of the real
+    terminal-column width you want the stacked-layout switch to trigger at.
+    Empirically confirmed in a real tmux/fzf session (task-5 manual
+    validation): 50 here produces the layout switch at a real terminal
+    width of 100 columns, matching the design spec's target. An earlier
+    default of 100 was a bug -- it produced a real-world switch at ~200
+    terminal columns, double what was intended, because it was mistakenly
+    set as if the threshold applied to the full terminal width."""
     reload_command = (
         f"sleep {debounce_seconds}; "
         f"{python_executable} -u -m revdict.cli --query-only {{q}}"
