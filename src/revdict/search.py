@@ -1,3 +1,4 @@
+import json
 import math
 
 import numpy as np
@@ -92,6 +93,47 @@ def absolute_relevance(scores: list[float]) -> list[int]:
     return [round(100 * _stable_sigmoid(score)) for score in scores]
 
 
+def combine_score(
+    raw_score: float, headword: str, literary_frequency: dict[str, float]
+) -> float:
+    """Adds a real, measured "how common is this word in modern published
+    fiction" signal to the raw reranker score -- this is what actually
+    separates common, natural-sounding synonyms (e.g. "glad") from obscure
+    or dialectal ones (e.g. "wealful", "vogie") when both restate the query
+    word in their definition equally, which the reranker score alone can't
+    do (verified: overlap count is identical across good and bad candidates
+    in the real "happy" investigation, so it was never the discriminator).
+
+    literary_frequency is keyed by lowercased headword and holds a
+    zipf-scale score (log10 of matches per billion words in the Google
+    Books Ngram "English Fiction" corpus, 2010-2019) -- see
+    literary_frequency_source.compute_literary_frequencies. A missing entry
+    means one of two different things, handled differently:
+
+    - The headword is hyphenated or multi-word: the Ngram corpus's
+      tokenizer doesn't represent these at all (confirmed: even "well-known"
+      has zero raw occurrences), so a missing entry here is inconclusive,
+      not evidence of rarity. The raw score is left unadjusted.
+    - The headword is a single token: a confirmed zero-attestation result
+      across ten years of published fiction is a real signal, treated the
+      same as an explicit 0.0 frequency.
+    """
+    freq = literary_frequency.get(headword.lower())
+    if freq is None:
+        if "-" in headword or " " in headword:
+            return raw_score
+        freq = 0.0
+    return raw_score + freq
+
+
+def _load_literary_frequency() -> dict[str, float]:
+    path = INDEX_DIR / "literary_frequency.json"
+    if not path.exists():
+        return {}
+    with path.open(encoding="utf-8") as f:
+        return json.load(f)
+
+
 def _load_state() -> dict:
     if not _state:
         _state["embeddings"] = np.load(INDEX_DIR / "embeddings.npy")
@@ -99,6 +141,7 @@ def _load_state() -> dict:
         _state["word_index"] = dictionary.load_word_index(INDEX_DIR)
         _state["embedder"] = Embedder()
         _state["reranker"] = Reranker()
+        _state["literary_frequency"] = _load_literary_frequency()
         _state["classifier"] = None
     return _state
 
@@ -157,7 +200,13 @@ def search(query: str, top_n: int = 10) -> dict:
     retrieved = cosine_top_k(query_vec, state["embeddings"], k=retrieval_pool_size)
     definitions = [metadata[index]["definition"] for index, _ in retrieved]
     rerank_scores = state["reranker"].score(query, definitions)
-    scored = [(retrieved[i][0], rerank_scores[i]) for i in range(len(retrieved))]
+    literary_frequency = state["literary_frequency"]
+    scored = []
+    for i in range(len(retrieved)):
+        row_index = retrieved[i][0]
+        headword = metadata[row_index]["headword"]
+        adjusted = combine_score(rerank_scores[i], headword, literary_frequency)
+        scored.append((row_index, adjusted))
 
     exact_match_raw = dictionary.lookup_exact(query.strip(), state["word_index"], metadata)
     exact_headword = exact_match_raw["headword"] if exact_match_raw is not None else None

@@ -15,7 +15,6 @@ dependencies = [
     "nrclex>=4.1",
     "numpy>=1.26",
     "rich>=13.9",
-    "wordfreq>=3.1.1",
 ]
 
 [project.optional-dependencies]

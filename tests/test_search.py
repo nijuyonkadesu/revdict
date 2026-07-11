@@ -3,6 +3,7 @@ import numpy as np
 
 from revdict.search import (
     absolute_relevance,
+    combine_score,
     cosine_top_k,
     dedupe_by_headword,
     exclude_headword,
@@ -194,3 +195,72 @@ def test_search_candidates_and_exact_match_senses_include_a_stress_key(monkeypat
     tagged = search_mod.tag_exact_match_senses(exact_match_raw, classifier_factory=None)
 
     assert tagged["senses"][0]["stress"] == "STRESS[happy/adjective]"
+
+
+def test_combine_score_adds_the_literary_frequency_for_a_single_token_headword():
+    result = combine_score(5.424, "glad", {"glad": 5.327811529454499})
+
+    assert result == 5.424 + 5.327811529454499
+
+
+def test_combine_score_treats_a_missing_single_token_headword_as_zero_frequency():
+    # Confirmed zero attestation across ten years of published fiction for a
+    # non-hyphenated word is a real signal, not a data gap -- same as an
+    # explicit 0.0 entry.
+    result = combine_score(6.157, "wealful", {})
+
+    assert result == 6.157
+
+
+def test_combine_score_leaves_a_missing_hyphenated_headword_unadjusted():
+    # The Ngram corpus's tokenizer doesn't represent hyphenated compounds at
+    # all (confirmed: even "well-known" has zero raw occurrences), so a
+    # missing entry here is inconclusive, not evidence of rarity.
+    result = combine_score(7.280, "twinkly-eyed", {})
+
+    assert result == 7.280
+
+
+def test_combine_score_leaves_a_missing_multi_word_headword_unadjusted():
+    result = combine_score(4.0, "lone wolf", {})
+
+    assert result == 4.0
+
+
+def test_combine_score_is_case_insensitive_against_the_frequency_table():
+    result = combine_score(1.0, "Glad", {"glad": 2.0})
+
+    assert result == 3.0
+
+
+def test_combine_score_real_happy_candidate_set_ranks_glad_first():
+    """Regression guard pinning the real investigation finding: raw reranker
+    score alone (or any overlap-based discount) can't separate "glad" from
+    obscure candidates like "wealful"/"vogie", because they restate "happy"
+    in their definition equally often. The real, measured literary-frequency
+    signal is what actually discriminates them."""
+    literary_frequency = {
+        "vogie": 0.1145316536674059,
+        "happies": 1.3606607793308423,
+        "wealful": 0.0,
+        "glad": 5.327811529454499,
+        "joyful": 3.9033162819996567,
+        "cheerful": 4.473047472843254,
+    }
+    candidates = [
+        ("twinkly-eyed", 7.280),
+        ("vogie", 7.003),
+        ("happies", 6.637),
+        ("good-humored", 6.468),
+        ("wealful", 6.157),
+        ("glad", 5.424),
+    ]
+
+    combined = [
+        (combine_score(raw, headword, literary_frequency), headword)
+        for headword, raw in candidates
+    ]
+    combined.sort(reverse=True)
+    order = [headword for _, headword in combined]
+
+    assert order[0] == "glad"

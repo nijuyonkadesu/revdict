@@ -5,6 +5,11 @@ import time
 import numpy as np
 
 from revdict.data.corpus import merge_records
+from revdict.data.literary_frequency_source import (
+    compute_literary_frequencies,
+    download_raw_ngram_fiction,
+    download_raw_ngram_fiction_totalcounts,
+)
 from revdict.data.nrc_emolex_source import load_emolex, lookup_emolex
 from revdict.data.wiktionary_source import (
     download_raw_wiktextract,
@@ -12,7 +17,12 @@ from revdict.data.wiktionary_source import (
 )
 from revdict.data.wordnet_source import load_wordnet_senses
 from revdict.models.embedder import Embedder
-from revdict.paths import INDEX_DIR, RAW_WIKTIONARY_PATH
+from revdict.paths import (
+    INDEX_DIR,
+    RAW_NGRAM_FICTION_PATH,
+    RAW_NGRAM_FICTION_TOTALCOUNTS_PATH,
+    RAW_WIKTIONARY_PATH,
+)
 
 
 def estimate_full_duration(sample_count: int, sample_seconds: float, total_count: int) -> float:
@@ -79,6 +89,25 @@ def build(skip_confirm: bool = False) -> None:
     for record in records:
         record["emolex"] = lookup_emolex(record["headword"], emolex)
 
+    print(
+        "Downloading/streaming Google Books Ngram English Fiction data "
+        "(this may take a while on first run)..."
+    )
+    try:
+        download_raw_ngram_fiction(str(RAW_NGRAM_FICTION_PATH))
+        download_raw_ngram_fiction_totalcounts(str(RAW_NGRAM_FICTION_TOTALCOUNTS_PATH))
+        headwords = {record["headword"] for record in records}
+        literary_frequency = compute_literary_frequencies(
+            headwords, str(RAW_NGRAM_FICTION_PATH), str(RAW_NGRAM_FICTION_TOTALCOUNTS_PATH)
+        )
+    except Exception as error:
+        raise RuntimeError(
+            "Failed to download or process the Google Books Ngram English Fiction "
+            "data (check your internet connection; if a partial download is stuck, "
+            f"delete {RAW_NGRAM_FICTION_PATH} and retry): {error}"
+        ) from error
+    print(f"Literary frequency computed for {len(literary_frequency)} headwords.")
+
     try:
         embedder = Embedder()
     except Exception as error:
@@ -126,5 +155,8 @@ def build(skip_confirm: bool = False) -> None:
 
     with (INDEX_DIR / "word_index.json").open("w", encoding="utf-8") as f:
         json.dump(word_index, f)
+
+    with (INDEX_DIR / "literary_frequency.json").open("w", encoding="utf-8") as f:
+        json.dump(literary_frequency, f)
 
     print(f"Done. Index written to {INDEX_DIR}")
