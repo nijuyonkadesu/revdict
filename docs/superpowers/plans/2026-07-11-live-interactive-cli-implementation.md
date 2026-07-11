@@ -564,11 +564,13 @@ def test_main_with_no_args_and_a_tty_but_missing_fzf_prints_a_clear_message(monk
     monkeypatch.setattr(cli, "_index_exists", lambda: True)
     monkeypatch.setattr(cli, "_fzf_missing", lambda: True)
 
-    class _TtyStdout:
-        def isatty(self):
-            return True
-
-    monkeypatch.setattr(cli.sys, "stdout", _TtyStdout())
+    # Patch only isatty on the REAL sys.stdout object -- replacing sys.stdout
+    # wholesale (as the sibling test above does, which is safe there because
+    # that path never calls console.print/console.input) breaks both Rich's
+    # Console (which resolves sys.stdout dynamically on every print call) and
+    # capsys's own capture mechanism, since capsys itself works by replacing
+    # sys.stdout.
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
 
     code = cli.main([])
 
