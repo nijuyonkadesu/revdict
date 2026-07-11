@@ -282,14 +282,15 @@ def test_build_live_session_args_includes_disabled_and_reload_bindings():
     assert "start:reload:sleep 0.1" in joined
 
 
-def test_build_live_session_args_includes_history_file():
+def test_build_live_session_args_does_not_use_fzfs_native_history_flag():
     args = picker.build_live_session_args(
         preview_dir=Path("/tmp/preview"),
         history_path=Path("/tmp/history"),
         python_executable="/usr/bin/python3",
     )
 
-    assert "--history=/tmp/history" in args
+    joined = " ".join(args)
+    assert "--history=" not in joined
 
 
 def test_build_live_session_args_rebinds_esc_enter_and_arrow_keys():
@@ -302,8 +303,8 @@ def test_build_live_session_args_rebinds_esc_enter_and_arrow_keys():
     joined = " ".join(args)
     assert "esc:clear-query" in joined
     assert "enter:execute-silent(echo {q} >> /tmp/history)+clear-query" in joined
-    assert "up:prev-history" in joined
-    assert "down:next-history" in joined
+    assert "up:transform-query:tail -n 1 /tmp/history" in joined
+    assert "down:clear-query" in joined
     assert "ctrl-p:up" in joined
     assert "ctrl-n:down" in joined
 
