@@ -1,7 +1,11 @@
+import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
+
+from revdict.paths import QUERY_HISTORY_PATH
 
 # fzf's documented exit codes (see `man fzf` EXIT STATUS): 0 = normal, 1 = no
 # match, 2 = error, 130 = interrupted (Ctrl-C or Esc). 1 and 130 both mean
@@ -233,3 +237,26 @@ def build_live_session_args(
         "--bind",
         "?:toggle-preview",
     ]
+
+
+def run_live_session() -> None:
+    if shutil.which("fzf") is None:
+        return None
+
+    QUERY_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    QUERY_HISTORY_PATH.touch(exist_ok=True)
+
+    preview_dir = tempfile.mkdtemp(prefix="revdict-live-")
+    try:
+        args = build_live_session_args(
+            preview_dir=Path(preview_dir),
+            history_path=QUERY_HISTORY_PATH,
+            python_executable=sys.executable,
+        )
+        subprocess.run(
+            args,
+            env={**os.environ, "REVDICT_LIVE_PREVIEW_DIR": preview_dir},
+        )
+    finally:
+        shutil.rmtree(preview_dir, ignore_errors=True)
+    return None

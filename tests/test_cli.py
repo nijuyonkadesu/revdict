@@ -446,3 +446,46 @@ def test_query_only_with_blank_query_prints_nothing(monkeypatch, capsys, tmp_pat
     captured = capsys.readouterr()
     assert code == 0
     assert captured.out == ""
+
+
+def test_main_with_no_args_and_a_tty_launches_the_live_session(monkeypatch):
+    monkeypatch.setattr(cli, "_index_exists", lambda: True)
+
+    called = {"ran": False}
+    monkeypatch.setattr(cli.picker, "run_live_session", lambda: called.__setitem__("ran", True))
+
+    class _TtyStdout:
+        def isatty(self):
+            return True
+
+    monkeypatch.setattr(cli.sys, "stdout", _TtyStdout())
+
+    code = cli.main([])
+
+    assert code == 0
+    assert called["ran"] is True
+
+
+def test_main_with_no_args_and_a_tty_but_missing_fzf_prints_a_clear_message(monkeypatch, capsys):
+    # Deviation from the task brief's literal test code: the brief's
+    # _TtyStdout fake only implements isatty(), then does
+    # `monkeypatch.setattr(cli.sys, "stdout", _TtyStdout())`. Since `cli.sys`
+    # is the actual process-wide `sys` module, that replaces the real
+    # sys.stdout everywhere -- including inside Rich's Console, which
+    # resolves `self.file` to `sys.stdout` dynamically on every print() call.
+    # Because the fake has no `write()`, the console.print() call this branch
+    # requires crashes with AttributeError instead of returning code 1. It
+    # also disconnects capsys's own capture object, so even a working
+    # write() on the fake wouldn't reach `captured.out`. The minimal fix that
+    # preserves the brief's assertions and capsys capture is to patch just
+    # `isatty` on the real (capsys-managed) sys.stdout object in place,
+    # rather than replacing sys.stdout wholesale.
+    monkeypatch.setattr(cli, "_index_exists", lambda: True)
+    monkeypatch.setattr(cli, "_fzf_missing", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    code = cli.main([])
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "fzf" in captured.out.lower()

@@ -331,3 +331,40 @@ def test_build_live_session_args_preview_command_reads_from_the_preview_dir():
 
     joined = " ".join(args)
     assert "cat /tmp/preview/{5}.txt" in joined
+
+
+def test_run_live_session_returns_none_when_fzf_binary_is_missing(monkeypatch):
+    monkeypatch.setattr(picker.shutil, "which", lambda name: None)
+
+    result = picker.run_live_session()
+
+    assert result is None
+
+
+def test_run_live_session_invokes_fzf_with_the_built_args_and_cleans_up(monkeypatch):
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        captured["env"] = kwargs.get("env")
+        return _FakeCompletedProcess(returncode=0)
+
+    monkeypatch.setattr(picker.shutil, "which", lambda name: "/usr/bin/fzf")
+    monkeypatch.setattr(picker.subprocess, "run", fake_run)
+
+    created_dirs = []
+    real_mkdtemp = picker.tempfile.mkdtemp
+
+    def tracking_mkdtemp(*a, **k):
+        path = real_mkdtemp(*a, **k)
+        created_dirs.append(path)
+        return path
+
+    monkeypatch.setattr(picker.tempfile, "mkdtemp", tracking_mkdtemp)
+
+    picker.run_live_session()
+
+    assert captured["args"][0] == "fzf"
+    assert "--disabled" in captured["args"]
+    assert captured["env"]["REVDICT_LIVE_PREVIEW_DIR"] == created_dirs[0]
+    assert not picker.Path(created_dirs[0]).exists()  # cleaned up after fzf exits
