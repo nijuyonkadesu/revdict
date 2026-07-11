@@ -449,16 +449,21 @@ def test_query_only_with_blank_query_prints_nothing(monkeypatch, capsys, tmp_pat
 
 
 def test_main_with_no_args_and_a_tty_launches_the_live_session(monkeypatch):
+    # Patches only `isatty` on the real (capsys-managed) sys.stdout object in
+    # place, rather than replacing sys.stdout wholesale -- a wholesale
+    # replacement breaks Rich's Console and capsys (see the sibling test
+    # below). Also explicitly mocks _fzf_missing: previously this test only
+    # passed because fzf happened to be on PATH on the dev machine, so the
+    # real fzf-missing branch (which crashes on the old-style fake stdout)
+    # was never exercised. Without fzf installed, this test would have
+    # failed with the same AttributeError the sibling test's fix addressed.
     monkeypatch.setattr(cli, "_index_exists", lambda: True)
+    monkeypatch.setattr(cli, "_fzf_missing", lambda: False)
 
     called = {"ran": False}
     monkeypatch.setattr(cli.picker, "run_live_session", lambda: called.__setitem__("ran", True))
 
-    class _TtyStdout:
-        def isatty(self):
-            return True
-
-    monkeypatch.setattr(cli.sys, "stdout", _TtyStdout())
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
 
     code = cli.main([])
 
