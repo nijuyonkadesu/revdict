@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import shutil
 import sys
@@ -212,6 +213,48 @@ def _run_query_only(query: str) -> int:
     return 0
 
 
+def _run_jsonl_query(query: str) -> int:
+    if not query.strip():
+        return 0
+
+    result = _get_search_result(query, LIVE_SESSION_TOP_N)
+    rows = []
+    if result["exact_match"] is not None:
+        first_sense = result["exact_match"]["senses"][0]
+        rows.append(
+            {
+                "headword": result["exact_match"]["headword"],
+                "pos": first_sense["pos"],
+                "definition": first_sense["definition"],
+                "stress": first_sense.get("stress"),
+                "label": first_sense["label"],
+                "polarity": first_sense["polarity"],
+                "synonyms": first_sense.get("synonyms") or [],
+                "examples": first_sense["examples"],
+                "relevance": 100,
+                "is_exact": True,
+            }
+        )
+    for candidate in result["candidates"]:
+        rows.append(
+            {
+                "headword": candidate["headword"],
+                "pos": candidate["pos"],
+                "definition": candidate["definition"],
+                "stress": candidate.get("stress"),
+                "label": candidate["label"],
+                "polarity": candidate["polarity"],
+                "synonyms": candidate.get("synonyms") or [],
+                "examples": candidate["examples"],
+                "relevance": candidate["relevance"],
+                "is_exact": False,
+            }
+        )
+    for row in rows:
+        print(json.dumps(row))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
 
@@ -238,6 +281,10 @@ def main(argv: list[str] | None = None) -> int:
         if argv and argv[0] == "--query-only":
             query = argv[1] if len(argv) > 1 else ""
             return _run_query_only(query)
+
+        if argv and argv[0] == "--jsonl-query":
+            query = argv[1] if len(argv) > 1 else ""
+            return _run_jsonl_query(query)
 
         if not argv:
             if not _index_exists():

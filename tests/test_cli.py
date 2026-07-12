@@ -1,3 +1,4 @@
+import json
 import sys
 
 from revdict import cli
@@ -446,6 +447,102 @@ def test_query_only_with_blank_query_prints_nothing(monkeypatch, capsys, tmp_pat
     captured = capsys.readouterr()
     assert code == 0
     assert captured.out == ""
+
+
+def test_jsonl_query_prints_one_json_object_per_candidate(monkeypatch, capsys):
+    fake_result = {
+        "exact_match": None,
+        "candidates": [
+            {
+                "headword": "joyful",
+                "pos": "adjective",
+                "definition": "feeling great happiness",
+                "examples": [],
+                "label": "joy",
+                "polarity": "positive",
+                "relevance": 90,
+            }
+        ],
+    }
+    monkeypatch.setattr(cli, "_get_search_result", lambda query, top_n: fake_result)
+
+    code = cli.main(["--jsonl-query", "happy"])
+
+    captured = capsys.readouterr()
+    assert code == 0
+    lines = captured.out.strip().splitlines()
+    assert len(lines) == 1
+    row = json.loads(lines[0])
+    assert row["headword"] == "joyful"
+    assert row["is_exact"] is False
+    assert row["relevance"] == 90
+
+
+def test_jsonl_query_flattens_exact_match_first_sense_as_first_row(monkeypatch, capsys):
+    fake_result = {
+        "exact_match": {
+            "headword": "happy",
+            "senses": [
+                {
+                    "pos": "adjective",
+                    "definition": "feeling or showing pleasure",
+                    "stress": "\x1b[1mHAP\x1b[0mpy",
+                    "label": "joy",
+                    "polarity": "positive",
+                    "synonyms": ["glad", "cheerful"],
+                    "examples": ["a happy childhood"],
+                }
+            ],
+        },
+        "candidates": [],
+    }
+    monkeypatch.setattr(cli, "_get_search_result", lambda query, top_n: fake_result)
+
+    code = cli.main(["--jsonl-query", "happy"])
+
+    captured = capsys.readouterr()
+    lines = captured.out.strip().splitlines()
+    assert len(lines) == 1
+    row = json.loads(lines[0])
+    assert code == 0
+    assert row["headword"] == "happy"
+    assert row["is_exact"] is True
+    assert row["relevance"] == 100
+    assert row["synonyms"] == ["glad", "cheerful"]
+    assert row["stress"] == "\x1b[1mHAP\x1b[0mpy"
+
+
+def test_jsonl_query_with_blank_query_prints_nothing(monkeypatch, capsys):
+    code = cli.main(["--jsonl-query", ""])
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.out == ""
+
+
+def test_jsonl_query_candidate_without_synonyms_or_stress_defaults_cleanly(monkeypatch, capsys):
+    fake_result = {
+        "exact_match": None,
+        "candidates": [
+            {
+                "headword": "joyful",
+                "pos": "adjective",
+                "definition": "feeling great happiness",
+                "examples": [],
+                "label": "joy",
+                "polarity": "positive",
+                "relevance": 90,
+            }
+        ],
+    }
+    monkeypatch.setattr(cli, "_get_search_result", lambda query, top_n: fake_result)
+
+    code = cli.main(["--jsonl-query", "happy"])
+
+    row = json.loads(capsys.readouterr().out.strip())
+    assert code == 0
+    assert row["synonyms"] == []
+    assert row["stress"] is None
 
 
 def test_main_with_no_args_and_a_tty_launches_the_live_session(monkeypatch):
