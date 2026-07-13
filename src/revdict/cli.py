@@ -16,7 +16,7 @@ from revdict.picker import PickerError, run_picker, write_candidate_files
 
 console = Console()
 
-LIVE_SESSION_TOP_N = 15
+LIVE_SESSION_TOP_N = 30
 
 
 class _ArgumentError(Exception):
