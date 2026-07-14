@@ -346,8 +346,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_jsonl_query(query)
 
         if argv and argv[0] == "--copy-selection":
-            marked_headword = argv[1] if len(argv) > 1 else ""
-            return _run_copy_selection(marked_headword)
+            headword = argv[1] if len(argv) > 1 else ""
+            return _run_copy_selection(headword)
 
         if not argv:
             if not _index_exists():
