@@ -591,3 +591,173 @@ def test_main_with_no_args_and_a_tty_but_missing_fzf_prints_a_clear_message(monk
     captured = capsys.readouterr()
     assert code == 1
     assert "fzf" in captured.out.lower()
+
+
+def test_strip_candidate_marker_removes_the_star_marker_and_separator():
+    assert cli._strip_candidate_marker("★ joy") == "joy"
+
+
+def test_strip_candidate_marker_removes_the_space_marker_and_separator():
+    assert cli._strip_candidate_marker("  joy") == "joy"
+
+
+def test_strip_candidate_marker_handles_multi_word_headwords():
+    assert cli._strip_candidate_marker("  in someone's eyes") == "in someone's eyes"
+
+
+def test_strip_candidate_marker_returns_empty_string_for_blank_input():
+    assert cli._strip_candidate_marker("") == ""
+
+
+def test_is_remote_session_true_when_tmux_is_set(monkeypatch):
+    monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,12345,0")
+    monkeypatch.delenv("SSH_TTY", raising=False)
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.delenv("SSH_CLIENT", raising=False)
+
+    assert cli._is_remote_session() is True
+
+
+def test_is_remote_session_true_when_ssh_tty_is_set(monkeypatch):
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.setenv("SSH_TTY", "/dev/pts/3")
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.delenv("SSH_CLIENT", raising=False)
+
+    assert cli._is_remote_session() is True
+
+
+def test_is_remote_session_true_when_ssh_connection_is_set(monkeypatch):
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.delenv("SSH_TTY", raising=False)
+    monkeypatch.setenv("SSH_CONNECTION", "10.0.0.1 22 10.0.0.2 22")
+    monkeypatch.delenv("SSH_CLIENT", raising=False)
+
+    assert cli._is_remote_session() is True
+
+
+def test_is_remote_session_true_when_ssh_client_is_set(monkeypatch):
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.delenv("SSH_TTY", raising=False)
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.setenv("SSH_CLIENT", "10.0.0.1 22 22")
+
+    assert cli._is_remote_session() is True
+
+
+def test_is_remote_session_false_when_nothing_is_set(monkeypatch):
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.delenv("SSH_TTY", raising=False)
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.delenv("SSH_CLIENT", raising=False)
+
+    assert cli._is_remote_session() is False
+
+
+def test_build_osc52_sequence_base64_encodes_and_wraps_correctly():
+    result = cli._build_osc52_sequence("joy")
+
+    assert result == "\x1b]52;c;am95\x07"
+
+
+def test_copy_via_system_clipboard_uses_the_first_available_tool(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        cli.shutil, "which", lambda name: "/usr/bin/xclip" if name == "xclip" else None
+    )
+
+    def fake_run(command, input, check, timeout):
+        calls.append((command, input))
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    cli._copy_via_system_clipboard("joy")
+
+    assert len(calls) == 1
+    assert calls[0][0] == ["xclip", "-selection", "clipboard"]
+    assert calls[0][1] == b"joy"
+
+
+def test_copy_via_system_clipboard_prefers_wl_copy_when_multiple_tools_exist(monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    def fake_run(command, input, check, timeout):
+        calls.append(command)
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    cli._copy_via_system_clipboard("joy")
+
+    assert calls == [["wl-copy"]]
+
+
+def test_copy_via_system_clipboard_does_nothing_when_no_tool_is_available(monkeypatch):
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+    calls = []
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: calls.append(a))
+
+    cli._copy_via_system_clipboard("joy")
+
+    assert calls == []
+
+
+def test_run_copy_selection_uses_osc52_for_a_remote_session(monkeypatch):
+    monkeypatch.setattr(cli, "_is_remote_session", lambda: True)
+    osc52_calls = []
+    clipboard_calls = []
+    monkeypatch.setattr(cli, "_copy_via_osc52", lambda text: osc52_calls.append(text))
+    monkeypatch.setattr(cli, "_copy_via_system_clipboard", lambda text: clipboard_calls.append(text))
+
+    code = cli._run_copy_selection("★ joy")
+
+    assert code == 0
+    assert osc52_calls == ["joy"]
+    assert clipboard_calls == []
+
+
+def test_run_copy_selection_uses_system_clipboard_for_a_local_session(monkeypatch):
+    monkeypatch.setattr(cli, "_is_remote_session", lambda: False)
+    osc52_calls = []
+    clipboard_calls = []
+    monkeypatch.setattr(cli, "_copy_via_osc52", lambda text: osc52_calls.append(text))
+    monkeypatch.setattr(cli, "_copy_via_system_clipboard", lambda text: clipboard_calls.append(text))
+
+    code = cli._run_copy_selection("  joy")
+
+    assert code == 0
+    assert clipboard_calls == ["joy"]
+    assert osc52_calls == []
+
+
+def test_run_copy_selection_does_nothing_for_blank_input(monkeypatch):
+    osc52_calls = []
+    clipboard_calls = []
+    monkeypatch.setattr(cli, "_copy_via_osc52", lambda text: osc52_calls.append(text))
+    monkeypatch.setattr(cli, "_copy_via_system_clipboard", lambda text: clipboard_calls.append(text))
+
+    code = cli._run_copy_selection("")
+
+    assert code == 0
+    assert osc52_calls == []
+    assert clipboard_calls == []
+
+
+def test_main_dispatches_copy_selection(monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli, "_run_copy_selection", lambda marked: calls.append(marked) or 0)
+
+    code = cli.main(["--copy-selection", "★ joy"])
+
+    assert code == 0
+    assert calls == ["★ joy"]
+
+
+def test_main_dispatches_copy_selection_with_empty_string_when_no_argument_given(monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli, "_run_copy_selection", lambda marked: calls.append(marked) or 0)
+
+    code = cli.main(["--copy-selection"])
+
+    assert code == 0
+    assert calls == [""]

@@ -1,7 +1,9 @@
 import argparse
+import base64
 import json
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -255,6 +257,75 @@ def _run_jsonl_query(query: str) -> int:
     return 0
 
 
+_CLIPBOARD_TOOL_CANDIDATES = [
+    ["wl-copy"],
+    ["xclip", "-selection", "clipboard"],
+    ["xsel", "--clipboard", "--input"],
+    ["pbcopy"],
+]
+
+
+def _strip_candidate_marker(marked_headword: str) -> str:
+    """format_candidate_line's field 1 (picker.py) is always exactly
+    f"{marker} {headword}" where marker is "★" (exact match) or " "
+    (regular candidate) -- both one character, so the field is always a
+    2-character marker+separator prefix. Python strings are Unicode-
+    aware, so this correctly strips the prefix regardless of which
+    marker was used, with no special multi-byte handling needed."""
+    if len(marked_headword) < 2:
+        return marked_headword.strip()
+    return marked_headword[2:].strip()
+
+
+def _is_remote_session() -> bool:
+    return bool(
+        os.environ.get("TMUX")
+        or os.environ.get("SSH_TTY")
+        or os.environ.get("SSH_CONNECTION")
+        or os.environ.get("SSH_CLIENT")
+    )
+
+
+def _build_osc52_sequence(text: str) -> str:
+    """Builds the OSC 52 escape sequence that sets the terminal's
+    clipboard to `text`. Pure and testable without a real tty --
+    _copy_via_osc52 is the thin wrapper that actually writes this to
+    /dev/tty (confirmed necessary during design: writing to stdout
+    instead does not reach the pty tmux monitors for OSC 52)."""
+    encoded = base64.b64encode(text.encode()).decode()
+    return f"\x1b]52;c;{encoded}\x07"
+
+
+def _copy_via_osc52(text: str) -> None:
+    try:
+        with open("/dev/tty", "w") as tty:
+            tty.write(_build_osc52_sequence(text))
+    except OSError:
+        pass
+
+
+def _copy_via_system_clipboard(text: str) -> None:
+    for command in _CLIPBOARD_TOOL_CANDIDATES:
+        if shutil.which(command[0]) is None:
+            continue
+        try:
+            subprocess.run(command, input=text.encode(), check=True, timeout=2)
+        except (subprocess.SubprocessError, OSError):
+            continue
+        return
+
+
+def _run_copy_selection(marked_headword: str) -> int:
+    headword = _strip_candidate_marker(marked_headword)
+    if not headword:
+        return 0
+    if _is_remote_session():
+        _copy_via_osc52(headword)
+    else:
+        _copy_via_system_clipboard(headword)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
 
@@ -285,6 +356,10 @@ def main(argv: list[str] | None = None) -> int:
         if argv and argv[0] == "--jsonl-query":
             query = argv[1] if len(argv) > 1 else ""
             return _run_jsonl_query(query)
+
+        if argv and argv[0] == "--copy-selection":
+            marked_headword = argv[1] if len(argv) > 1 else ""
+            return _run_copy_selection(marked_headword)
 
         if not argv:
             if not _index_exists():
