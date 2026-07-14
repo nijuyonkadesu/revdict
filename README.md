@@ -64,6 +64,16 @@ revdict daemon stop     # stop it (e.g. before rebuilding the index)
 If you rebuild the index while a daemon is running, it keeps serving the old
 data until you stop it — `build-index` will remind you if this applies.
 
+## Clipboard copy on Enter
+
+In the interactive picker, pressing Enter on a highlighted candidate copies
+it to your clipboard, in addition to selecting it. Over SSH and/or inside
+tmux, this goes through the terminal's OSC 52 escape sequence — reaching the
+clipboard of the device you're physically using, not the remote host's own
+clipboard — provided your terminal emulator and tmux's `set-clipboard`
+support it. Otherwise it falls back to whichever of `wl-copy`, `xclip`,
+`xsel`, or `pbcopy` is available locally.
+
 ## Optional: stress-marked pronunciation
 
 If you also have the [`emphasis`/`stressmark`](https://github.com/nijuyonkadesu/emphasis)
