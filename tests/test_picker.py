@@ -77,14 +77,23 @@ def test_write_candidate_files_with_no_exact_match_writes_only_candidates():
         assert not (Path(tmp) / "1.txt").exists()
 
 
-def test_format_candidate_line_has_five_tab_fields_and_marks_exact_match():
+def test_format_candidate_line_has_six_tab_fields_and_marks_exact_match():
     line = format_candidate_line(
         "happy", "adjective", "feeling pleasure", "Joy", "positive", 92, index=3, is_exact=True
     )
     fields = line.split("\t")
-    assert len(fields) == 5
-    assert fields[-1] == "3"
+    assert len(fields) == 6
+    assert fields[4] == "3"
     assert fields[0].startswith("★")
+    assert fields[5] == "happy"
+
+
+def test_format_candidate_line_sixth_field_is_the_raw_headword_with_no_marker():
+    line = format_candidate_line(
+        "glow", "verb", "shine", "joy", "positive", 80, index=0, is_exact=False
+    )
+    fields = line.split("\t")
+    assert fields[5] == "glow"
 
 
 def test_format_candidate_line_truncates_long_definitions():
@@ -234,11 +243,20 @@ def test_run_picker_raises_picker_error_on_genuine_runtime_failure(monkeypatch):
 
 
 def test_run_picker_parses_a_normal_selection_on_success(monkeypatch):
+    # Real fzf always echoes back the *full* original tab-delimited line on
+    # selection, regardless of --with-nth restricting what's displayed
+    # (confirmed empirically against the real fzf binary: `--with-nth` only
+    # affects matching/display, not what's returned). So a realistic fake
+    # stdout must have all 6 fields, with the index at position 4 -- not an
+    # arbitrary 2-field stub -- to actually exercise parse_selection's
+    # fixed-position field-4 extraction the way production really would.
     monkeypatch.setattr(picker.shutil, "which", lambda name: "/usr/bin/fzf")
     monkeypatch.setattr(
         picker.subprocess,
         "run",
-        lambda *a, **k: _FakeCompletedProcess(returncode=0, stdout="whatever\t0\n"),
+        lambda *a, **k: _FakeCompletedProcess(
+            returncode=0, stdout="whatever\twhatever\twhatever\twhatever\t0\twhatever\n"
+        ),
     )
 
     result = run_picker(_CANDIDATE_FIXTURE, None)
@@ -254,7 +272,11 @@ def test_run_picker_pins_the_exact_match_with_a_real_emotion_badge_not_placehold
 
     def fake_run(*args, **kwargs):
         captured["input"] = kwargs["input"]
-        return _FakeCompletedProcess(returncode=0, stdout="whatever\t0\n")
+        # See the realism note in test_run_picker_parses_a_normal_selection_on_success:
+        # a real fzf process echoes back all 6 fields, not just 2.
+        return _FakeCompletedProcess(
+            returncode=0, stdout="whatever\twhatever\twhatever\twhatever\t0\twhatever\n"
+        )
 
     monkeypatch.setattr(picker.shutil, "which", lambda name: "/usr/bin/fzf")
     monkeypatch.setattr(picker.subprocess, "run", fake_run)
@@ -319,7 +341,7 @@ def test_build_live_session_args_enter_also_copies_the_selection():
     joined = " ".join(args)
     assert (
         "enter:execute-silent(echo {q} >> /tmp/history)+clear-query"
-        "+execute-silent(/usr/bin/python3 -u -m revdict.cli --copy-selection {1})"
+        "+execute-silent(/usr/bin/python3 -u -m revdict.cli --copy-selection {6})"
         in joined
     )
 

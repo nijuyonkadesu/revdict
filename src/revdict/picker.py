@@ -47,6 +47,7 @@ def format_candidate_line(
         f"[{emotion_label} · {polarity}]",
         f"{relevance}%",
         str(index),
+        headword,
     ]
     return "\t".join(fields)
 
@@ -55,7 +56,7 @@ def parse_selection(fzf_stdout: str) -> int | None:
     line = fzf_stdout.strip()
     if not line:
         return None
-    return int(line.rsplit("\t", 1)[1])
+    return int(line.split("\t")[4])
 
 
 def _render_exact_preview(exact_match: dict) -> str:
@@ -234,7 +235,7 @@ def build_live_session_args(
         "esc:clear-query",
         "--bind",
         f"enter:execute-silent(echo {{q}} >> {history_path})+clear-query"
-        f"+execute-silent({python_executable} -u -m revdict.cli --copy-selection {{1}})",
+        f"+execute-silent({python_executable} -u -m revdict.cli --copy-selection {{6}})",
         "--bind",
         "ctrl-c:abort",
         "--bind",

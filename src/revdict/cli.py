@@ -265,18 +265,6 @@ _CLIPBOARD_TOOL_CANDIDATES = [
 ]
 
 
-def _strip_candidate_marker(marked_headword: str) -> str:
-    """format_candidate_line's field 1 (picker.py) is always exactly
-    f"{marker} {headword}" where marker is "★" (exact match) or " "
-    (regular candidate) -- both one character, so the field is always a
-    2-character marker+separator prefix. Python strings are Unicode-
-    aware, so this correctly strips the prefix regardless of which
-    marker was used, with no special multi-byte handling needed."""
-    if len(marked_headword) < 2:
-        return marked_headword.strip()
-    return marked_headword[2:].strip()
-
-
 def _is_remote_session() -> bool:
     return bool(
         os.environ.get("TMUX")
@@ -315,8 +303,8 @@ def _copy_via_system_clipboard(text: str) -> None:
         return
 
 
-def _run_copy_selection(marked_headword: str) -> int:
-    headword = _strip_candidate_marker(marked_headword)
+def _run_copy_selection(headword: str) -> int:
+    headword = headword.strip()
     if not headword:
         return 0
     if _is_remote_session():
