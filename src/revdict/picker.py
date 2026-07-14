@@ -233,7 +233,8 @@ def build_live_session_args(
         "--bind",
         "esc:clear-query",
         "--bind",
-        f"enter:execute-silent(echo {{q}} >> {history_path})+clear-query",
+        f"enter:execute-silent(echo {{q}} >> {history_path})+clear-query"
+        f"+execute-silent({python_executable} -u -m revdict.cli --copy-selection {{1}})",
         "--bind",
         "ctrl-c:abort",
         "--bind",

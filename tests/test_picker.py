@@ -309,6 +309,21 @@ def test_build_live_session_args_rebinds_esc_enter_and_arrow_keys():
     assert "ctrl-n:down" in joined
 
 
+def test_build_live_session_args_enter_also_copies_the_selection():
+    args = picker.build_live_session_args(
+        preview_dir=Path("/tmp/preview"),
+        history_path=Path("/tmp/history"),
+        python_executable="/usr/bin/python3",
+    )
+
+    joined = " ".join(args)
+    assert (
+        "enter:execute-silent(echo {q} >> /tmp/history)+clear-query"
+        "+execute-silent(/usr/bin/python3 -u -m revdict.cli --copy-selection {1})"
+        in joined
+    )
+
+
 def test_build_live_session_args_uses_the_given_debounce_and_threshold():
     args = picker.build_live_session_args(
         preview_dir=Path("/tmp/preview"),
