@@ -771,6 +771,6 @@ def test_leading_dash_query_requires_the_argparse_separator(monkeypatch, capsys)
         cli, "_get_search_result", lambda query, top_n: {"exact_match": None, "candidates": []}
     )
 
-    code = cli.main(["--", "-abcd", "--no-interactive"])
+    code = cli.main(["--no-interactive", "--", "-abcd"])
 
     assert code == 0

@@ -166,6 +166,24 @@ def get_classifier(state: dict) -> EmotionClassifier:
     return state["classifier"]
 
 
+def build_candidate(record: dict, relevance: int, state: dict) -> dict:
+    record = dict(record)
+    if record.get("emolex"):
+        record["emolex"] = frozenset(record["emolex"])
+    emotion = tag_emotion(record, classifier_factory=lambda: get_classifier(state))
+    return {
+        "headword": record["headword"],
+        "pos": record["pos"],
+        "definition": record["definition"],
+        "examples": record["examples"],
+        "label": emotion["label"],
+        "polarity": emotion["polarity"],
+        "relevance": relevance,
+        "stress": stress.mark(record["headword"], record["pos"]),
+        "synonyms": record.get("synonyms"),
+    }
+
+
 def tag_exact_match_senses(exact_match_raw: dict | None, classifier_factory) -> dict | None:
     """Tags each sense of an exact-match lookup (dictionary.lookup_exact's raw
     output) with the same label/polarity shape candidates use, so the
@@ -267,25 +285,10 @@ def search(query: str, top_n: int = 10) -> dict:
     # instead of always showing a 0-100 spread regardless of match quality.
     relevances = absolute_relevance([score for _, score in deduped])
 
-    candidates = []
-    for (row_index, _), relevance in zip(deduped, relevances):
-        record = dict(metadata[row_index])
-        if record.get("emolex"):
-            record["emolex"] = frozenset(record["emolex"])
-        emotion = tag_emotion(record, classifier_factory=lambda: get_classifier(state))
-        candidates.append(
-            {
-                "headword": record["headword"],
-                "pos": record["pos"],
-                "definition": record["definition"],
-                "examples": record["examples"],
-                "label": emotion["label"],
-                "polarity": emotion["polarity"],
-                "relevance": relevance,
-                "stress": stress.mark(record["headword"], record["pos"]),
-                "synonyms": record.get("synonyms"),
-            }
-        )
+    candidates = [
+        build_candidate(metadata[row_index], relevance, state)
+        for (row_index, _), relevance in zip(deduped, relevances)
+    ]
 
     exact_match = tag_exact_match_senses(
         exact_match_raw, classifier_factory=lambda: get_classifier(state)

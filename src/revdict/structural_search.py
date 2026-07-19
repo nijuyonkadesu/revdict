@@ -39,10 +39,6 @@ def matching_headwords(parsed: ParsedQuery, word_index: dict[str, list[int]]) ->
     raise ValueError(f"matching_headwords does not support mode {parsed.mode!r}")
 
 
-from revdict.models.emotion import tag_emotion
-from revdict.models import stress
-
-
 def _score_and_sort(headwords: list[str], literary_frequency: dict[str, float]) -> list[tuple[str, float]]:
     scored = [(word, literary_frequency.get(word, 0.0)) for word in headwords]
     return sorted(scored, key=lambda pair: (-pair[1], pair[0]))
@@ -54,7 +50,7 @@ def run_structural(parsed: ParsedQuery, state: dict, top_n: int) -> dict:
     # circular. Matches the lazy-import pattern already used elsewhere in
     # this codebase (cli.py's _local_search_fallback, daemon.py's
     # run_server) to defer a heavy/cyclic import until it's actually needed.
-    from revdict.search import get_classifier, relative_relevance
+    from revdict.search import build_candidate, relative_relevance
 
     word_index = state["word_index"]
     metadata = state["metadata"]
@@ -64,26 +60,10 @@ def run_structural(parsed: ParsedQuery, state: dict, top_n: int) -> dict:
     ranked = _score_and_sort(headwords, literary_frequency)[:top_n]
     relevances = relative_relevance([score for _, score in ranked])
 
-    candidates = []
-    for (headword, _), relevance in zip(ranked, relevances):
-        row_index = word_index[headword][0]
-        record = dict(metadata[row_index])
-        if record.get("emolex"):
-            record["emolex"] = frozenset(record["emolex"])
-        emotion = tag_emotion(record, classifier_factory=lambda: get_classifier(state))
-        candidates.append(
-            {
-                "headword": record["headword"],
-                "pos": record["pos"],
-                "definition": record["definition"],
-                "examples": record["examples"],
-                "label": emotion["label"],
-                "polarity": emotion["polarity"],
-                "relevance": relevance,
-                "stress": stress.mark(record["headword"], record["pos"]),
-                "synonyms": record.get("synonyms"),
-            }
-        )
+    candidates = [
+        build_candidate(metadata[word_index[headword][0]], relevance, state)
+        for (headword, _), relevance in zip(ranked, relevances)
+    ]
 
     return {"exact_match": None, "candidates": candidates}
 

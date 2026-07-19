@@ -106,14 +106,20 @@ both the live session and one-shot `revdict "..."` queries):
 | `*y*` | Words containing "y" anywhere |
 | `?????,*y*` | Combine clauses with a comma (AND): 5 letters AND contains "y" |
 | `//fuljyo` or `//fuljyo//` | Anagram/unscramble: words using exactly these letters |
-| `-abcd` | Words that don't contain any of these letters |
+| `-abcd` | Words that don't contain any of these letters (one-shot CLI use needs `revdict -- -abcd` — the leading `-` otherwise looks like a flag to argparse; unaffected in the live session) |
 | `+abcd` | Words built only from these letters |
 | `bl*:snow` | Starts with "bl" AND related in meaning to "snow" |
 | `:snow` | Meaning search, explicit form (same as typing `snow` directly) |
 | `**winter**` | Multi-word phrases containing the whole word "winter" |
 | `expand:nasa` | Phrases whose initials spell "nasa" |
 
-Note: `*`, `?`, `#`, `@`, and a leading `+`/`-` are pattern-syntax triggers,
-so a free-text meaning query containing one of those characters (e.g. "a
-word for asking a question?") will be parsed as a pattern instead. Prefix
-the query with `:` to force meaning search explicitly.
+Note: `*`, `?`, `#`, `@`, `//` (anywhere in the string), and a leading
+`+`/`-` are pattern-syntax triggers, so a free-text meaning query
+containing one of those (e.g. "a word for asking a question?") will be
+parsed as a pattern instead. A `:` anywhere in a meaning query has the
+same effect -- it splits the query into a pattern part (before the colon)
+and a meaning part (after), so e.g. "note: a written record" is parsed as
+a pattern search for the literal word "note" combined with a meaning
+search for "a written record," not a single meaning query. Prefix the
+query with `:` (with nothing before it) to force plain meaning search
+explicitly.
