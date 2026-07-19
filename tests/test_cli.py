@@ -148,7 +148,9 @@ def test_main_daemon_subcommand_with_unknown_or_missing_action_prints_usage(caps
 
 def test_get_search_result_uses_daemon_when_it_answers(monkeypatch):
     monkeypatch.setattr(
-        cli.daemon, "send_query", lambda query, top_n: {"exact_match": None, "candidates": []}
+        cli.daemon,
+        "send_query",
+        lambda query, top_n, sort_mode=None: {"exact_match": None, "candidates": []},
     )
 
     def fail_if_called():
@@ -164,7 +166,7 @@ def test_get_search_result_uses_daemon_when_it_answers(monkeypatch):
 def test_get_search_result_starts_daemon_and_retries_when_first_attempt_fails(monkeypatch):
     attempts = {"count": 0}
 
-    def fake_send_query(query, top_n):
+    def fake_send_query(query, top_n, sort_mode=None):
         attempts["count"] += 1
         if attempts["count"] == 1:
             return None
@@ -180,11 +182,13 @@ def test_get_search_result_starts_daemon_and_retries_when_first_attempt_fails(mo
 
 
 def test_get_search_result_falls_back_to_local_search_when_daemon_unavailable(monkeypatch):
-    monkeypatch.setattr(cli.daemon, "send_query", lambda query, top_n: None)
+    monkeypatch.setattr(cli.daemon, "send_query", lambda query, top_n, sort_mode=None: None)
     monkeypatch.setattr(cli.daemon, "ensure_daemon_running", lambda: False)
 
     fake_result = {"exact_match": None, "candidates": [{"headword": "fallback-used"}]}
-    monkeypatch.setattr(cli, "_local_search_fallback", lambda query, top_n: fake_result)
+    monkeypatch.setattr(
+        cli, "_local_search_fallback", lambda query, top_n, sort_mode=None: fake_result
+    )
 
     result = cli._get_search_result("happy", 10)
 
@@ -230,7 +234,7 @@ def test_run_query_prints_exact_match_emotion_and_synonyms_when_present(monkeypa
         },
         "candidates": [],
     }
-    monkeypatch.setattr(cli, "_get_search_result", lambda query, top_n: fake_result)
+    monkeypatch.setattr(cli, "_get_search_result", lambda query, top_n, sort_mode=None: fake_result)
 
     code = cli._run_query("happy", top_n=10, interactive=False)
 
@@ -261,7 +265,7 @@ def test_run_query_prints_stress_column_when_present(monkeypatch, capsys):
         },
         "candidates": [],
     }
-    monkeypatch.setattr(cli, "_get_search_result", lambda query, top_n: fake_result)
+    monkeypatch.setattr(cli, "_get_search_result", lambda query, top_n, sort_mode=None: fake_result)
 
     code = cli._run_query("happy", top_n=10, interactive=False)
 
@@ -287,7 +291,7 @@ def test_run_query_prints_candidate_synonyms_column_when_present(monkeypatch, ca
             }
         ],
     }
-    monkeypatch.setattr(cli, "_get_search_result", lambda query, top_n: fake_result)
+    monkeypatch.setattr(cli, "_get_search_result", lambda query, top_n, sort_mode=None: fake_result)
 
     code = cli._run_query("happy", top_n=10, interactive=False)
 
@@ -311,7 +315,7 @@ def test_run_query_prints_static_results_when_not_interactive(monkeypatch, capsy
             }
         ],
     }
-    monkeypatch.setattr(cli, "_get_search_result", lambda query, top_n: fake_result)
+    monkeypatch.setattr(cli, "_get_search_result", lambda query, top_n, sort_mode=None: fake_result)
 
     code = cli._run_query("happy", top_n=10, interactive=False)
 
@@ -337,7 +341,7 @@ _FAKE_INTERACTIVE_RESULT = {
 
 
 def test_run_query_falls_back_to_static_results_when_fzf_missing(monkeypatch, capsys):
-    monkeypatch.setattr(cli, "_get_search_result", lambda query, top_n: _FAKE_INTERACTIVE_RESULT)
+    monkeypatch.setattr(cli, "_get_search_result", lambda query, top_n, sort_mode=None: _FAKE_INTERACTIVE_RESULT)
     monkeypatch.setattr(cli, "run_picker", lambda candidates, exact_match: None)
     monkeypatch.setattr(cli, "_fzf_missing", lambda: True)
 
@@ -352,7 +356,7 @@ def test_run_query_returns_quietly_when_user_cancels_the_picker(monkeypatch, cap
     """fzf present, user just pressed Esc/Ctrl-C (run_picker -> None) --
     this is a deliberate cancellation, not an error, so nothing should be
     printed and there should be no static-table fallback."""
-    monkeypatch.setattr(cli, "_get_search_result", lambda query, top_n: _FAKE_INTERACTIVE_RESULT)
+    monkeypatch.setattr(cli, "_get_search_result", lambda query, top_n, sort_mode=None: _FAKE_INTERACTIVE_RESULT)
     monkeypatch.setattr(cli, "run_picker", lambda candidates, exact_match: None)
     monkeypatch.setattr(cli, "_fzf_missing", lambda: False)
 
@@ -369,7 +373,7 @@ def test_run_query_falls_back_to_static_results_and_warns_on_picker_runtime_erro
     """Root requirement of Fix 3: a genuine fzf runtime failure (fzf present
     but erroring, e.g. no controlling terminal) must never produce zero
     output -- it must fall back to the static table and mention the error."""
-    monkeypatch.setattr(cli, "_get_search_result", lambda query, top_n: _FAKE_INTERACTIVE_RESULT)
+    monkeypatch.setattr(cli, "_get_search_result", lambda query, top_n, sort_mode=None: _FAKE_INTERACTIVE_RESULT)
 
     def fake_run_picker(candidates, exact_match):
         raise PickerError(2, "inappropriate ioctl for device")
@@ -428,7 +432,7 @@ def test_query_only_prints_candidate_lines_into_the_given_preview_dir(monkeypatc
             }
         ],
     }
-    monkeypatch.setattr(cli, "_get_search_result", lambda query, top_n: fake_result)
+    monkeypatch.setattr(cli, "_get_search_result", lambda query, top_n, sort_mode=None: fake_result)
     monkeypatch.setenv("REVDICT_LIVE_PREVIEW_DIR", str(tmp_path))
 
     code = cli.main(["--query-only", "happy"])
@@ -464,7 +468,7 @@ def test_jsonl_query_prints_one_json_object_per_candidate(monkeypatch, capsys):
             }
         ],
     }
-    monkeypatch.setattr(cli, "_get_search_result", lambda query, top_n: fake_result)
+    monkeypatch.setattr(cli, "_get_search_result", lambda query, top_n, sort_mode=None: fake_result)
 
     code = cli.main(["--jsonl-query", "happy"])
 
@@ -496,7 +500,7 @@ def test_jsonl_query_flattens_exact_match_first_sense_as_first_row(monkeypatch, 
         },
         "candidates": [],
     }
-    monkeypatch.setattr(cli, "_get_search_result", lambda query, top_n: fake_result)
+    monkeypatch.setattr(cli, "_get_search_result", lambda query, top_n, sort_mode=None: fake_result)
 
     code = cli.main(["--jsonl-query", "happy"])
 
@@ -535,7 +539,7 @@ def test_jsonl_query_candidate_without_synonyms_or_stress_defaults_cleanly(monke
             }
         ],
     }
-    monkeypatch.setattr(cli, "_get_search_result", lambda query, top_n: fake_result)
+    monkeypatch.setattr(cli, "_get_search_result", lambda query, top_n, sort_mode=None: fake_result)
 
     code = cli.main(["--jsonl-query", "happy"])
 
@@ -768,9 +772,83 @@ def test_leading_dash_query_requires_the_argparse_separator(monkeypatch, capsys)
 
     monkeypatch.setattr(cli, "_index_exists", lambda: True)
     monkeypatch.setattr(
-        cli, "_get_search_result", lambda query, top_n: {"exact_match": None, "candidates": []}
+        cli, "_get_search_result", lambda query, top_n, sort_mode=None: {"exact_match": None, "candidates": []}
     )
 
     code = cli.main(["--no-interactive", "--", "-abcd"])
 
     assert code == 0
+
+
+def test_query_parser_accepts_all_seven_sort_modes():
+    from revdict import cli
+
+    parser = cli._query_parser()
+
+    for mode in ("relevance", "alpha", "alpha_desc", "shortest", "longest", "most_common", "least_common"):
+        args = parser.parse_args(["happy", "--sort", mode])
+        assert args.sort == mode
+
+
+def test_query_parser_rejects_an_invalid_sort_mode():
+    import pytest
+
+    from revdict import cli
+
+    parser = cli._query_parser()
+
+    # Deviation from the task brief's literal test code: parse_args() on
+    # this file's parser goes through _QuietArgumentParser.error(), which
+    # raises cli._ArgumentError rather than calling SystemExit directly (see
+    # _ArgumentError's use elsewhere in this file, e.g.
+    # test_main_error_message_is_not_mangled_by_rich_markup, which triggers
+    # the same override via cli.main()). SystemExit is only raised for
+    # argparse's built-in exit() paths like --help, not error() paths like
+    # an invalid --sort choice.
+    with pytest.raises(cli._ArgumentError):
+        parser.parse_args(["happy", "--sort", "nonsense"])
+
+
+def test_query_parser_sort_defaults_to_none():
+    from revdict import cli
+
+    parser = cli._query_parser()
+
+    args = parser.parse_args(["happy"])
+    assert args.sort is None
+
+
+def test_main_passes_sort_flag_through_to_get_search_result(monkeypatch):
+    from revdict import cli
+
+    monkeypatch.setattr(cli, "_index_exists", lambda: True)
+    calls = {}
+
+    def fake_get_search_result(query, top_n, sort_mode=None):
+        calls["sort_mode"] = sort_mode
+        return {"exact_match": None, "candidates": []}
+
+    monkeypatch.setattr(cli, "_get_search_result", fake_get_search_result)
+
+    code = cli.main(["happy", "--sort", "alpha", "--no-interactive"])
+
+    assert code == 0
+    assert calls["sort_mode"] == "alpha"
+
+
+def test_main_without_sort_flag_passes_none(monkeypatch):
+    from revdict import cli
+
+    monkeypatch.setattr(cli, "_index_exists", lambda: True)
+    calls = {}
+
+    def fake_get_search_result(query, top_n, sort_mode=None):
+        calls["sort_mode"] = sort_mode
+        return {"exact_match": None, "candidates": []}
+
+    monkeypatch.setattr(cli, "_get_search_result", fake_get_search_result)
+
+    code = cli.main(["happy", "--no-interactive"])
+
+    assert code == 0
+    assert calls["sort_mode"] is None

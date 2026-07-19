@@ -123,3 +123,28 @@ a pattern search for the literal word "note" combined with a meaning
 search for "a written record," not a single meaning query. Prefix the
 query with `:` (with nothing before it) to force plain meaning search
 explicitly.
+
+## Sort order
+
+By default, results are ordered by relevance ("most similar" to your
+query). Override this with `--sort`:
+
+| `--sort` value | Order |
+|---|---|
+| `relevance` (default) | Most similar first (semantic match quality) |
+| `alpha` | A → Z |
+| `alpha_desc` | Z → A |
+| `shortest` | Shortest word first |
+| `longest` | Longest word first |
+| `most_common` | Most common in modern published fiction first |
+| `least_common` | Least common in modern published fiction first |
+
+```bash
+revdict "happy" --sort alpha --no-interactive
+revdict "blue*" --sort longest --no-interactive
+```
+
+`most_common`/`least_common` reuse the same literary-frequency data that
+already nudges the default relevance ranking — a word with no frequency
+data at all (very rare hyphenated/multi-word entries) sorts as if it had
+zero frequency.
