@@ -512,3 +512,127 @@ def test_search_combined_mode_large_match_count_uses_restricted_cosine_retrieval
     assert result["candidates"][0]["headword"] == "blueword42"
     assert result["candidates"][0]["definition"] == "definition of blueword42"
     assert result["exact_match"] is None
+
+
+def test_search_sort_mode_defaults_to_none_and_preserves_relevance_order(monkeypatch):
+    """Backward compatibility: calling search() exactly as before (no
+    sort_mode argument at all) must produce the same order as today --
+    proven here by NOT passing sort_mode and confirming the plain
+    meaning-mode candidate order matches what the reranker/combine_score
+    pipeline alone would produce (unsorted by anything sort.py adds)."""
+    metadata = [
+        {
+            "headword": "aardvark", "pos": "noun", "definition": "def a",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None,
+        },
+        {
+            "headword": "zebra", "pos": "noun", "definition": "def z",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None,
+        },
+    ]
+    state = {
+        "metadata": metadata,
+        "word_index": {"aardvark": [0], "zebra": [1]},
+        "literary_frequency": {},
+        "classifier": None,
+    }
+
+    class FakeEmbedder:
+        def encode_query(self, query):
+            return np.array([1.0, 0.0], dtype="float32")
+
+    class FakeReranker:
+        def score(self, query, definitions):
+            # "zebra"'s definition scores higher than "aardvark"'s, so the
+            # un-sorted relevance order is [zebra, aardvark] -- the REVERSE
+            # of alphabetical, so this test can't accidentally pass just
+            # because alpha-sort happens to match the default order.
+            return [1.0 if "def z" in d else 0.5 for d in definitions]
+
+    state["embedder"] = FakeEmbedder()
+    state["reranker"] = FakeReranker()
+    state["embeddings"] = np.array([[1.0, 0.0], [1.0, 0.0]], dtype="float32")
+    state["embedding_norms"] = np.array([1.0, 1.0])
+    monkeypatch.setattr(search_mod, "_load_state", lambda: state)
+
+    result = search_mod.search("some query")
+
+    assert [c["headword"] for c in result["candidates"]] == ["zebra", "aardvark"]
+
+
+def test_search_alpha_sort_mode_reorders_meaning_mode_candidates(monkeypatch):
+    """Same fixture as the default-order test above, but with
+    sort_mode="alpha" -- must flip the order to alphabetical, proving
+    sort_mode is actually threaded through the meaning-mode return path."""
+    metadata = [
+        {
+            "headword": "aardvark", "pos": "noun", "definition": "def a",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None,
+        },
+        {
+            "headword": "zebra", "pos": "noun", "definition": "def z",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None,
+        },
+    ]
+    state = {
+        "metadata": metadata,
+        "word_index": {"aardvark": [0], "zebra": [1]},
+        "literary_frequency": {},
+        "classifier": None,
+    }
+
+    class FakeEmbedder:
+        def encode_query(self, query):
+            return np.array([1.0, 0.0], dtype="float32")
+
+    class FakeReranker:
+        def score(self, query, definitions):
+            return [1.0 if "def z" in d else 0.5 for d in definitions]
+
+    state["embedder"] = FakeEmbedder()
+    state["reranker"] = FakeReranker()
+    state["embeddings"] = np.array([[1.0, 0.0], [1.0, 0.0]], dtype="float32")
+    state["embedding_norms"] = np.array([1.0, 1.0])
+    monkeypatch.setattr(search_mod, "_load_state", lambda: state)
+
+    result = search_mod.search("some query", sort_mode="alpha")
+
+    assert [c["headword"] for c in result["candidates"]] == ["aardvark", "zebra"]
+
+
+def test_search_sort_mode_applies_to_structural_mode_results_too(monkeypatch):
+    """Structural-mode results default to frequency-descending order
+    (structural_search._score_and_sort) -- sort_mode="alpha" must override
+    that default too, proving the dispatch branch's sort is wired, not
+    just the meaning-mode branch's."""
+    metadata = [
+        {
+            "headword": "bluebird", "pos": "noun", "definition": "a songbird",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None,
+        },
+        {
+            "headword": "blueprint", "pos": "noun", "definition": "a drawing",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None,
+        },
+    ]
+    state = {
+        "metadata": metadata,
+        "word_index": {"bluebird": [0], "blueprint": [1]},
+        "literary_frequency": {"bluebird": 1.0, "blueprint": 3.0},
+        "classifier": None,
+    }
+    monkeypatch.setattr(search_mod, "_load_state", lambda: state)
+
+    default_result = search_mod.search("blue*")
+    alpha_result = search_mod.search("blue*", sort_mode="alpha")
+
+    # Default: frequency-descending (blueprint=3.0 > bluebird=1.0).
+    assert [c["headword"] for c in default_result["candidates"]] == ["blueprint", "bluebird"]
+    # sort_mode="alpha" overrides that to alphabetical.
+    assert [c["headword"] for c in alpha_result["candidates"]] == ["bluebird", "blueprint"]

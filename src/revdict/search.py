@@ -5,6 +5,7 @@ import numpy as np
 
 from revdict import dictionary
 from revdict import query_syntax
+from revdict import sort
 from revdict import structural_search
 from revdict.models import stress
 from revdict.models.embedder import Embedder
@@ -219,12 +220,16 @@ def tag_exact_match_senses(exact_match_raw: dict | None, classifier_factory) -> 
     return {"headword": exact_match_raw["headword"], "senses": tagged_senses}
 
 
-def search(query: str, top_n: int = 10) -> dict:
+def search(query: str, top_n: int = 10, sort_mode: str | None = None) -> dict:
     state = _load_state()
 
     parsed = query_syntax.parse_query(query)
     if parsed.mode in ("structural", "expand", "phrase_contains"):
-        return structural_search.run_structural(parsed, state, top_n)
+        result = structural_search.run_structural(parsed, state, top_n)
+        result["candidates"] = sort.apply_sort(
+            result["candidates"], sort_mode, state["literary_frequency"]
+        )
+        return result
 
     metadata = state["metadata"]
     # The retrieval pool must stay bigger than top_n even after dedup and
@@ -289,6 +294,7 @@ def search(query: str, top_n: int = 10) -> dict:
         build_candidate(metadata[row_index], relevance, state)
         for (row_index, _), relevance in zip(deduped, relevances)
     ]
+    candidates = sort.apply_sort(candidates, sort_mode, literary_frequency)
 
     exact_match = tag_exact_match_senses(
         exact_match_raw, classifier_factory=lambda: get_classifier(state)
