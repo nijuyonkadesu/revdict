@@ -158,7 +158,7 @@ def _load_state() -> dict:
     return _state
 
 
-def _get_classifier(state: dict) -> EmotionClassifier:
+def get_classifier(state: dict) -> EmotionClassifier:
     if state["classifier"] is None:
         state["classifier"] = EmotionClassifier()
     return state["classifier"]
@@ -238,7 +238,7 @@ def search(query: str, top_n: int = 10) -> dict:
         record = dict(metadata[row_index])
         if record.get("emolex"):
             record["emolex"] = frozenset(record["emolex"])
-        emotion = tag_emotion(record, classifier_factory=lambda: _get_classifier(state))
+        emotion = tag_emotion(record, classifier_factory=lambda: get_classifier(state))
         candidates.append(
             {
                 "headword": record["headword"],
@@ -254,6 +254,6 @@ def search(query: str, top_n: int = 10) -> dict:
         )
 
     exact_match = tag_exact_match_senses(
-        exact_match_raw, classifier_factory=lambda: _get_classifier(state)
+        exact_match_raw, classifier_factory=lambda: get_classifier(state)
     )
     return {"exact_match": exact_match, "candidates": candidates}
