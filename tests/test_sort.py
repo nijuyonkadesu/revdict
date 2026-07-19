@@ -91,12 +91,12 @@ def test_most_common_treats_a_missing_frequency_entry_as_zero():
 
 
 def test_frequency_lookup_is_case_insensitive():
-    candidates = _candidates("Common")
-    literary_frequency = {"common": 5.0}
+    candidates = _candidates("Common", "other")
+    literary_frequency = {"common": 5.0, "other": 1.0}
 
     result = apply_sort(candidates, "most_common", literary_frequency)
 
-    assert result == candidates
+    assert [c["headword"] for c in result] == ["Common", "other"]
 
 
 def test_unknown_sort_mode_raises_value_error():
