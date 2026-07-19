@@ -89,3 +89,31 @@ This is a fully optional plugin — `stressmark` is never a declared
 dependency of `revdict`, so nothing changes for anyone who doesn't install
 it. Since the daemon loads it once at startup, run `revdict daemon stop`
 after installing or uninstalling it so the next query picks up the change.
+
+## Query syntax
+
+Beyond plain word lookups and free-text meaning search, `revdict` understands
+a small pattern-matching DSL, typed directly into the same prompt (works in
+both the live session and one-shot `revdict "..."` queries):
+
+| Query | Matches |
+|---|---|
+| `bluebird` | Exact word lookup / free-text meaning search (unchanged default) |
+| `blue*` | Words starting with "blue" |
+| `*bird` | Words ending with "bird" |
+| `bl????rd` | Starts with "bl", ends with "rd", 4 letters between |
+| `?????` | Any 5-letter word |
+| `*y*` | Words containing "y" anywhere |
+| `?????,*y*` | Combine clauses with a comma (AND): 5 letters AND contains "y" |
+| `//fuljyo` or `//fuljyo//` | Anagram/unscramble: words using exactly these letters |
+| `-abcd` | Words that don't contain any of these letters |
+| `+abcd` | Words built only from these letters |
+| `bl*:snow` | Starts with "bl" AND related in meaning to "snow" |
+| `:snow` | Meaning search, explicit form (same as typing `snow` directly) |
+| `**winter**` | Multi-word phrases containing the whole word "winter" |
+| `expand:nasa` | Phrases whose initials spell "nasa" |
+
+Note: `*`, `?`, `#`, `@`, and a leading `+`/`-` are pattern-syntax triggers,
+so a free-text meaning query containing one of those characters (e.g. "a
+word for asking a question?") will be parsed as a pattern instead. Prefix
+the query with `:` to force meaning search explicitly.

@@ -745,3 +745,17 @@ def test_main_dispatches_copy_selection_with_empty_string_when_no_argument_given
 
     assert code == 0
     assert calls == [""]
+
+
+def test_leading_dash_query_requires_the_argparse_separator(capsys):
+    """A leading '-' in a one-shot query (the disallow-letters pattern
+    syntax, e.g. '-abcd') collides with argparse's own flag parsing --
+    'revdict -- -abcd' is the documented workaround (POSIX '--' end-of-
+    options marker), not a bug in the query parser itself. The live fzf
+    session is unaffected: --query-only/--jsonl-query read argv[1] directly
+    and never go through this argparse path."""
+    from revdict import cli
+
+    code = cli.main(["--", "-abcd", "--no-interactive"])
+
+    assert code == 0
