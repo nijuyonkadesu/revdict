@@ -747,14 +747,29 @@ def test_main_dispatches_copy_selection_with_empty_string_when_no_argument_given
     assert calls == [""]
 
 
-def test_leading_dash_query_requires_the_argparse_separator(capsys):
+def test_leading_dash_query_requires_the_argparse_separator(monkeypatch, capsys):
     """A leading '-' in a one-shot query (the disallow-letters pattern
     syntax, e.g. '-abcd') collides with argparse's own flag parsing --
     'revdict -- -abcd' is the documented workaround (POSIX '--' end-of-
     options marker), not a bug in the query parser itself. The live fzf
     session is unaffected: --query-only/--jsonl-query read argv[1] directly
-    and never go through this argparse path."""
+    and never go through this argparse path.
+
+    Deviation from the task brief's literal test code: mocks
+    _index_exists/_get_search_result so this doesn't silently depend on a
+    real index being built on whichever machine runs the suite -- every
+    other test in this file whose cli.main(...) call reaches past the
+    index-exists check does the same (see e.g.
+    test_main_prints_error_and_returns_1_when_index_missing above). Without
+    this, the test would return 1 instead of 0 on a fresh checkout/CI with
+    no index, for a reason unrelated to the '--' behavior it's meant to
+    lock in."""
     from revdict import cli
+
+    monkeypatch.setattr(cli, "_index_exists", lambda: True)
+    monkeypatch.setattr(
+        cli, "_get_search_result", lambda query, top_n: {"exact_match": None, "candidates": []}
+    )
 
     code = cli.main(["--", "-abcd", "--no-interactive"])
 
