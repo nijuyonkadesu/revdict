@@ -420,3 +420,95 @@ def test_search_combined_mode_with_no_structural_matches_returns_no_candidates(m
 
     assert result["candidates"] == []
     assert result["exact_match"] is None
+
+
+def test_search_combined_mode_large_match_count_uses_restricted_cosine_retrieval_with_correct_index_remap(monkeypatch):
+    """When a structural clause matches MORE than retrieval_pool_size rows,
+    search() must take the cosine-retrieval elif branch, which subsets
+    state["embeddings"]/state["embedding_norms"] by restrict_row_indices
+    and then must remap cosine_top_k's LOCAL indices (positions within the
+    subset) back to GLOBAL row indices via
+    restrict_row_indices[local_index] -- an off-by-one or missing-remap bug
+    here would silently return the WRONG headword's data instead of
+    crashing, so this test pins one exact headword's definition rather
+    than just checking a count.
+
+    Design: 160 metadata rows, alternating "blueword{i}" at EVEN global
+    indices (0, 2, 4, ..., 158) and "redword{i}" at ODD global indices (1,
+    3, ..., 159) -- all 80 "blueword*" headwords match the "blue*"
+    structural pattern (comfortably over top_n=1's retrieval_pool_size of
+    75), none of the "redword*" headwords do. Every matched row's
+    embedding is [0.1, 0.99] (low cosine similarity to the query vector
+    [1.0, 0.0]) EXCEPT "blueword42" (global row 84), which gets
+    [1.0, 0.0] (perfect similarity) -- guaranteed rank #1 within the
+    matched subset with no ties. If the remap used `local_index` directly
+    instead of `restrict_row_indices[local_index]` (an off-by-one/
+    no-remap bug), local index 42 would resolve to global row 42, which is
+    even and therefore "blueword21" -- a real, distinctly-defined headword,
+    not a crash -- caught directly by the definition assertion below.
+    """
+    import numpy as np
+
+    metadata = []
+    word_index = {}
+    embeddings = np.zeros((160, 2), dtype="float32")
+    for i in range(80):
+        blue_row = len(metadata)
+        metadata.append(
+            {
+                "headword": f"blueword{i}",
+                "pos": "noun",
+                "definition": f"definition of blueword{i}",
+                "examples": [],
+                "source": "wordnet",
+                "sentiwordnet": None,
+                "emolex": ["joy"],
+                "synonyms": None,
+            }
+        )
+        word_index[f"blueword{i}"] = [blue_row]
+        embeddings[blue_row] = [1.0, 0.0] if i == 42 else [0.1, 0.99]
+
+        red_row = len(metadata)
+        metadata.append(
+            {
+                "headword": f"redword{i}",
+                "pos": "noun",
+                "definition": f"definition of redword{i}",
+                "examples": [],
+                "source": "wordnet",
+                "sentiwordnet": None,
+                "emolex": ["joy"],
+                "synonyms": None,
+            }
+        )
+        word_index[f"redword{i}"] = [red_row]
+        embeddings[red_row] = [0.1, 0.99]
+
+    state = {
+        "metadata": metadata,
+        "word_index": word_index,
+        "literary_frequency": {},
+        "classifier": None,
+    }
+
+    class FakeEmbedder:
+        def encode_query(self, query):
+            return np.array([1.0, 0.0], dtype="float32")
+
+    class FakeReranker:
+        def score(self, query, definitions):
+            return [1.0 for _ in definitions]
+
+    state["embedder"] = FakeEmbedder()
+    state["reranker"] = FakeReranker()
+    state["embeddings"] = embeddings
+    state["embedding_norms"] = np.linalg.norm(embeddings, axis=1)
+    monkeypatch.setattr(search_mod, "_load_state", lambda: state)
+
+    result = search_mod.search("blue*:snow", top_n=1)
+
+    assert len(result["candidates"]) == 1
+    assert result["candidates"][0]["headword"] == "blueword42"
+    assert result["candidates"][0]["definition"] == "definition of blueword42"
+    assert result["exact_match"] is None
