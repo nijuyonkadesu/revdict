@@ -1,6 +1,7 @@
 # tests/test_search.py
 import numpy as np
 
+from revdict import search as search_mod
 from revdict.search import (
     absolute_relevance,
     combine_score,
@@ -280,3 +281,73 @@ def test_combine_score_real_happy_candidate_set_ranks_glad_first():
     order = [headword for _, headword in combined]
 
     assert order[0] == "glad"
+
+
+def _fake_state():
+    # emolex=["joy"] (a specific category, not None) so tag_emotion's
+    # classifier fallback never fires and these tests never construct a
+    # real EmotionClassifier -- see the identical note in
+    # tests/test_structural_search.py's _build_state().
+    metadata = [
+        {
+            "headword": "bluebird",
+            "pos": "noun",
+            "definition": "an American songbird",
+            "examples": [],
+            "source": "wordnet",
+            "sentiwordnet": None,
+            "emolex": ["joy"],
+            "synonyms": None,
+        },
+    ]
+    return {
+        "metadata": metadata,
+        "word_index": {"bluebird": [0]},
+        "literary_frequency": {"bluebird": 1.0},
+        "classifier": None,
+    }
+
+
+def test_search_dispatches_structural_queries_to_run_structural_and_skips_embedding(monkeypatch):
+    """'blue*' must never touch the embedder/reranker at all -- asserting
+    _load_state's embedder/reranker slots are never accessed proves the
+    dispatch genuinely bypasses the semantic pipeline rather than just
+    happening to produce the same answer."""
+    state = _fake_state()
+    monkeypatch.setattr(search_mod, "_load_state", lambda: state)
+
+    result = search_mod.search("blue*", top_n=10)
+
+    assert result["exact_match"] is None
+    assert [c["headword"] for c in result["candidates"]] == ["bluebird"]
+
+
+def test_search_still_handles_a_plain_meaning_query_via_the_existing_path(monkeypatch):
+    """Backward compatibility: a query with no special characters at all
+    must still reach the existing embed/rerank/exact-match code path,
+    proven here by confirming the embedder is actually invoked."""
+    state = _fake_state()
+    calls = []
+
+    class FakeEmbedder:
+        def encode_query(self, query):
+            calls.append(query)
+            import numpy as np
+
+            return np.array([1.0], dtype="float32")
+
+    class FakeReranker:
+        def score(self, query, definitions):
+            return [1.0 for _ in definitions]
+
+    state["embedder"] = FakeEmbedder()
+    state["reranker"] = FakeReranker()
+    import numpy as np
+
+    state["embeddings"] = np.array([[1.0]], dtype="float32")
+    state["embedding_norms"] = np.array([1.0])
+    monkeypatch.setattr(search_mod, "_load_state", lambda: state)
+
+    search_mod.search("bluebird", top_n=10)
+
+    assert calls == ["bluebird"]

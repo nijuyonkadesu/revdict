@@ -4,6 +4,8 @@ import math
 import numpy as np
 
 from revdict import dictionary
+from revdict import query_syntax
+from revdict import structural_search
 from revdict.models import stress
 from revdict.models.embedder import Embedder
 from revdict.models.emotion import EmotionClassifier, tag_emotion
@@ -201,19 +203,26 @@ def tag_exact_match_senses(exact_match_raw: dict | None, classifier_factory) -> 
 
 def search(query: str, top_n: int = 10) -> dict:
     state = _load_state()
+
+    parsed = query_syntax.parse_query(query)
+    if parsed.mode in ("structural", "expand", "phrase_contains"):
+        return structural_search.run_structural(parsed, state, top_n)
+
     metadata = state["metadata"]
+
+    meaning_query = parsed.meaning_text if parsed.meaning_text is not None else query
 
     # The retrieval pool must stay bigger than top_n even after dedup and
     # exact-match exclusion shrink it, so a larger -n still has enough real
     # candidates to draw from instead of silently returning fewer than asked.
     retrieval_pool_size = max(75, top_n * 3)
 
-    query_vec = state["embedder"].encode_query(query)
+    query_vec = state["embedder"].encode_query(meaning_query)
     retrieved = cosine_top_k(
         query_vec, state["embeddings"], k=retrieval_pool_size, matrix_norms=state["embedding_norms"]
     )
     definitions = [metadata[index]["definition"] for index, _ in retrieved]
-    rerank_scores = state["reranker"].score(query, definitions)
+    rerank_scores = state["reranker"].score(meaning_query, definitions)
     literary_frequency = state["literary_frequency"]
     scored = []
     for i in range(len(retrieved)):
@@ -222,7 +231,7 @@ def search(query: str, top_n: int = 10) -> dict:
         adjusted = combine_score(rerank_scores[i], headword, literary_frequency)
         scored.append((row_index, adjusted))
 
-    exact_match_raw = dictionary.lookup_exact(query.strip(), state["word_index"], metadata)
+    exact_match_raw = dictionary.lookup_exact(meaning_query.strip(), state["word_index"], metadata)
     exact_headword = exact_match_raw["headword"] if exact_match_raw is not None else None
 
     deduped = dedupe_by_headword(scored, metadata)
