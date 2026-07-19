@@ -147,3 +147,15 @@ def test_run_structural_respects_top_n():
     result = run_structural(parsed, state, top_n=1)
 
     assert len(result["candidates"]) == 1
+
+
+from revdict.structural_search import matching_row_indices
+
+
+def test_matching_row_indices_maps_matched_headwords_to_their_metadata_rows():
+    parsed = ParsedQuery(mode="combined", pattern_clauses=["blue*"], meaning_text="snow")
+    word_index = {"bluebird": [0, 3], "blueprint": [1], "redbird": [2]}
+
+    result = matching_row_indices(parsed, word_index)
+
+    assert sorted(result) == [0, 1, 3]

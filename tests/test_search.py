@@ -351,3 +351,72 @@ def test_search_still_handles_a_plain_meaning_query_via_the_existing_path(monkey
     search_mod.search("bluebird", top_n=10)
 
     assert calls == ["bluebird"]
+
+
+def test_search_combined_mode_restricts_candidates_to_the_pattern_match(monkeypatch):
+    """'blue*:snow' must only ever surface headwords matching 'blue*',
+    even though the fake reranker below would happily score every row
+    equally -- proving the structural filter actually narrows the pool
+    before reranking, not just after."""
+    # emolex=["joy"] on both records, not None -- see _fake_state()'s note
+    # above on why this is required to avoid constructing a real
+    # EmotionClassifier inside this test.
+    metadata = [
+        {
+            "headword": "bluebird", "pos": "noun", "definition": "a songbird",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None,
+        },
+        {
+            "headword": "redbird", "pos": "noun", "definition": "a songbird",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None,
+        },
+    ]
+    state = {
+        "metadata": metadata,
+        "word_index": {"bluebird": [0], "redbird": [1]},
+        "literary_frequency": {},
+        "classifier": None,
+    }
+
+    import numpy as np
+
+    class FakeEmbedder:
+        def encode_query(self, query):
+            return np.array([1.0, 0.0], dtype="float32")
+
+    class FakeReranker:
+        def score(self, query, definitions):
+            return [1.0 for _ in definitions]
+
+    state["embedder"] = FakeEmbedder()
+    state["reranker"] = FakeReranker()
+    state["embeddings"] = np.array([[1.0, 0.0], [1.0, 0.0]], dtype="float32")
+    state["embedding_norms"] = np.array([1.0, 1.0])
+    monkeypatch.setattr(search_mod, "_load_state", lambda: state)
+
+    result = search_mod.search("blue*:snow", top_n=10)
+
+    assert [c["headword"] for c in result["candidates"]] == ["bluebird"]
+    assert result["exact_match"] is None
+
+
+def test_search_combined_mode_with_no_structural_matches_returns_no_candidates(monkeypatch):
+    """A structural clause that matches nothing (e.g. an anagram with no
+    real solutions) must return an empty result, not crash -- this is the
+    regression test for the empty-definitions guard around the reranker
+    call in search()'s combined-mode branch. Deliberately uses the bare
+    _fake_state() fixture with no embedder/reranker/embeddings configured:
+    zero structural matches means len(restrict_row_indices) == 0 <=
+    retrieval_pool_size, so the code must take the direct small-match path
+    and never touch those fields at all -- if it did, this test would fail
+    with a KeyError instead of the assertions below, which is exactly the
+    proof this guard is load-bearing."""
+    state = _fake_state()
+    monkeypatch.setattr(search_mod, "_load_state", lambda: state)
+
+    result = search_mod.search("//zzzzqx:snow", top_n=10)
+
+    assert result["candidates"] == []
+    assert result["exact_match"] is None

@@ -86,3 +86,12 @@ def run_structural(parsed: ParsedQuery, state: dict, top_n: int) -> dict:
         )
 
     return {"exact_match": None, "candidates": candidates}
+
+
+def matching_row_indices(parsed: ParsedQuery, word_index: dict[str, list[int]]) -> list[int]:
+    predicate = compile_clauses(parsed.pattern_clauses)
+    indices = []
+    for word, rows in word_index.items():
+        if predicate(word):
+            indices.extend(rows)
+    return indices

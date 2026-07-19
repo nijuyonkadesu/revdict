@@ -209,20 +209,43 @@ def search(query: str, top_n: int = 10) -> dict:
         return structural_search.run_structural(parsed, state, top_n)
 
     metadata = state["metadata"]
-
-    meaning_query = parsed.meaning_text if parsed.meaning_text is not None else query
-
     # The retrieval pool must stay bigger than top_n even after dedup and
     # exact-match exclusion shrink it, so a larger -n still has enough real
     # candidates to draw from instead of silently returning fewer than asked.
     retrieval_pool_size = max(75, top_n * 3)
 
-    query_vec = state["embedder"].encode_query(meaning_query)
-    retrieved = cosine_top_k(
-        query_vec, state["embeddings"], k=retrieval_pool_size, matrix_norms=state["embedding_norms"]
-    )
+    restrict_row_indices = None
+    suppress_exact_match = False
+    if parsed.mode == "combined":
+        restrict_row_indices = structural_search.matching_row_indices(parsed, state["word_index"])
+        suppress_exact_match = True
+
+    meaning_query = parsed.meaning_text if parsed.meaning_text is not None else query
+
+    # query_vec is only computed on the branches that actually need cosine
+    # retrieval -- when the structural filter has already narrowed the pool
+    # to <= retrieval_pool_size rows, there's nothing to retrieve by
+    # embedding similarity, so encoding the query would be pure waste.
+    if restrict_row_indices is not None and len(restrict_row_indices) <= retrieval_pool_size:
+        retrieved = [(index, 0.0) for index in restrict_row_indices]
+    elif restrict_row_indices is not None:
+        query_vec = state["embedder"].encode_query(meaning_query)
+        subset_matrix = state["embeddings"][restrict_row_indices]
+        subset_norms = state["embedding_norms"][restrict_row_indices]
+        local_top = cosine_top_k(query_vec, subset_matrix, k=retrieval_pool_size, matrix_norms=subset_norms)
+        retrieved = [(restrict_row_indices[local_index], score) for local_index, score in local_top]
+    else:
+        query_vec = state["embedder"].encode_query(meaning_query)
+        retrieved = cosine_top_k(
+            query_vec, state["embeddings"], k=retrieval_pool_size, matrix_norms=state["embedding_norms"]
+        )
+
     definitions = [metadata[index]["definition"] for index, _ in retrieved]
-    rerank_scores = state["reranker"].score(meaning_query, definitions)
+    # A structural filter that matches zero headwords (e.g. an anagram with
+    # no real solutions) reaches here with an empty `retrieved`/`definitions`
+    # -- skip the reranker call entirely rather than relying on
+    # CrossEncoder.predict's undocumented behavior on an empty batch.
+    rerank_scores = state["reranker"].score(meaning_query, definitions) if definitions else []
     literary_frequency = state["literary_frequency"]
     scored = []
     for i in range(len(retrieved)):
@@ -231,7 +254,9 @@ def search(query: str, top_n: int = 10) -> dict:
         adjusted = combine_score(rerank_scores[i], headword, literary_frequency)
         scored.append((row_index, adjusted))
 
-    exact_match_raw = dictionary.lookup_exact(meaning_query.strip(), state["word_index"], metadata)
+    exact_match_raw = None
+    if not suppress_exact_match:
+        exact_match_raw = dictionary.lookup_exact(meaning_query.strip(), state["word_index"], metadata)
     exact_headword = exact_match_raw["headword"] if exact_match_raw is not None else None
 
     deduped = dedupe_by_headword(scored, metadata)
