@@ -1001,6 +1001,46 @@ def test_search_phonetic_filters_none_is_a_noop(monkeypatch):
     assert {c["headword"] for c in result["candidates"]} == {"bluebird", "blue"}
 
 
+def test_search_syllables_zero_is_treated_as_a_real_filter_not_a_noop(monkeypatch):
+    """syllables=0 must actually filter (excluding every real word, since
+    none has zero syllables) rather than being treated as falsy-therefore-
+    no-filter -- the bug this test guards against made `any([syllables,
+    ...])` silently skip filtering whenever syllables was exactly 0."""
+    metadata = [
+        {
+            "headword": "cat", "pos": "noun", "definition": "a small carnivore",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+            "phonetics": {"syllable_count": 1, "primary_vowel": "AE", "rhyme_key": "AE T", "meter": "/", "phonemes": ["K", "AE1", "T"]},
+        },
+    ]
+    state = {
+        "metadata": metadata,
+        "word_index": {"cat": [0]},
+        "literary_frequency": {},
+        "classifier": None,
+    }
+    import numpy as np
+
+    class FakeEmbedder:
+        def encode_query(self, query):
+            return np.array([1.0], dtype="float32")
+
+    class FakeReranker:
+        def score(self, query, definitions):
+            return [1.0 for _ in definitions]
+
+    state["embedder"] = FakeEmbedder()
+    state["reranker"] = FakeReranker()
+    state["embeddings"] = np.array([[1.0]], dtype="float32")
+    state["embedding_norms"] = np.array([1.0])
+    monkeypatch.setattr(search_mod, "_load_state", lambda: state)
+
+    result = search_mod.search("small carnivore", top_n=10, syllables=0)
+
+    assert result["candidates"] == []
+
+
 def test_search_syllables_filter_restricts_candidates(monkeypatch):
     metadata = [
         {

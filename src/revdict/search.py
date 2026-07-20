@@ -94,8 +94,19 @@ def filter_by_phonetics(
 ) -> list[tuple[int, float]]:
     """Same before-top_n-truncation contract as filter_by_category -- see
     that function's docstring. All 5 filters AND together; each is
-    individually a no-op when its argument is falsy/None."""
-    if not any([syllables, primary_vowel, rhyme_key, sounds_like_phonemes, meter]):
+    individually a no-op when its argument is falsy/None.
+
+    syllables is checked with `is None` rather than folded into the same
+    any([...]) truthiness check as the other 4 -- 0 is a real, meaningful
+    filter value for syllable count (no real word has 0 syllables, so
+    syllables=0 should exclude everything), but Python's any() treats 0 as
+    falsy, which would otherwise make this guard silently skip filtering
+    whenever syllables was exactly 0. primary_vowel/rhyme_key/meter are
+    strings (where "" is never a real value) and sounds_like_phonemes is a
+    list (where [] is never a real value), so truthiness is correct for
+    those 4.
+    """
+    if syllables is None and not any([primary_vowel, rhyme_key, sounds_like_phonemes, meter]):
         return scored_rows
     return [
         (index, score)

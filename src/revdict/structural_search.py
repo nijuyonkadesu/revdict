@@ -79,7 +79,13 @@ def run_structural(
             for word in headwords
             if category_module.matches_category(metadata[word_index[word][0]], category)
         ]
-    if any([syllables, primary_vowel, rhyme_key, sounds_like_phonemes, meter]):
+    # syllables is checked with `is not None` rather than folded into the
+    # same any([...]) truthiness check as the other 4 -- 0 is a real,
+    # meaningful filter value for syllable count (no real word has 0
+    # syllables, so syllables=0 should exclude everything), but Python's
+    # any() treats 0 as falsy, which would otherwise make this guard
+    # silently skip filtering whenever syllables was exactly 0.
+    if syllables is not None or any([primary_vowel, rhyme_key, sounds_like_phonemes, meter]):
         headwords = [
             word
             for word in headwords

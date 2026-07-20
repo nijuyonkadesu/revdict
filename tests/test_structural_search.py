@@ -250,6 +250,26 @@ def test_run_structural_filters_by_syllables_before_top_n_truncation():
     assert {c["headword"] for c in result["candidates"]} == {"bluebird", "blueprint"}
 
 
+def test_run_structural_syllables_zero_is_treated_as_a_real_filter_not_a_noop():
+    """syllables=0 must actually filter (excluding every matched headword,
+    since none has zero syllables) rather than being treated as
+    falsy-therefore-no-filter -- the bug this test guards against made
+    `any([syllables, ...])` silently skip filtering whenever syllables was
+    exactly 0."""
+    parsed = ParsedQuery(mode="structural", pattern_clauses=["blue*"])
+    state = _build_state()
+    state["metadata"][0]["phonetics"] = {
+        "syllable_count": 2, "primary_vowel": "UW", "rhyme_key": "Y", "meter": "/x", "phonemes": [],
+    }
+    state["metadata"][1]["phonetics"] = {
+        "syllable_count": 2, "primary_vowel": "UW", "rhyme_key": "Z", "meter": "/x", "phonemes": [],
+    }
+
+    result = run_structural(parsed, state, top_n=10, syllables=0)
+
+    assert result["candidates"] == []
+
+
 def test_run_structural_no_phonetic_filters_matches_everything():
     parsed = ParsedQuery(mode="structural", pattern_clauses=["blue*"])
     state = _build_state()
