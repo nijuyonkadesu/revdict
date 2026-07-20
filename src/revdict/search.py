@@ -3,6 +3,7 @@ import math
 
 import numpy as np
 
+from revdict import category as category_module
 from revdict import dictionary
 from revdict import query_syntax
 from revdict import sort
@@ -61,6 +62,22 @@ def exclude_headword(
         (index, score)
         for index, score in scored_rows
         if metadata[index]["headword"].lower() != excluded
+    ]
+
+
+def filter_by_category(
+    scored_rows: list[tuple[int, float]], metadata: list[dict], category: str | None
+) -> list[tuple[int, float]]:
+    """Filters BEFORE any top_n truncation happens -- applying this after
+    truncation would silently return fewer than top_n results whenever
+    non-matching rows occupied slots that got cut, even though more real
+    matches existed further down the ranked list."""
+    if not category or category == "all":
+        return scored_rows
+    return [
+        (index, score)
+        for index, score in scored_rows
+        if category_module.matches_category(metadata[index], category)
     ]
 
 
@@ -220,8 +237,18 @@ def tag_exact_match_senses(exact_match_raw: dict | None, classifier_factory) -> 
     return {"headword": exact_match_raw["headword"], "senses": tagged_senses}
 
 
-def search(query: str, top_n: int = 10, sort_mode: str | None = None) -> dict:
+def search(
+    query: str, top_n: int = 10, sort_mode: str | None = None, category: str | None = None
+) -> dict:
     state = _load_state()
+
+    # Validated eagerly, independent of whether any row survives to reach
+    # filter_by_category below -- an unrecognized category must always
+    # raise, even when the candidate pool happens to be empty (e.g. the
+    # only row is excluded as the exact match), so this can't rely on
+    # matches_category being reached by the per-row filter.
+    if category and category not in category_module.CATEGORIES:
+        raise ValueError(f"Unknown category: {category!r}")
 
     parsed = query_syntax.parse_query(query)
     if parsed.mode in ("structural", "expand", "phrase_contains"):
@@ -283,7 +310,11 @@ def search(query: str, top_n: int = 10, sort_mode: str | None = None) -> dict:
     exact_headword = exact_match_raw["headword"] if exact_match_raw is not None else None
 
     deduped = dedupe_by_headword(scored, metadata)
-    deduped = exclude_headword(deduped, metadata, exact_headword)[:top_n]
+    deduped = exclude_headword(deduped, metadata, exact_headword)
+    # category never filters the exact-match panel above -- it narrows the
+    # candidate list only, so a query like "run" --category noun still
+    # shows the verb sense of "run" in the exact-match block.
+    deduped = filter_by_category(deduped, metadata, category)[:top_n]
     # absolute_relevance (not relative_relevance) drives the displayed
     # confidence: it reflects genuine absolute match quality, so a
     # low-confidence/gibberish query reads as visibly low across the board

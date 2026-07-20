@@ -1,5 +1,6 @@
 # tests/test_search.py
 import numpy as np
+import pytest
 
 from revdict import search as search_mod
 from revdict.search import (
@@ -636,3 +637,259 @@ def test_search_sort_mode_applies_to_structural_mode_results_too(monkeypatch):
     assert [c["headword"] for c in default_result["candidates"]] == ["blueprint", "bluebird"]
     # sort_mode="alpha" overrides that to alphabetical.
     assert [c["headword"] for c in alpha_result["candidates"]] == ["bluebird", "blueprint"]
+
+
+def test_search_category_none_returns_candidates_of_every_part_of_speech(monkeypatch):
+    """category=None (the default) must not filter anything -- proven with
+    a fixture containing multiple different POS values, all of which must
+    still appear."""
+    metadata = [
+        {
+            "headword": "bluebird", "pos": "noun", "definition": "a songbird",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+        },
+        {
+            "headword": "blue", "pos": "adjective", "definition": "the color of the sky",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+        },
+    ]
+    state = {
+        "metadata": metadata,
+        "word_index": {"bluebird": [0], "blue": [1]},
+        "literary_frequency": {},
+        "classifier": None,
+    }
+    import numpy as np
+
+    class FakeEmbedder:
+        def encode_query(self, query):
+            return np.array([1.0, 0.0], dtype="float32")
+
+    class FakeReranker:
+        def score(self, query, definitions):
+            return [1.0 for _ in definitions]
+
+    state["embedder"] = FakeEmbedder()
+    state["reranker"] = FakeReranker()
+    state["embeddings"] = np.array([[1.0, 0.0], [1.0, 0.0]], dtype="float32")
+    state["embedding_norms"] = np.array([1.0, 1.0])
+    monkeypatch.setattr(search_mod, "_load_state", lambda: state)
+
+    result = search_mod.search("sky color", top_n=10)
+
+    headwords = {c["headword"] for c in result["candidates"]}
+    assert headwords == {"bluebird", "blue"}
+
+
+def test_search_category_filters_meaning_mode_candidates_to_the_matching_pos(monkeypatch):
+    metadata = [
+        {
+            "headword": "bluebird", "pos": "noun", "definition": "a songbird",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+        },
+        {
+            "headword": "blue", "pos": "adjective", "definition": "the color of the sky",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+        },
+    ]
+    state = {
+        "metadata": metadata,
+        "word_index": {"bluebird": [0], "blue": [1]},
+        "literary_frequency": {},
+        "classifier": None,
+    }
+    import numpy as np
+
+    class FakeEmbedder:
+        def encode_query(self, query):
+            return np.array([1.0, 0.0], dtype="float32")
+
+    class FakeReranker:
+        def score(self, query, definitions):
+            return [1.0 for _ in definitions]
+
+    state["embedder"] = FakeEmbedder()
+    state["reranker"] = FakeReranker()
+    state["embeddings"] = np.array([[1.0, 0.0], [1.0, 0.0]], dtype="float32")
+    state["embedding_norms"] = np.array([1.0, 1.0])
+    monkeypatch.setattr(search_mod, "_load_state", lambda: state)
+
+    result = search_mod.search("sky color", top_n=10, category="noun")
+
+    assert [c["headword"] for c in result["candidates"]] == ["bluebird"]
+
+
+def test_search_category_filters_before_top_n_truncation_so_real_matches_are_not_dropped(monkeypatch):
+    """The category filter must apply to the FULL scored candidate pool
+    before slicing to top_n, not after -- otherwise a high-scoring
+    non-matching row occupying a top_n slot would silently squeeze out a
+    real match ranked just below it. Fixture: the single highest-scoring
+    candidate is an adjective (excluded by category='noun'); two lower-
+    scoring nouns follow. Asking for top_n=2 nouns must return BOTH of
+    them, not just one."""
+    metadata = [
+        {
+            "headword": "bluely", "pos": "adjective", "definition": "a common adjective sense",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+        },
+        {
+            "headword": "blueness", "pos": "noun", "definition": "a rare noun sense one",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+        },
+        {
+            "headword": "bluebell", "pos": "noun", "definition": "a rare noun sense two",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+        },
+    ]
+    state = {
+        "metadata": metadata,
+        "word_index": {"bluely": [0], "blueness": [1], "bluebell": [2]},
+        "literary_frequency": {},
+        "classifier": None,
+    }
+    import numpy as np
+
+    class FakeEmbedder:
+        def encode_query(self, query):
+            return np.array([1.0, 0.0], dtype="float32")
+
+    class FakeReranker:
+        def score(self, query, definitions):
+            score_by_definition = {
+                "a common adjective sense": 5.0,
+                "a rare noun sense one": 3.0,
+                "a rare noun sense two": 2.0,
+            }
+            return [score_by_definition[d] for d in definitions]
+
+    state["embedder"] = FakeEmbedder()
+    state["reranker"] = FakeReranker()
+    state["embeddings"] = np.array([[1.0, 0.0]] * 3, dtype="float32")
+    state["embedding_norms"] = np.array([1.0, 1.0, 1.0])
+    monkeypatch.setattr(search_mod, "_load_state", lambda: state)
+
+    result = search_mod.search("blue things", top_n=2, category="noun")
+
+    assert {c["headword"] for c in result["candidates"]} == {"blueness", "bluebell"}
+
+
+def test_search_category_does_not_filter_the_exact_match_panel(monkeypatch):
+    """category narrows the candidate list only -- the exact-match block
+    always shows the typed word's own senses regardless of category, since
+    the user explicitly typed that exact word."""
+    metadata = [
+        {
+            "headword": "run", "pos": "verb", "definition": "to move fast on foot",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+        },
+    ]
+    state = {
+        "metadata": metadata,
+        "word_index": {"run": [0]},
+        "literary_frequency": {},
+        "classifier": None,
+    }
+    import numpy as np
+
+    class FakeEmbedder:
+        def encode_query(self, query):
+            return np.array([1.0], dtype="float32")
+
+    class FakeReranker:
+        def score(self, query, definitions):
+            return [1.0 for _ in definitions]
+
+    state["embedder"] = FakeEmbedder()
+    state["reranker"] = FakeReranker()
+    state["embeddings"] = np.array([[1.0]], dtype="float32")
+    state["embedding_norms"] = np.array([1.0])
+    monkeypatch.setattr(search_mod, "_load_state", lambda: state)
+
+    result = search_mod.search("run", top_n=10, category="noun")
+
+    assert result["exact_match"]["headword"] == "run"
+
+
+def test_search_category_applies_to_combined_mode_too(monkeypatch):
+    """Combined mode ('blue*:snow') restricts the retrieval pool by
+    structural pattern first; category must further narrow the SAME final
+    candidate list, not be bypassed by the combined-mode code path."""
+    metadata = [
+        {
+            "headword": "bluebird", "pos": "noun", "definition": "a songbird",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+        },
+        {
+            "headword": "bluely", "pos": "adjective", "definition": "in a blue manner",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+        },
+    ]
+    state = {
+        "metadata": metadata,
+        "word_index": {"bluebird": [0], "bluely": [1]},
+        "literary_frequency": {},
+        "classifier": None,
+    }
+    import numpy as np
+
+    class FakeEmbedder:
+        def encode_query(self, query):
+            return np.array([1.0, 0.0], dtype="float32")
+
+    class FakeReranker:
+        def score(self, query, definitions):
+            return [1.0 for _ in definitions]
+
+    state["embedder"] = FakeEmbedder()
+    state["reranker"] = FakeReranker()
+    state["embeddings"] = np.array([[1.0, 0.0], [1.0, 0.0]], dtype="float32")
+    state["embedding_norms"] = np.array([1.0, 1.0])
+    monkeypatch.setattr(search_mod, "_load_state", lambda: state)
+
+    result = search_mod.search("blue*:snow", top_n=10, category="noun")
+
+    assert [c["headword"] for c in result["candidates"]] == ["bluebird"]
+
+
+def test_search_unknown_category_raises_value_error(monkeypatch):
+    metadata = [
+        {
+            "headword": "bluebird", "pos": "noun", "definition": "a songbird",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+        },
+    ]
+    state = {
+        "metadata": metadata,
+        "word_index": {"bluebird": [0]},
+        "literary_frequency": {},
+        "classifier": None,
+    }
+    import numpy as np
+
+    class FakeEmbedder:
+        def encode_query(self, query):
+            return np.array([1.0], dtype="float32")
+
+    class FakeReranker:
+        def score(self, query, definitions):
+            return [1.0 for _ in definitions]
+
+    state["embedder"] = FakeEmbedder()
+    state["reranker"] = FakeReranker()
+    state["embeddings"] = np.array([[1.0]], dtype="float32")
+    state["embedding_norms"] = np.array([1.0])
+    monkeypatch.setattr(search_mod, "_load_state", lambda: state)
+
+    with pytest.raises(ValueError, match="Unknown category"):
+        search_mod.search("bluebird", top_n=10, category="verb_phrase")
