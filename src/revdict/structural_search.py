@@ -46,6 +46,10 @@ def _score_and_sort(headwords: list[str], literary_frequency: dict[str, float]) 
 
 
 def run_structural(parsed: ParsedQuery, state: dict, top_n: int, category: str | None = None) -> dict:
+    # Callers are responsible for validating `category` against
+    # category.CATEGORIES before calling this function; search() does that
+    # eagerly before dispatch, so this function doesn't duplicate it.
+
     # Deferred import: search.py imports structural_search for dispatch
     # (Task 6), so importing search.py at module load time here would be
     # circular. Matches the lazy-import pattern already used elsewhere in

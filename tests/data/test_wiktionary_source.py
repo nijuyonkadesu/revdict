@@ -10,6 +10,7 @@ from revdict.data.wiktionary_source import (
     parse_filtered_entries,
     stream_filtered_entries_from_gzip,
 )
+from revdict.paths import RAW_WIKTIONARY_PATH
 
 ENGLISH_NOUN_LINE = (
     '{"word": "dictionary", "pos": "noun", "lang": "English", "lang_code": "en", '
@@ -110,7 +111,7 @@ def test_parse_filtered_entries_defaults_tags_to_an_empty_list_when_absent():
     assert records[0]["tags"] == []
 
 
-_REAL_RAW_WIKTIONARY_PATH = Path.home() / ".cache" / "rev_dictionary" / "raw-wiktextract-data.jsonl.gz"
+_REAL_RAW_WIKTIONARY_PATH = RAW_WIKTIONARY_PATH
 
 
 @pytest.mark.skipif(
