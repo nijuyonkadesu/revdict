@@ -16,6 +16,7 @@ from revdict.data.wiktionary_source import (
     stream_filtered_entries_from_gzip,
 )
 from revdict.data.wordnet_source import load_wordnet_senses
+from revdict.models import phonetics
 from revdict.models.embedder import Embedder
 from revdict.paths import (
     INDEX_DIR,
@@ -57,6 +58,7 @@ def build_metadata_record(record: dict) -> dict:
         "emolex": list(record["emolex"]) if record.get("emolex") else None,
         "synonyms": record.get("synonyms"),
         "tags": record.get("tags") or [],
+        "phonetics": record.get("phonetics"),
     }
 
 
@@ -84,6 +86,14 @@ def build(skip_confirm: bool = False) -> None:
     print("Merging corpus...")
     records = merge_records(wordnet_records, wiktionary_records)
     print(f"Merged corpus: {len(records)} sense records.")
+
+    print("Precomputing phonetics (syllables, rhyme key, meter)...")
+    phonetics_cache: dict[tuple[str, str], dict | None] = {}
+    for record in records:
+        cache_key = (record["headword"].lower(), record["pos"])
+        if cache_key not in phonetics_cache:
+            phonetics_cache[cache_key] = phonetics.resolve(record["headword"], record["pos"])
+        record["phonetics"] = phonetics_cache[cache_key]
 
     print("Attaching NRC EmoLex tags...")
     emolex = load_emolex()
