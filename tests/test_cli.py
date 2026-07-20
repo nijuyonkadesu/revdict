@@ -1040,3 +1040,29 @@ def test_main_without_phonetic_flags_passes_all_none(monkeypatch):
 
     assert code == 0
     assert calls == {"syllables": None, "primary_vowel": None, "rhymes_with": None, "sounds_like": None, "meter": None}
+
+
+def test_main_prints_a_clean_error_message_when_a_phonetic_target_cannot_be_resolved(monkeypatch, capsys):
+    """Regression guard: search()/resolve_phonetic_target deliberately
+    raises ValueError when --rhymes-with/--sounds-like can't resolve their
+    target (e.g. stressmark missing/outdated) -- this must surface as a
+    clean `revdict: error: ...` message and exit code 1, not an unhandled
+    traceback."""
+    from revdict import cli
+
+    monkeypatch.setattr(cli, "_index_exists", lambda: True)
+
+    def fake_get_search_result(query, top_n, sort_mode=None, category=None, syllables=None, primary_vowel=None, rhymes_with=None, sounds_like=None, meter=None):
+        raise ValueError(
+            "--rhymes-with requires the stressmark library (>= 0.2.0) to be installed and importable."
+        )
+
+    monkeypatch.setattr(cli, "_get_search_result", fake_get_search_result)
+
+    code = cli.main(["cat", "--rhymes-with", "hat", "--no-interactive"])
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "Traceback" not in captured.out
+    assert "Traceback" not in captured.err
+    assert "stressmark" in captured.out or "stressmark" in captured.err

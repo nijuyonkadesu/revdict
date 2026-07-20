@@ -474,6 +474,19 @@ def main(argv: list[str] | None = None) -> int:
             return _run_query(query, top_n=30, interactive=False)
 
         args = _query_parser().parse_args(argv)
+
+        query = " ".join(args.query)
+
+        if not _index_exists():
+            _print_no_index_error()
+            return 1
+
+        interactive = not args.no_interactive and sys.stdout.isatty()
+        return _run_query(
+            query, args.n, interactive, sort_mode=args.sort, category=args.category,
+            syllables=args.syllables, primary_vowel=args.primary_vowel, rhymes_with=args.rhymes_with,
+            sounds_like=args.sounds_like, meter=args.meter,
+        )
     except _ArgumentError as error:
         # markup=False: argparse's usage text contains literal square
         # brackets (e.g. "[query ...]") that Rich would otherwise try to
@@ -482,19 +495,13 @@ def main(argv: list[str] | None = None) -> int:
             f"{error.usage.strip()}\nrevdict: error: {error.message}", style="red", markup=False
         )
         return 1
-
-    query = " ".join(args.query)
-
-    if not _index_exists():
-        _print_no_index_error()
+    except ValueError as error:
+        # Surfaces search()/resolve_phonetic_target's deliberate fail-loud
+        # ValueError (e.g. --rhymes-with/--sounds-like when stressmark is
+        # missing) as a clean one-line message instead of an unhandled
+        # traceback -- mirrors the _ArgumentError handler above.
+        console.print(f"revdict: error: {error}", style="red")
         return 1
-
-    interactive = not args.no_interactive and sys.stdout.isatty()
-    return _run_query(
-        query, args.n, interactive, sort_mode=args.sort, category=args.category,
-        syllables=args.syllables, primary_vowel=args.primary_vowel, rhymes_with=args.rhymes_with,
-        sounds_like=args.sounds_like, meter=args.meter,
-    )
 
 
 if __name__ == "__main__":
