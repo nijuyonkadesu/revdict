@@ -1,3 +1,4 @@
+from revdict import category as category_module
 from revdict.pattern_matcher import compile_clauses
 from revdict.query_syntax import ParsedQuery
 
@@ -44,7 +45,7 @@ def _score_and_sort(headwords: list[str], literary_frequency: dict[str, float]) 
     return sorted(scored, key=lambda pair: (-pair[1], pair[0]))
 
 
-def run_structural(parsed: ParsedQuery, state: dict, top_n: int) -> dict:
+def run_structural(parsed: ParsedQuery, state: dict, top_n: int, category: str | None = None) -> dict:
     # Deferred import: search.py imports structural_search for dispatch
     # (Task 6), so importing search.py at module load time here would be
     # circular. Matches the lazy-import pattern already used elsewhere in
@@ -57,6 +58,12 @@ def run_structural(parsed: ParsedQuery, state: dict, top_n: int) -> dict:
     literary_frequency = state["literary_frequency"]
 
     headwords = matching_headwords(parsed, word_index)
+    if category and category != "all":
+        headwords = [
+            word
+            for word in headwords
+            if category_module.matches_category(metadata[word_index[word][0]], category)
+        ]
     ranked = _score_and_sort(headwords, literary_frequency)[:top_n]
     relevances = relative_relevance([score for _, score in ranked])
 

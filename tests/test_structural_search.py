@@ -1,3 +1,5 @@
+import pytest
+
 from revdict.query_syntax import ParsedQuery
 from revdict.structural_search import matching_headwords
 
@@ -147,6 +149,69 @@ def test_run_structural_respects_top_n():
     result = run_structural(parsed, state, top_n=1)
 
     assert len(result["candidates"]) == 1
+
+
+def test_run_structural_filters_by_category_before_top_n_truncation():
+    """Mirrors search.py's equivalent guarantee: category must narrow the
+    matched-headword pool before truncating to top_n, not after -- a
+    fixture where the single most-frequent match is the wrong category
+    proves this."""
+    metadata = [
+        {
+            "headword": "blueadverbially", "pos": "adverb", "definition": "in a blue manner",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+        },
+        {
+            "headword": "bluebird", "pos": "noun", "definition": "an American songbird",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+        },
+        {
+            "headword": "blueprint", "pos": "noun", "definition": "a technical drawing",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+        },
+    ]
+    word_index = {"blueadverbially": [0], "bluebird": [1], "blueprint": [2]}
+    literary_frequency = {"blueadverbially": 9.0, "bluebird": 1.5, "blueprint": 1.0}
+    state = {
+        "metadata": metadata,
+        "word_index": word_index,
+        "literary_frequency": literary_frequency,
+        "classifier": None,
+    }
+    parsed = ParsedQuery(mode="structural", pattern_clauses=["blue*"])
+
+    result = run_structural(parsed, state, top_n=2, category="noun")
+
+    assert {c["headword"] for c in result["candidates"]} == {"bluebird", "blueprint"}
+
+
+def test_run_structural_category_none_matches_every_part_of_speech():
+    parsed = ParsedQuery(mode="structural", pattern_clauses=["blue*"])
+    state = _build_state()
+
+    result = run_structural(parsed, state, top_n=10, category=None)
+
+    assert {c["headword"] for c in result["candidates"]} == {"bluebird", "blueprint"}
+
+
+def test_run_structural_category_all_matches_every_part_of_speech():
+    parsed = ParsedQuery(mode="structural", pattern_clauses=["blue*"])
+    state = _build_state()
+
+    result = run_structural(parsed, state, top_n=10, category="all")
+
+    assert {c["headword"] for c in result["candidates"]} == {"bluebird", "blueprint"}
+
+
+def test_run_structural_unknown_category_raises_value_error():
+    parsed = ParsedQuery(mode="structural", pattern_clauses=["blue*"])
+    state = _build_state()
+
+    with pytest.raises(ValueError, match="Unknown category"):
+        run_structural(parsed, state, top_n=10, category="verb_phrase")
 
 
 from revdict.structural_search import matching_row_indices

@@ -893,3 +893,29 @@ def test_search_unknown_category_raises_value_error(monkeypatch):
 
     with pytest.raises(ValueError, match="Unknown category"):
         search_mod.search("bluebird", top_n=10, category="verb_phrase")
+
+
+def test_search_category_filters_structural_mode_candidates_too(monkeypatch):
+    metadata = [
+        {
+            "headword": "bluebird", "pos": "noun", "definition": "an American songbird",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+        },
+        {
+            "headword": "bluely", "pos": "adverb", "definition": "in a blue manner",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+        },
+    ]
+    state = {
+        "metadata": metadata,
+        "word_index": {"bluebird": [0], "bluely": [1]},
+        "literary_frequency": {},
+        "classifier": None,
+    }
+    monkeypatch.setattr(search_mod, "_load_state", lambda: state)
+
+    result = search_mod.search("blue*", top_n=10, category="noun")
+
+    assert [c["headword"] for c in result["candidates"]] == ["bluebird"]
