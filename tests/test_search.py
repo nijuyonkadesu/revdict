@@ -1111,6 +1111,11 @@ def test_search_meter_filter_restricts_candidates(monkeypatch):
 
 
 def test_search_rhymes_with_resolves_the_target_and_filters(monkeypatch):
+    from revdict.models import phonetics as phonetics_models
+
+    if not phonetics_models.is_available():
+        pytest.skip("requires stressmark to be installed")
+
     metadata = [
         {
             "headword": "cat", "pos": "noun", "definition": "a small carnivore",
