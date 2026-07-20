@@ -11,6 +11,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
+from revdict import category
 from revdict import daemon
 from revdict import picker
 from revdict import sort
@@ -79,6 +80,12 @@ def _query_parser() -> argparse.ArgumentParser:
         default=None,
         help='Sort order for results (default: relevance, i.e. "most similar").',
     )
+    parser.add_argument(
+        "--category",
+        choices=list(category.CATEGORIES),
+        default=None,
+        help="Filter results by category (default: all).",
+    )
     return parser
 
 
@@ -137,24 +144,28 @@ def _print_static_results(result: dict) -> None:
     console.print(table)
 
 
-def _local_search_fallback(query: str, top_n: int, sort_mode: str | None = None) -> dict:
+def _local_search_fallback(
+    query: str, top_n: int, sort_mode: str | None = None, category: str | None = None
+) -> dict:
     from revdict.query_env import configure_offline_quiet_env
 
     configure_offline_quiet_env()
     from revdict import search as search_mod
 
-    return search_mod.search(query, top_n=top_n, sort_mode=sort_mode)
+    return search_mod.search(query, top_n=top_n, sort_mode=sort_mode, category=category)
 
 
-def _get_search_result(query: str, top_n: int, sort_mode: str | None = None) -> dict:
-    result = daemon.send_query(query, top_n, sort_mode=sort_mode)
+def _get_search_result(
+    query: str, top_n: int, sort_mode: str | None = None, category: str | None = None
+) -> dict:
+    result = daemon.send_query(query, top_n, sort_mode=sort_mode, category=category)
     if result is not None:
         return result
     if daemon.ensure_daemon_running():
-        result = daemon.send_query(query, top_n, sort_mode=sort_mode)
+        result = daemon.send_query(query, top_n, sort_mode=sort_mode, category=category)
         if result is not None:
             return result
-    return _local_search_fallback(query, top_n, sort_mode=sort_mode)
+    return _local_search_fallback(query, top_n, sort_mode=sort_mode, category=category)
 
 
 def _build_index(skip_confirm: bool) -> None:
@@ -182,12 +193,18 @@ def _daemon_status() -> str:
     return daemon.daemon_status()
 
 
-def _run_query(query: str, top_n: int, interactive: bool, sort_mode: str | None = None) -> int:
+def _run_query(
+    query: str,
+    top_n: int,
+    interactive: bool,
+    sort_mode: str | None = None,
+    category: str | None = None,
+) -> int:
     if not query.strip():
         console.print("[yellow]Please enter a word or phrase.[/yellow]")
         return 0
 
-    result = _get_search_result(query, top_n, sort_mode=sort_mode)
+    result = _get_search_result(query, top_n, sort_mode=sort_mode, category=category)
 
     if interactive:
         try:
@@ -389,7 +406,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     interactive = not args.no_interactive and sys.stdout.isatty()
-    return _run_query(query, args.n, interactive, sort_mode=args.sort)
+    return _run_query(query, args.n, interactive, sort_mode=args.sort, category=args.category)
 
 
 if __name__ == "__main__":

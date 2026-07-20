@@ -148,3 +148,23 @@ revdict "blue*" --sort longest --no-interactive
 already nudges the default relevance ranking — a word with no frequency
 data at all (very rare hyphenated/multi-word entries) sorts as if it had
 zero frequency.
+
+## Category filter
+
+Results default to matching any part of speech or register. Narrow them with `--category`:
+
+| `--category` value | Matches |
+|---|---|
+| `all` (default) | Everything |
+| `noun` | Nouns only |
+| `adjective` | Adjectives only |
+| `verb` | Verbs only |
+| `adverb` | Adverbs only |
+| `idiom_slang` | Idiomatic phrases, slang, vulgar, and colloquial senses |
+| `old` | Archaic, dated, obsolete, and historical senses |
+
+```bash
+revdict "feeling of intense annoyance" --category adjective --no-interactive
+```
+
+`noun`/`adjective`/`verb`/`adverb`/`all` work with any existing index. `idiom_slang` and `old` rely on Wiktionary's register tags, which are only captured starting with this version — run `revdict build-index` to rebuild your index before those two categories will return results (they'll simply come back empty on an older index, not error).
