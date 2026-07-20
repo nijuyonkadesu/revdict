@@ -167,4 +167,4 @@ Results default to matching any part of speech or register. Narrow them with `--
 revdict "feeling of intense annoyance" --category adjective --no-interactive
 ```
 
-`noun`/`adjective`/`verb`/`adverb`/`all` work with any existing index. `idiom_slang` and `old` rely on Wiktionary's register tags, which are only captured starting with this version — run `revdict build-index` to rebuild your index before those two categories will return results (they'll simply come back empty on an older index, not error).
+`noun`/`adjective`/`verb`/`adverb`/`all` work with any existing index. `old` relies entirely on Wiktionary's register tags, which are only captured starting with this version — it comes back empty on an older index (not error) until you run `revdict build-index` to rebuild. `idiom_slang` also uses those tags, but additionally matches on part of speech (`phrase`/`proverb`), a field that's always been in the metadata — so it already returns those pos-based matches on an old index, and simply gains the extra slang/idiomatic/vulgar/colloquial tag-based matches once you reindex.

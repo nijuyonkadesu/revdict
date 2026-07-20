@@ -34,6 +34,16 @@ def test_matches_category_idiom_slang_matches_via_phrase_or_proverb_pos_even_wit
     assert matches_category({"pos": "proverb", "tags": []}, "idiom_slang") is True
 
 
+def test_matches_category_idiom_slang_matches_via_pos_even_with_no_tags_key_at_all():
+    """The real pre-reindex scenario Finding 1 of the final review is about:
+    an old metadata row has no 'tags' key at all (not even an empty list),
+    but phrase/proverb pos still matches idiom_slang immediately -- this is
+    why idiom_slang, unlike 'old', doesn't need a reindex to return SOME
+    results."""
+    assert matches_category({"pos": "phrase"}, "idiom_slang") is True
+    assert matches_category({"pos": "proverb"}, "idiom_slang") is True
+
+
 def test_matches_category_idiom_slang_excludes_the_broader_informal_tag():
     """A deliberate scope decision: 'informal' is real and common in the
     raw data, but including it would make Idioms/Slang match far too much
