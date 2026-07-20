@@ -45,3 +45,14 @@ def test_resolve_never_raises_on_a_nonsense_word():
 
 def test_is_available_is_true_when_stressmark_is_importable_and_current():
     assert phonetics.is_available() is True
+
+
+def test_resolve_falls_back_to_the_first_real_vowel_not_a_raw_list_index():
+    """A word whose phonemes carry no '1' stress digit at all (e.g. "the",
+    phonemes ['DH', 'AH0']) must still report a real VOWEL as its
+    primary_vowel, never a consonant that happens to sit at raw index 0 --
+    this is the regression this fix closes."""
+    result = phonetics.resolve("the", "noun")
+    assert result is not None
+    assert result["primary_vowel"] == "AH"
+    assert result["rhyme_key"] == "AH"

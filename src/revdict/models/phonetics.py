@@ -24,13 +24,18 @@ def _strip_stress(phoneme: str) -> str:
 
 def _phonetic_primary_index(phonemes: list[str]) -> int:
     """Mirrors stressmark.engine.stress_positions_for_pron's own
-    fallback-to-0 convention (the first phoneme marked stress '1', or
-    syllable 0 if none is marked) -- kept consistent with how stressmark
-    itself picks a word's primary-stressed syllable."""
-    for i, p in enumerate(phonemes):
-        if p[-1] == "1":
+    fallback convention: find the first phoneme marked stress '1', or
+    (if none is marked) the first VOWEL-bearing phoneme -- never an
+    arbitrary raw-list index, which could land on a consonant. ARPAbet
+    marks a stress digit only on vowel phonemes, so filtering to
+    digit-ending phonemes IS filtering to vowels."""
+    vowel_indices = [i for i, p in enumerate(phonemes) if p[-1].isdigit()]
+    if not vowel_indices:
+        return 0
+    for i in vowel_indices:
+        if phonemes[i][-1] == "1":
             return i
-    return 0
+    return vowel_indices[0]
 
 
 def resolve(word: str, pos: str) -> dict | None:
