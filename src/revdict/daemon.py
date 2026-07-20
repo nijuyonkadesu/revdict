@@ -50,7 +50,11 @@ def _socket_is_reachable() -> bool:
 
 
 def send_query(
-    query: str, top_n: int, sort_mode: str | None = None, timeout: float = 30.0
+    query: str,
+    top_n: int,
+    sort_mode: str | None = None,
+    category: str | None = None,
+    timeout: float = 30.0,
 ) -> dict | None:
     if not DAEMON_SOCKET_PATH.exists():
         return None
@@ -58,7 +62,9 @@ def send_query(
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
             sock.settimeout(timeout)
             sock.connect(str(DAEMON_SOCKET_PATH))
-            request = json.dumps({"query": query, "top_n": top_n, "sort": sort_mode})
+            request = json.dumps(
+                {"query": query, "top_n": top_n, "sort": sort_mode, "category": category}
+            )
             sock.sendall(request.encode("utf-8"))
             sock.shutdown(socket.SHUT_WR)
             chunks = []
@@ -139,7 +145,12 @@ def daemon_status() -> str:
 def _handle_request(request_text: str, search_fn) -> str:
     try:
         request = json.loads(request_text)
-        result = search_fn(request["query"], top_n=request["top_n"], sort_mode=request.get("sort"))
+        result = search_fn(
+            request["query"],
+            top_n=request["top_n"],
+            sort_mode=request.get("sort"),
+            category=request.get("category"),
+        )
     except Exception as error:
         return json.dumps({"error": str(error)})
     return json.dumps(result)
