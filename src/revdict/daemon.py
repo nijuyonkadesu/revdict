@@ -54,6 +54,11 @@ def send_query(
     top_n: int,
     sort_mode: str | None = None,
     category: str | None = None,
+    syllables: int | None = None,
+    primary_vowel: str | None = None,
+    rhymes_with: str | None = None,
+    sounds_like: str | None = None,
+    meter: str | None = None,
     timeout: float = 30.0,
 ) -> dict | None:
     if not DAEMON_SOCKET_PATH.exists():
@@ -63,7 +68,17 @@ def send_query(
             sock.settimeout(timeout)
             sock.connect(str(DAEMON_SOCKET_PATH))
             request = json.dumps(
-                {"query": query, "top_n": top_n, "sort": sort_mode, "category": category}
+                {
+                    "query": query,
+                    "top_n": top_n,
+                    "sort": sort_mode,
+                    "category": category,
+                    "syllables": syllables,
+                    "primary_vowel": primary_vowel,
+                    "rhymes_with": rhymes_with,
+                    "sounds_like": sounds_like,
+                    "meter": meter,
+                }
             )
             sock.sendall(request.encode("utf-8"))
             sock.shutdown(socket.SHUT_WR)
@@ -150,6 +165,11 @@ def _handle_request(request_text: str, search_fn) -> str:
             top_n=request["top_n"],
             sort_mode=request.get("sort"),
             category=request.get("category"),
+            syllables=request.get("syllables"),
+            primary_vowel=request.get("primary_vowel"),
+            rhymes_with=request.get("rhymes_with"),
+            sounds_like=request.get("sounds_like"),
+            meter=request.get("meter"),
         )
     except Exception as error:
         return json.dumps({"error": str(error)})

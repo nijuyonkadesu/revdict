@@ -101,7 +101,7 @@ def test_send_query_returns_none_on_malformed_json_response(tmp_path, monkeypatc
 def test_handle_request_calls_search_fn_with_parsed_args_and_returns_json_result():
     calls = {}
 
-    def fake_search(query, top_n, sort_mode, category):
+    def fake_search(query, top_n, sort_mode, category, syllables=None, primary_vowel=None, rhymes_with=None, sounds_like=None, meter=None):
         calls["query"] = query
         calls["top_n"] = top_n
         calls["sort_mode"] = sort_mode
@@ -117,7 +117,7 @@ def test_handle_request_calls_search_fn_with_parsed_args_and_returns_json_result
 
 
 def test_handle_request_returns_error_payload_when_search_fn_raises():
-    def failing_search(query, top_n, sort_mode, category):
+    def failing_search(query, top_n, sort_mode, category, syllables=None, primary_vowel=None, rhymes_with=None, sounds_like=None, meter=None):
         raise RuntimeError("index not loaded")
 
     request_text = json.dumps({"query": "happy", "top_n": 10})
@@ -343,7 +343,11 @@ def test_send_query_includes_sort_mode_in_the_request_payload(tmp_path, monkeypa
     daemon.send_query("happy", 10, sort_mode="alpha", timeout=2.0)
 
     server_thread.join(timeout=2)
-    assert received["request"] == {"query": "happy", "top_n": 10, "sort": "alpha", "category": None}
+    assert received["request"] == {
+        "query": "happy", "top_n": 10, "sort": "alpha", "category": None,
+        "syllables": None, "primary_vowel": None, "rhymes_with": None,
+        "sounds_like": None, "meter": None,
+    }
 
 
 def test_send_query_defaults_sort_mode_to_none_when_omitted(tmp_path, monkeypatch):
@@ -364,13 +368,17 @@ def test_send_query_defaults_sort_mode_to_none_when_omitted(tmp_path, monkeypatc
     daemon.send_query("happy", 10, timeout=2.0)
 
     server_thread.join(timeout=2)
-    assert received["request"] == {"query": "happy", "top_n": 10, "sort": None, "category": None}
+    assert received["request"] == {
+        "query": "happy", "top_n": 10, "sort": None, "category": None,
+        "syllables": None, "primary_vowel": None, "rhymes_with": None,
+        "sounds_like": None, "meter": None,
+    }
 
 
 def test_handle_request_passes_sort_mode_through_to_search_fn():
     calls = {}
 
-    def fake_search(query, top_n, sort_mode, category):
+    def fake_search(query, top_n, sort_mode, category, syllables=None, primary_vowel=None, rhymes_with=None, sounds_like=None, meter=None):
         calls["sort_mode"] = sort_mode
         return {"exact_match": None, "candidates": []}
 
@@ -387,7 +395,7 @@ def test_handle_request_defaults_sort_mode_to_none_for_requests_without_it():
     defaulting to None."""
     calls = {}
 
-    def fake_search(query, top_n, sort_mode, category):
+    def fake_search(query, top_n, sort_mode, category, syllables=None, primary_vowel=None, rhymes_with=None, sounds_like=None, meter=None):
         calls["sort_mode"] = sort_mode
         return {"exact_match": None, "candidates": []}
 
@@ -415,7 +423,11 @@ def test_send_query_includes_category_in_the_request_payload(tmp_path, monkeypat
     daemon.send_query("happy", 10, category="noun", timeout=2.0)
 
     server_thread.join(timeout=2)
-    assert received["request"] == {"query": "happy", "top_n": 10, "sort": None, "category": "noun"}
+    assert received["request"] == {
+        "query": "happy", "top_n": 10, "sort": None, "category": "noun",
+        "syllables": None, "primary_vowel": None, "rhymes_with": None,
+        "sounds_like": None, "meter": None,
+    }
 
 
 def test_send_query_defaults_category_to_none_when_omitted(tmp_path, monkeypatch):
@@ -437,13 +449,17 @@ def test_send_query_defaults_category_to_none_when_omitted(tmp_path, monkeypatch
     daemon.send_query("happy", 10, timeout=2.0)
 
     server_thread.join(timeout=2)
-    assert received["request"] == {"query": "happy", "top_n": 10, "sort": None, "category": None}
+    assert received["request"] == {
+        "query": "happy", "top_n": 10, "sort": None, "category": None,
+        "syllables": None, "primary_vowel": None, "rhymes_with": None,
+        "sounds_like": None, "meter": None,
+    }
 
 
 def test_handle_request_passes_category_through_to_search_fn():
     calls = {}
 
-    def fake_search(query, top_n, sort_mode, category):
+    def fake_search(query, top_n, sort_mode, category, syllables=None, primary_vowel=None, rhymes_with=None, sounds_like=None, meter=None):
         calls["category"] = category
         return {"exact_match": None, "candidates": []}
 
@@ -460,7 +476,7 @@ def test_handle_request_defaults_category_to_none_for_requests_without_it():
     category defaulting to None."""
     calls = {}
 
-    def fake_search(query, top_n, sort_mode, category):
+    def fake_search(query, top_n, sort_mode, category, syllables=None, primary_vowel=None, rhymes_with=None, sounds_like=None, meter=None):
         calls["category"] = category
         return {"exact_match": None, "candidates": []}
 
@@ -469,3 +485,86 @@ def test_handle_request_defaults_category_to_none_for_requests_without_it():
     daemon._handle_request(request_text, fake_search)
 
     assert calls == {"category": None}
+
+
+def test_send_query_includes_all_five_phonetic_fields_in_the_request_payload(tmp_path, monkeypatch):
+    socket_path = tmp_path / "daemon.sock"
+    monkeypatch.setattr(daemon, "DAEMON_SOCKET_PATH", socket_path)
+    received = {}
+
+    ready_event = threading.Event()
+    server_thread = threading.Thread(
+        target=_run_capturing_server, args=(socket_path, received, ready_event)
+    )
+    server_thread.start()
+    ready_event.wait(timeout=2)
+
+    daemon.send_query(
+        "happy", 10, syllables=2, primary_vowel="AE", rhymes_with="cat",
+        sounds_like="bat", meter="/x", timeout=2.0,
+    )
+
+    server_thread.join(timeout=2)
+    assert received["request"] == {
+        "query": "happy", "top_n": 10, "sort": None, "category": None,
+        "syllables": 2, "primary_vowel": "AE", "rhymes_with": "cat",
+        "sounds_like": "bat", "meter": "/x",
+    }
+
+
+def test_send_query_defaults_all_five_phonetic_fields_to_none_when_omitted(tmp_path, monkeypatch):
+    socket_path = tmp_path / "daemon.sock"
+    monkeypatch.setattr(daemon, "DAEMON_SOCKET_PATH", socket_path)
+    received = {}
+
+    ready_event = threading.Event()
+    server_thread = threading.Thread(
+        target=_run_capturing_server, args=(socket_path, received, ready_event)
+    )
+    server_thread.start()
+    ready_event.wait(timeout=2)
+
+    daemon.send_query("happy", 10, timeout=2.0)
+
+    server_thread.join(timeout=2)
+    assert received["request"]["syllables"] is None
+    assert received["request"]["primary_vowel"] is None
+    assert received["request"]["rhymes_with"] is None
+    assert received["request"]["sounds_like"] is None
+    assert received["request"]["meter"] is None
+
+
+def test_handle_request_passes_all_five_phonetic_fields_through_to_search_fn():
+    calls = {}
+
+    def fake_search(query, top_n, sort_mode, category, syllables=None, primary_vowel=None, rhymes_with=None, sounds_like=None, meter=None):
+        calls.update(
+            syllables=syllables, primary_vowel=primary_vowel, rhymes_with=rhymes_with,
+            sounds_like=sounds_like, meter=meter,
+        )
+        return {"exact_match": None, "candidates": []}
+
+    request_text = json.dumps(
+        {"query": "happy", "top_n": 10, "syllables": 2, "primary_vowel": "AE", "rhymes_with": "cat", "sounds_like": "bat", "meter": "/x"}
+    )
+
+    daemon._handle_request(request_text, fake_search)
+
+    assert calls == {"syllables": 2, "primary_vowel": "AE", "rhymes_with": "cat", "sounds_like": "bat", "meter": "/x"}
+
+
+def test_handle_request_defaults_all_five_phonetic_fields_to_none_for_requests_without_them():
+    calls = {}
+
+    def fake_search(query, top_n, sort_mode, category, syllables=None, primary_vowel=None, rhymes_with=None, sounds_like=None, meter=None):
+        calls.update(
+            syllables=syllables, primary_vowel=primary_vowel, rhymes_with=rhymes_with,
+            sounds_like=sounds_like, meter=meter,
+        )
+        return {"exact_match": None, "candidates": []}
+
+    request_text = json.dumps({"query": "happy", "top_n": 10})
+
+    daemon._handle_request(request_text, fake_search)
+
+    assert calls == {"syllables": None, "primary_vowel": None, "rhymes_with": None, "sounds_like": None, "meter": None}
