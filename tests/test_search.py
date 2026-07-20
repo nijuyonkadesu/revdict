@@ -919,3 +919,292 @@ def test_search_category_filters_structural_mode_candidates_too(monkeypatch):
     result = search_mod.search("blue*", top_n=10, category="noun")
 
     assert [c["headword"] for c in result["candidates"]] == ["bluebird"]
+
+
+def _phonetics_dict(syllable_count, primary_vowel, rhyme_key, meter, phonemes):
+    return {
+        "syllable_count": syllable_count,
+        "primary_vowel": primary_vowel,
+        "rhyme_key": rhyme_key,
+        "meter": meter,
+        "phonemes": phonemes,
+    }
+
+
+def test_search_phonetic_filters_none_is_a_noop(monkeypatch):
+    metadata = [
+        {
+            "headword": "bluebird", "pos": "noun", "definition": "a songbird",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+            "phonetics": _phonetics_dict(2, "UW", "UW B ER D", "/x", ["B", "L", "UW1", "B", "ER0", "D"]),
+        },
+        {
+            "headword": "blue", "pos": "adjective", "definition": "the color of the sky",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+            "phonetics": _phonetics_dict(1, "UW", "UW", "/", ["B", "L", "UW1"]),
+        },
+    ]
+    state = {
+        "metadata": metadata,
+        "word_index": {"bluebird": [0], "blue": [1]},
+        "literary_frequency": {},
+        "classifier": None,
+    }
+    import numpy as np
+
+    class FakeEmbedder:
+        def encode_query(self, query):
+            return np.array([1.0, 0.0], dtype="float32")
+
+    class FakeReranker:
+        def score(self, query, definitions):
+            return [1.0 for _ in definitions]
+
+    state["embedder"] = FakeEmbedder()
+    state["reranker"] = FakeReranker()
+    state["embeddings"] = np.array([[1.0, 0.0], [1.0, 0.0]], dtype="float32")
+    state["embedding_norms"] = np.array([1.0, 1.0])
+    monkeypatch.setattr(search_mod, "_load_state", lambda: state)
+
+    result = search_mod.search("sky color", top_n=10)
+
+    assert {c["headword"] for c in result["candidates"]} == {"bluebird", "blue"}
+
+
+def test_search_syllables_filter_restricts_candidates(monkeypatch):
+    metadata = [
+        {
+            "headword": "bluebird", "pos": "noun", "definition": "a songbird",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+            "phonetics": _phonetics_dict(2, "UW", "UW B ER D", "/x", ["B", "L", "UW1", "B", "ER0", "D"]),
+        },
+        {
+            "headword": "blue", "pos": "adjective", "definition": "the color of the sky",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+            "phonetics": _phonetics_dict(1, "UW", "UW", "/", ["B", "L", "UW1"]),
+        },
+    ]
+    state = {
+        "metadata": metadata,
+        "word_index": {"bluebird": [0], "blue": [1]},
+        "literary_frequency": {},
+        "classifier": None,
+    }
+    import numpy as np
+
+    class FakeEmbedder:
+        def encode_query(self, query):
+            return np.array([1.0, 0.0], dtype="float32")
+
+    class FakeReranker:
+        def score(self, query, definitions):
+            return [1.0 for _ in definitions]
+
+    state["embedder"] = FakeEmbedder()
+    state["reranker"] = FakeReranker()
+    state["embeddings"] = np.array([[1.0, 0.0], [1.0, 0.0]], dtype="float32")
+    state["embedding_norms"] = np.array([1.0, 1.0])
+    monkeypatch.setattr(search_mod, "_load_state", lambda: state)
+
+    result = search_mod.search("sky color", top_n=10, syllables=1)
+
+    assert [c["headword"] for c in result["candidates"]] == ["blue"]
+
+
+def test_search_phonetic_filters_apply_before_top_n_truncation(monkeypatch):
+    """Same ordering guarantee as category: the highest-scoring candidate
+    fails the syllables filter, two lower-scoring ones pass -- top_n=2
+    must return both, not just one, proving the filter runs before
+    truncation, not after."""
+    metadata = [
+        {
+            "headword": "bluely", "pos": "adverb", "definition": "a common sense",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+            "phonetics": _phonetics_dict(2, "UW", "UW L IY", "/x", ["B", "L", "UW1", "L", "IY0"]),
+        },
+        {
+            "headword": "blueness", "pos": "noun", "definition": "a rare noun sense one",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+            "phonetics": _phonetics_dict(1, "UW", "UW N AH S", "/", ["B", "L", "UW1", "N", "AH0", "S"]),
+        },
+        {
+            "headword": "bluebell", "pos": "noun", "definition": "a rare noun sense two",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+            "phonetics": _phonetics_dict(1, "UW", "UW B EH L", "/", ["B", "L", "UW1", "B", "EH1", "L"]),
+        },
+    ]
+    state = {
+        "metadata": metadata,
+        "word_index": {"bluely": [0], "blueness": [1], "bluebell": [2]},
+        "literary_frequency": {},
+        "classifier": None,
+    }
+    import numpy as np
+
+    class FakeEmbedder:
+        def encode_query(self, query):
+            return np.array([1.0, 0.0], dtype="float32")
+
+    class FakeReranker:
+        def score(self, query, definitions):
+            score_by_definition = {"a common sense": 5.0, "a rare noun sense one": 3.0, "a rare noun sense two": 2.0}
+            return [score_by_definition[d] for d in definitions]
+
+    state["embedder"] = FakeEmbedder()
+    state["reranker"] = FakeReranker()
+    state["embeddings"] = np.array([[1.0, 0.0]] * 3, dtype="float32")
+    state["embedding_norms"] = np.array([1.0, 1.0, 1.0])
+    monkeypatch.setattr(search_mod, "_load_state", lambda: state)
+
+    result = search_mod.search("blue things", top_n=2, syllables=1)
+
+    assert {c["headword"] for c in result["candidates"]} == {"blueness", "bluebell"}
+
+
+def test_search_meter_filter_restricts_candidates(monkeypatch):
+    metadata = [
+        {
+            "headword": "happy", "pos": "adjective", "definition": "feeling joy",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+            "phonetics": _phonetics_dict(2, "AE", "AE P IY", "/x", ["HH", "AE1", "P", "IY0"]),
+        },
+        {
+            "headword": "glad", "pos": "adjective", "definition": "feeling joy too",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+            "phonetics": _phonetics_dict(1, "AE", "AE D", "/", ["G", "L", "AE1", "D"]),
+        },
+    ]
+    state = {
+        "metadata": metadata,
+        "word_index": {"happy": [0], "glad": [1]},
+        "literary_frequency": {},
+        "classifier": None,
+    }
+    import numpy as np
+
+    class FakeEmbedder:
+        def encode_query(self, query):
+            return np.array([1.0, 0.0], dtype="float32")
+
+    class FakeReranker:
+        def score(self, query, definitions):
+            return [1.0 for _ in definitions]
+
+    state["embedder"] = FakeEmbedder()
+    state["reranker"] = FakeReranker()
+    state["embeddings"] = np.array([[1.0, 0.0], [1.0, 0.0]], dtype="float32")
+    state["embedding_norms"] = np.array([1.0, 1.0])
+    monkeypatch.setattr(search_mod, "_load_state", lambda: state)
+
+    result = search_mod.search("feeling joy", top_n=10, meter="/x")
+
+    assert [c["headword"] for c in result["candidates"]] == ["happy"]
+
+
+def test_search_rhymes_with_resolves_the_target_and_filters(monkeypatch):
+    metadata = [
+        {
+            "headword": "cat", "pos": "noun", "definition": "a small carnivore",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+            "phonetics": _phonetics_dict(1, "AE", "AE T", "/", ["K", "AE1", "T"]),
+        },
+        {
+            "headword": "dog", "pos": "noun", "definition": "a small carnivore too",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+            "phonetics": _phonetics_dict(1, "AO", "AO G", "/", ["D", "AO1", "G"]),
+        },
+    ]
+    state = {
+        "metadata": metadata,
+        "word_index": {"cat": [0], "dog": [1]},
+        "literary_frequency": {},
+        "classifier": None,
+    }
+    import numpy as np
+
+    class FakeEmbedder:
+        def encode_query(self, query):
+            return np.array([1.0, 0.0], dtype="float32")
+
+    class FakeReranker:
+        def score(self, query, definitions):
+            return [1.0 for _ in definitions]
+
+    state["embedder"] = FakeEmbedder()
+    state["reranker"] = FakeReranker()
+    state["embeddings"] = np.array([[1.0, 0.0], [1.0, 0.0]], dtype="float32")
+    state["embedding_norms"] = np.array([1.0, 1.0])
+    monkeypatch.setattr(search_mod, "_load_state", lambda: state)
+
+    result = search_mod.search("small carnivore", top_n=10, rhymes_with="hat")
+
+    assert [c["headword"] for c in result["candidates"]] == ["cat"]
+
+
+def test_search_rhymes_with_raises_when_stressmark_is_unavailable(monkeypatch):
+    state = {
+        "metadata": [],
+        "word_index": {},
+        "literary_frequency": {},
+        "classifier": None,
+    }
+    monkeypatch.setattr(search_mod, "_load_state", lambda: state)
+    monkeypatch.setattr(search_mod.phonetics_models, "is_available", lambda: False)
+
+    with pytest.raises(ValueError, match="stressmark"):
+        search_mod.search("anything", top_n=10, rhymes_with="hat")
+
+
+def test_search_category_and_phonetics_filters_combine(monkeypatch):
+    """Filters from different phases must AND together, not override each
+    other -- category (Phase 3) and syllables (Phase 4) both apply."""
+    metadata = [
+        {
+            "headword": "bluebird", "pos": "noun", "definition": "a songbird",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+            "phonetics": _phonetics_dict(2, "UW", "UW B ER D", "/x", ["B", "L", "UW1", "B", "ER0", "D"]),
+        },
+        {
+            "headword": "blue", "pos": "adjective", "definition": "the color of the sky",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+            "phonetics": _phonetics_dict(1, "UW", "UW", "/", ["B", "L", "UW1"]),
+        },
+    ]
+    state = {
+        "metadata": metadata,
+        "word_index": {"bluebird": [0], "blue": [1]},
+        "literary_frequency": {},
+        "classifier": None,
+    }
+    import numpy as np
+
+    class FakeEmbedder:
+        def encode_query(self, query):
+            return np.array([1.0, 0.0], dtype="float32")
+
+    class FakeReranker:
+        def score(self, query, definitions):
+            return [1.0 for _ in definitions]
+
+    state["embedder"] = FakeEmbedder()
+    state["reranker"] = FakeReranker()
+    state["embeddings"] = np.array([[1.0, 0.0], [1.0, 0.0]], dtype="float32")
+    state["embedding_norms"] = np.array([1.0, 1.0])
+    monkeypatch.setattr(search_mod, "_load_state", lambda: state)
+
+    result = search_mod.search("sky color", top_n=10, category="noun", syllables=2)
+
+    assert [c["headword"] for c in result["candidates"]] == ["bluebird"]

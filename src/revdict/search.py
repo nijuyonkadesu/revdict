@@ -5,9 +5,11 @@ import numpy as np
 
 from revdict import category as category_module
 from revdict import dictionary
+from revdict import phonetics
 from revdict import query_syntax
 from revdict import sort
 from revdict import structural_search
+from revdict.models import phonetics as phonetics_models
 from revdict.models import stress
 from revdict.models.embedder import Embedder
 from revdict.models.emotion import EmotionClassifier, tag_emotion
@@ -79,6 +81,49 @@ def filter_by_category(
         for index, score in scored_rows
         if category_module.matches_category(metadata[index], category)
     ]
+
+
+def filter_by_phonetics(
+    scored_rows: list[tuple[int, float]],
+    metadata: list[dict],
+    syllables: int | None,
+    primary_vowel: str | None,
+    rhyme_key: str | None,
+    sounds_like_phonemes: list[str] | None,
+    meter: str | None,
+) -> list[tuple[int, float]]:
+    """Same before-top_n-truncation contract as filter_by_category -- see
+    that function's docstring. All 5 filters AND together; each is
+    individually a no-op when its argument is falsy/None."""
+    if not any([syllables, primary_vowel, rhyme_key, sounds_like_phonemes, meter]):
+        return scored_rows
+    return [
+        (index, score)
+        for index, score in scored_rows
+        if phonetics.matches_syllable_count(metadata[index], syllables)
+        and phonetics.matches_primary_vowel(metadata[index], primary_vowel)
+        and phonetics.matches_rhyme(metadata[index], rhyme_key)
+        and phonetics.matches_sounds_like(metadata[index], sounds_like_phonemes)
+        and phonetics.matches_meter(metadata[index], meter)
+    ]
+
+
+def resolve_phonetic_target(word: str, flag_name: str) -> dict:
+    """Resolves an arbitrary user-typed word (the target of --rhymes-with
+    or --sounds-like) into its phonetic data at QUERY time -- this is the
+    one place phonetic filtering still depends on stressmark being
+    available live, since the target is unprecomputable. Raises
+    ValueError (never returns None) so a missing/outdated stressmark, or
+    an unresolvable target word, surfaces as a clear error message instead
+    of silently behaving like "nothing matches"."""
+    if not phonetics_models.is_available():
+        raise ValueError(
+            f"--{flag_name} requires the stressmark library (>= 0.2.0) to be installed and importable."
+        )
+    resolved = phonetics_models.resolve(word, "noun")
+    if resolved is None:
+        raise ValueError(f"Could not resolve a pronunciation for --{flag_name} target {word!r}.")
+    return resolved
 
 
 def relative_relevance(scores: list[float]) -> list[int]:
@@ -238,7 +283,15 @@ def tag_exact_match_senses(exact_match_raw: dict | None, classifier_factory) -> 
 
 
 def search(
-    query: str, top_n: int = 10, sort_mode: str | None = None, category: str | None = None
+    query: str,
+    top_n: int = 10,
+    sort_mode: str | None = None,
+    category: str | None = None,
+    syllables: int | None = None,
+    primary_vowel: str | None = None,
+    rhymes_with: str | None = None,
+    sounds_like: str | None = None,
+    meter: str | None = None,
 ) -> dict:
     state = _load_state()
 
@@ -249,6 +302,18 @@ def search(
     # matches_category being reached by the per-row filter.
     if category and category not in category_module.CATEGORIES:
         raise ValueError(f"Unknown category: {category!r}")
+
+    # Resolved eagerly too, for the same reason as the category guard above
+    # -- --rhymes-with/--sounds-like's target word must resolve (or raise a
+    # clear error) regardless of parsed.mode or how the candidate pool ends
+    # up shaped, not only when a row happens to reach filter_by_phonetics.
+    rhyme_key = None
+    if rhymes_with:
+        rhyme_key = resolve_phonetic_target(rhymes_with, "rhymes-with")["rhyme_key"]
+
+    sounds_like_phonemes = None
+    if sounds_like:
+        sounds_like_phonemes = resolve_phonetic_target(sounds_like, "sounds-like")["phonemes"]
 
     parsed = query_syntax.parse_query(query)
     if parsed.mode in ("structural", "expand", "phrase_contains"):
@@ -311,10 +376,13 @@ def search(
 
     deduped = dedupe_by_headword(scored, metadata)
     deduped = exclude_headword(deduped, metadata, exact_headword)
-    # category never filters the exact-match panel above -- it narrows the
-    # candidate list only, so a query like "run" --category noun still
-    # shows the verb sense of "run" in the exact-match block.
-    deduped = filter_by_category(deduped, metadata, category)[:top_n]
+    # category/phonetics never filter the exact-match panel above -- they
+    # narrow the candidate list only, so a query like "run" --category
+    # noun still shows the verb sense of "run" in the exact-match block.
+    deduped = filter_by_category(deduped, metadata, category)
+    deduped = filter_by_phonetics(
+        deduped, metadata, syllables, primary_vowel, rhyme_key, sounds_like_phonemes, meter
+    )[:top_n]
     # absolute_relevance (not relative_relevance) drives the displayed
     # confidence: it reflects genuine absolute match quality, so a
     # low-confidence/gibberish query reads as visibly low across the board
