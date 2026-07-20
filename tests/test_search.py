@@ -921,6 +921,34 @@ def test_search_category_filters_structural_mode_candidates_too(monkeypatch):
     assert [c["headword"] for c in result["candidates"]] == ["bluebird"]
 
 
+def test_search_syllables_filters_structural_mode_candidates_too(monkeypatch):
+    metadata = [
+        {
+            "headword": "bluebird", "pos": "noun", "definition": "an American songbird",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+            "phonetics": {"syllable_count": 2, "primary_vowel": "UW", "rhyme_key": "Y", "meter": "/x", "phonemes": []},
+        },
+        {
+            "headword": "bluely", "pos": "adverb", "definition": "in a blue manner",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+            "phonetics": {"syllable_count": 3, "primary_vowel": "UW", "rhyme_key": "Z", "meter": "/xx", "phonemes": []},
+        },
+    ]
+    state = {
+        "metadata": metadata,
+        "word_index": {"bluebird": [0], "bluely": [1]},
+        "literary_frequency": {},
+        "classifier": None,
+    }
+    monkeypatch.setattr(search_mod, "_load_state", lambda: state)
+
+    result = search_mod.search("blue*", top_n=10, syllables=2)
+
+    assert [c["headword"] for c in result["candidates"]] == ["bluebird"]
+
+
 def _phonetics_dict(syllable_count, primary_vowel, rhyme_key, meter, phonemes):
     return {
         "syllable_count": syllable_count,

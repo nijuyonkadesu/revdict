@@ -214,6 +214,51 @@ def test_run_structural_unknown_category_raises_value_error():
         run_structural(parsed, state, top_n=10, category="verb_phrase")
 
 
+def test_run_structural_filters_by_syllables_before_top_n_truncation():
+    metadata = [
+        {
+            "headword": "blueadverbially", "pos": "adverb", "definition": "in a blue manner",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+            "phonetics": {"syllable_count": 5, "primary_vowel": "UW", "rhyme_key": "X", "meter": "xxxx/", "phonemes": []},
+        },
+        {
+            "headword": "bluebird", "pos": "noun", "definition": "an American songbird",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+            "phonetics": {"syllable_count": 2, "primary_vowel": "UW", "rhyme_key": "Y", "meter": "/x", "phonemes": []},
+        },
+        {
+            "headword": "blueprint", "pos": "noun", "definition": "a technical drawing",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+            "phonetics": {"syllable_count": 2, "primary_vowel": "UW", "rhyme_key": "Z", "meter": "/x", "phonemes": []},
+        },
+    ]
+    word_index = {"blueadverbially": [0], "bluebird": [1], "blueprint": [2]}
+    literary_frequency = {"blueadverbially": 9.0, "bluebird": 1.5, "blueprint": 1.0}
+    state = {
+        "metadata": metadata,
+        "word_index": word_index,
+        "literary_frequency": literary_frequency,
+        "classifier": None,
+    }
+    parsed = ParsedQuery(mode="structural", pattern_clauses=["blue*"])
+
+    result = run_structural(parsed, state, top_n=2, syllables=2)
+
+    assert {c["headword"] for c in result["candidates"]} == {"bluebird", "blueprint"}
+
+
+def test_run_structural_no_phonetic_filters_matches_everything():
+    parsed = ParsedQuery(mode="structural", pattern_clauses=["blue*"])
+    state = _build_state()
+
+    result = run_structural(parsed, state, top_n=10)
+
+    assert {c["headword"] for c in result["candidates"]} == {"bluebird", "blueprint"}
+
+
 from revdict.structural_search import matching_row_indices
 
 

@@ -1,4 +1,5 @@
 from revdict import category as category_module
+from revdict import phonetics
 from revdict.pattern_matcher import compile_clauses
 from revdict.query_syntax import ParsedQuery
 
@@ -45,7 +46,17 @@ def _score_and_sort(headwords: list[str], literary_frequency: dict[str, float]) 
     return sorted(scored, key=lambda pair: (-pair[1], pair[0]))
 
 
-def run_structural(parsed: ParsedQuery, state: dict, top_n: int, category: str | None = None) -> dict:
+def run_structural(
+    parsed: ParsedQuery,
+    state: dict,
+    top_n: int,
+    category: str | None = None,
+    syllables: int | None = None,
+    primary_vowel: str | None = None,
+    rhyme_key: str | None = None,
+    sounds_like_phonemes: list[str] | None = None,
+    meter: str | None = None,
+) -> dict:
     # Callers are responsible for validating `category` against
     # category.CATEGORIES before calling this function; search() does that
     # eagerly before dispatch, so this function doesn't duplicate it.
@@ -67,6 +78,16 @@ def run_structural(parsed: ParsedQuery, state: dict, top_n: int, category: str |
             word
             for word in headwords
             if category_module.matches_category(metadata[word_index[word][0]], category)
+        ]
+    if any([syllables, primary_vowel, rhyme_key, sounds_like_phonemes, meter]):
+        headwords = [
+            word
+            for word in headwords
+            if phonetics.matches_syllable_count(metadata[word_index[word][0]], syllables)
+            and phonetics.matches_primary_vowel(metadata[word_index[word][0]], primary_vowel)
+            and phonetics.matches_rhyme(metadata[word_index[word][0]], rhyme_key)
+            and phonetics.matches_sounds_like(metadata[word_index[word][0]], sounds_like_phonemes)
+            and phonetics.matches_meter(metadata[word_index[word][0]], meter)
         ]
     ranked = _score_and_sort(headwords, literary_frequency)[:top_n]
     relevances = relative_relevance([score for _, score in ranked])

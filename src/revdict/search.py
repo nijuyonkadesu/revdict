@@ -317,7 +317,17 @@ def search(
 
     parsed = query_syntax.parse_query(query)
     if parsed.mode in ("structural", "expand", "phrase_contains"):
-        result = structural_search.run_structural(parsed, state, top_n, category=category)
+        result = structural_search.run_structural(
+            parsed,
+            state,
+            top_n,
+            category=category,
+            syllables=syllables,
+            primary_vowel=primary_vowel,
+            rhyme_key=rhyme_key,
+            sounds_like_phonemes=sounds_like_phonemes,
+            meter=meter,
+        )
         result["candidates"] = sort.apply_sort(
             result["candidates"], sort_mode, state["literary_frequency"]
         )
