@@ -168,3 +168,24 @@ revdict "feeling of intense annoyance" --category adjective --no-interactive
 ```
 
 `noun`/`adjective`/`verb`/`adverb`/`all` work with any existing index. `old` relies entirely on Wiktionary's register tags, which are only captured starting with this version — it comes back empty on an older index (not error) until you run `revdict build-index` to rebuild. `idiom_slang` also uses those tags, but additionally matches on part of speech (`phrase`/`proverb`), a field that's always been in the metadata — so it already returns those pos-based matches on an old index, and simply gains the extra slang/idiomatic/vulgar/colloquial tag-based matches once you reindex.
+
+## Phonetic filters
+
+Five filters based on pronunciation, computed from a `revdict build-index` reindex (see below) — combine any of them, and combine them with `--category`/`--sort` too:
+
+| Flag | Matches |
+|---|---|
+| `--syllables N` | Headwords with exactly N syllables |
+| `--primary-vowel VOWEL` | Headwords whose stressed syllable's vowel is VOWEL (an ARPAbet vowel symbol — AA, AE, AH, AO, AW, AY, EH, ER, EY, IH, IY, OW, OY, UH, UW) |
+| `--rhymes-with WORD` | Headwords that rhyme with WORD |
+| `--sounds-like WORD` | Headwords that are phonetically close to WORD (not just spelled similarly) |
+| `--meter PATTERN` | Headwords whose stressed/unstressed syllable pattern matches PATTERN — a string of `/` (stressed) and `x` (unstressed), one character per syllable, e.g. `/x` (trochee, like "happy"), `x/` (iamb, like "record" the verb), `/xx` (dactyl, like "elephant") |
+
+```bash
+revdict "feeling of intense annoyance" --syllables 2 --no-interactive
+revdict "small carnivore" --rhymes-with hat --no-interactive
+```
+
+**Requires a reindex.** Unlike category filtering, none of these five work at all on an index built before this feature shipped — run `revdict build-index` to rebuild. Phonetic data is only computed for single-word headwords with no internal hyphen (multi-word phrases and hyphenated compounds are skipped — the underlying `stressmark` library doesn't reliably syllabify either yet); those headwords simply never match any phonetic filter, on any index.
+
+`--rhymes-with`/`--sounds-like` additionally need the `stressmark` library installed and importable at query time (not just at index-build time) — they resolve your target word's pronunciation live, since it's not something a reindex could have precomputed. If `stressmark` isn't installed, these two flags fail with a clear error rather than silently returning no results.

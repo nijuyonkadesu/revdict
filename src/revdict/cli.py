@@ -57,6 +57,26 @@ def _daemon_parser() -> argparse.ArgumentParser:
     return parser
 
 
+_ARPABET_VOWELS = {
+    "AA", "AE", "AH", "AO", "AW", "AY", "EH", "ER", "EY",
+    "IH", "IY", "OW", "OY", "UH", "UW",
+}
+
+
+def _validate_meter_pattern(value: str) -> str:
+    """argparse type= callback: rejects a --meter value containing anything
+    other than '/' and 'x' up front, via an ArgumentTypeError (argparse's
+    own convention for type= validation failures, converted by this file's
+    _QuietArgumentParser into the same clean error path as an invalid
+    --sort/--category choice), rather than silently accepting garbage that
+    would then just never match any real headword's meter string."""
+    if not value or any(ch not in "/x" for ch in value):
+        raise argparse.ArgumentTypeError(
+            f"invalid meter pattern {value!r}: must contain only '/' and 'x'"
+        )
+    return value
+
+
 def _query_parser() -> argparse.ArgumentParser:
     parser = _QuietArgumentParser(
         prog="revdict",
@@ -85,6 +105,27 @@ def _query_parser() -> argparse.ArgumentParser:
         choices=list(category.CATEGORIES),
         default=None,
         help="Filter results by category (default: all).",
+    )
+    parser.add_argument(
+        "--syllables", type=int, default=None, metavar="N",
+        help="Filter results to headwords with exactly N syllables.",
+    )
+    parser.add_argument(
+        "--primary-vowel", choices=list(_ARPABET_VOWELS), default=None, metavar="VOWEL",
+        type=str.upper,
+        help="Filter results to headwords whose primary-stressed vowel is VOWEL (an ARPAbet vowel symbol, e.g. AE).",
+    )
+    parser.add_argument(
+        "--rhymes-with", default=None, metavar="WORD",
+        help="Filter results to headwords that rhyme with WORD.",
+    )
+    parser.add_argument(
+        "--sounds-like", default=None, metavar="WORD",
+        help="Filter results to headwords that sound phonetically similar to WORD.",
+    )
+    parser.add_argument(
+        "--meter", default=None, metavar="PATTERN", type=_validate_meter_pattern,
+        help='Filter results to headwords matching a stress pattern of "/" (stressed) and "x" (unstressed) per syllable, e.g. "/x".',
     )
     return parser
 
@@ -145,27 +186,62 @@ def _print_static_results(result: dict) -> None:
 
 
 def _local_search_fallback(
-    query: str, top_n: int, sort_mode: str | None = None, category: str | None = None
+    query: str,
+    top_n: int,
+    sort_mode: str | None = None,
+    category: str | None = None,
+    syllables: int | None = None,
+    primary_vowel: str | None = None,
+    rhymes_with: str | None = None,
+    sounds_like: str | None = None,
+    meter: str | None = None,
 ) -> dict:
     from revdict.query_env import configure_offline_quiet_env
 
     configure_offline_quiet_env()
     from revdict import search as search_mod
 
-    return search_mod.search(query, top_n=top_n, sort_mode=sort_mode, category=category)
+    return search_mod.search(
+        query,
+        top_n=top_n,
+        sort_mode=sort_mode,
+        category=category,
+        syllables=syllables,
+        primary_vowel=primary_vowel,
+        rhymes_with=rhymes_with,
+        sounds_like=sounds_like,
+        meter=meter,
+    )
 
 
 def _get_search_result(
-    query: str, top_n: int, sort_mode: str | None = None, category: str | None = None
+    query: str,
+    top_n: int,
+    sort_mode: str | None = None,
+    category: str | None = None,
+    syllables: int | None = None,
+    primary_vowel: str | None = None,
+    rhymes_with: str | None = None,
+    sounds_like: str | None = None,
+    meter: str | None = None,
 ) -> dict:
-    result = daemon.send_query(query, top_n, sort_mode=sort_mode, category=category)
+    result = daemon.send_query(
+        query, top_n, sort_mode=sort_mode, category=category, syllables=syllables,
+        primary_vowel=primary_vowel, rhymes_with=rhymes_with, sounds_like=sounds_like, meter=meter,
+    )
     if result is not None:
         return result
     if daemon.ensure_daemon_running():
-        result = daemon.send_query(query, top_n, sort_mode=sort_mode, category=category)
+        result = daemon.send_query(
+            query, top_n, sort_mode=sort_mode, category=category, syllables=syllables,
+            primary_vowel=primary_vowel, rhymes_with=rhymes_with, sounds_like=sounds_like, meter=meter,
+        )
         if result is not None:
             return result
-    return _local_search_fallback(query, top_n, sort_mode=sort_mode, category=category)
+    return _local_search_fallback(
+        query, top_n, sort_mode=sort_mode, category=category, syllables=syllables,
+        primary_vowel=primary_vowel, rhymes_with=rhymes_with, sounds_like=sounds_like, meter=meter,
+    )
 
 
 def _build_index(skip_confirm: bool) -> None:
@@ -199,12 +275,20 @@ def _run_query(
     interactive: bool,
     sort_mode: str | None = None,
     category: str | None = None,
+    syllables: int | None = None,
+    primary_vowel: str | None = None,
+    rhymes_with: str | None = None,
+    sounds_like: str | None = None,
+    meter: str | None = None,
 ) -> int:
     if not query.strip():
         console.print("[yellow]Please enter a word or phrase.[/yellow]")
         return 0
 
-    result = _get_search_result(query, top_n, sort_mode=sort_mode, category=category)
+    result = _get_search_result(
+        query, top_n, sort_mode=sort_mode, category=category, syllables=syllables,
+        primary_vowel=primary_vowel, rhymes_with=rhymes_with, sounds_like=sounds_like, meter=meter,
+    )
 
     if interactive:
         try:
@@ -406,7 +490,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     interactive = not args.no_interactive and sys.stdout.isatty()
-    return _run_query(query, args.n, interactive, sort_mode=args.sort, category=args.category)
+    return _run_query(
+        query, args.n, interactive, sort_mode=args.sort, category=args.category,
+        syllables=args.syllables, primary_vowel=args.primary_vowel, rhymes_with=args.rhymes_with,
+        sounds_like=args.sounds_like, meter=args.meter,
+    )
 
 
 if __name__ == "__main__":
