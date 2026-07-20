@@ -62,3 +62,37 @@ def test_build_metadata_record_handles_wiktionary_records_lacking_synonyms_field
     assert meta["synonyms"] is None
     assert meta["sentiwordnet"] is None
     assert meta["emolex"] is None
+
+
+def test_build_metadata_record_includes_tags_when_present():
+    record = {
+        "headword": "thou",
+        "pos": "pronoun",
+        "definition": "the second-person singular pronoun",
+        "examples": [],
+        "source": "wiktionary",
+        "tags": ["archaic", "singular"],
+    }
+
+    meta = build_metadata_record(record)
+
+    assert meta["tags"] == ["archaic", "singular"]
+
+
+def test_build_metadata_record_defaults_tags_to_an_empty_list_when_absent():
+    """WordNet-sourced records never carry a `tags` key at all (only
+    Wiktionary senses compute one) -- must not KeyError, and should persist
+    as [] rather than None so downstream category matching never needs a
+    None-check."""
+    record = {
+        "headword": "happy",
+        "pos": "adjective",
+        "definition": "feeling great pleasure",
+        "examples": ["a happy child"],
+        "source": "wordnet",
+        "emolex": None,
+    }
+
+    meta = build_metadata_record(record)
+
+    assert meta["tags"] == []

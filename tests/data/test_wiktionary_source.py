@@ -1,6 +1,9 @@
 import gzip
+import itertools
 import tempfile
 from pathlib import Path
+
+import pytest
 
 from revdict.data.wiktionary_source import (
     _combine_glosses,
@@ -33,6 +36,15 @@ ENGLISH_ALT_OF_LINE = (
 NON_ENGLISH_LINE = (
     '{"word": "diccionario", "pos": "noun", "lang": "Spanish", "lang_code": "es", '
     '"senses": [{"glosses": ["Un diccionario"]}]}'
+)
+ENGLISH_ARCHAIC_LINE = (
+    '{"word": "thou", "pos": "pron", "lang": "English", "lang_code": "en", '
+    '"senses": [{"glosses": ["The second-person singular pronoun."], '
+    '"tags": ["archaic", "singular"]}]}'
+)
+ENGLISH_NO_TAGS_LINE = (
+    '{"word": "dog", "pos": "noun", "lang": "English", "lang_code": "en", '
+    '"senses": [{"glosses": ["A domesticated canine."]}]}'
 )
 
 
@@ -86,3 +98,39 @@ def test_stream_filtered_entries_from_gzip_reads_a_real_gz_file():
         records = list(stream_filtered_entries_from_gzip(str(gz_path)))
         assert len(records) == 1
         assert records[0]["headword"] == "dictionary"
+
+
+def test_parse_filtered_entries_captures_the_tags_field_when_present():
+    records = parse_filtered_entries([ENGLISH_ARCHAIC_LINE])
+    assert records[0]["tags"] == ["archaic", "singular"]
+
+
+def test_parse_filtered_entries_defaults_tags_to_an_empty_list_when_absent():
+    records = parse_filtered_entries([ENGLISH_NO_TAGS_LINE])
+    assert records[0]["tags"] == []
+
+
+_REAL_RAW_WIKTIONARY_PATH = Path.home() / ".cache" / "rev_dictionary" / "raw-wiktextract-data.jsonl.gz"
+
+
+@pytest.mark.skipif(
+    not _REAL_RAW_WIKTIONARY_PATH.exists(),
+    reason="requires the real cached Wiktionary dump (present after running `revdict build-index` once)",
+)
+def test_stream_filtered_entries_captures_real_tags_from_the_actual_dump():
+    """Regression guard against the real data source's actual shape, not
+    just a synthetic fixture. Scoped to the first 25K raw lines (not the
+    full ~2.7GB file) to keep this fast on every test run -- verified by
+    direct sampling that this slice alone contains hundreds of tagged
+    senses (archaic: 448, slang: 777, as of the 2026-07 dump), so a
+    zero-tag result here would be a genuine capture bug, not a sampling
+    fluke. (A one-time broader sample, taken manually while writing this
+    plan, already confirmed the full tag vocabulary -- this committed test
+    only needs to catch a regression, not re-discover the vocabulary, so it
+    stays small.)"""
+    with gzip.open(_REAL_RAW_WIKTIONARY_PATH, "rt", encoding="utf-8") as f:
+        lines = list(itertools.islice(f, 25_000))
+    records = parse_filtered_entries(lines)
+    seen_tags = {tag for record in records for tag in record["tags"]}
+    assert "archaic" in seen_tags
+    assert "slang" in seen_tags

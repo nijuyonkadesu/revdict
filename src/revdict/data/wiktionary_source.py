@@ -58,6 +58,7 @@ def iter_filtered_entries(lines: Iterable[str]) -> Iterator[dict]:
                 "definition": _combine_glosses(glosses),
                 "examples": examples,
                 "source": "wiktionary",
+                "tags": tags,
             }
 
 

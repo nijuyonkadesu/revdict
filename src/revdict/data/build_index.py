@@ -56,6 +56,7 @@ def build_metadata_record(record: dict) -> dict:
         "sentiwordnet": record.get("sentiwordnet"),
         "emolex": list(record["emolex"]) if record.get("emolex") else None,
         "synonyms": record.get("synonyms"),
+        "tags": record.get("tags") or [],
     }
 
 
