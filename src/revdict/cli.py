@@ -117,11 +117,11 @@ def _query_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--rhymes-with", default=None, metavar="WORD",
-        help="Filter results to headwords that rhyme with WORD.",
+        help="Filter results to headwords that rhyme with WORD (resolved as a noun).",
     )
     parser.add_argument(
         "--sounds-like", default=None, metavar="WORD",
-        help="Filter results to headwords that sound phonetically similar to WORD.",
+        help="Filter results to headwords that sound phonetically similar to WORD (resolved as a noun).",
     )
     parser.add_argument(
         "--meter", default=None, metavar="PATTERN", type=_validate_meter_pattern,

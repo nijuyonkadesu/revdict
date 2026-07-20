@@ -189,3 +189,7 @@ revdict "small carnivore" --rhymes-with hat --no-interactive
 **Requires a reindex.** Unlike category filtering, none of these five work at all on an index built before this feature shipped — run `revdict build-index` to rebuild. Phonetic data is only computed for single-word headwords with no internal hyphen (multi-word phrases and hyphenated compounds are skipped — the underlying `stressmark` library doesn't reliably syllabify either yet); those headwords simply never match any phonetic filter, on any index.
 
 `--rhymes-with`/`--sounds-like` additionally need the `stressmark` library installed and importable at query time (not just at index-build time) — they resolve your target word's pronunciation live, since it's not something a reindex could have precomputed. If `stressmark` isn't installed, these two flags fail with a clear error rather than silently returning no results.
+
+`--rhymes-with`/`--sounds-like` resolve their target word's pronunciation as a **noun** by default, since the CLI doesn't collect a part of speech for the target word — this matters for a heteronym like "record" (`--rhymes-with record` uses the noun pronunciation "REH-kerd", not the verb "ri-KORD"), which can produce a different rhyme key than you might expect.
+
+Rhyme/sounds-like matches for obscure words not in the CMU Pronouncing Dictionary rely on a machine-predicted (G2P) pronunciation, which isn't always linguistically correct — so an occasional odd match (e.g. a rare compound word matching a target it doesn't actually rhyme with) is expected, not necessarily a bug.
