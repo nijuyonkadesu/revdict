@@ -58,8 +58,14 @@ func (f FilterState) toRequest(query string) queryclient.Request {
 }
 
 type debounceFiredMsg struct{ query string }
-type queryResultMsg struct{ rows []queryclient.ResultRow }
-type queryErrorMsg struct{ err error }
+type queryResultMsg struct {
+	query string
+	rows  []queryclient.ResultRow
+}
+type queryErrorMsg struct {
+	query string
+	err   error
+}
 
 const debounceDelay = 100 * time.Millisecond
 
@@ -69,13 +75,13 @@ func debounceCmd(query string) tea.Cmd {
 	})
 }
 
-func runQueryCmd(ctx context.Context, client *queryclient.Client, req queryclient.Request) tea.Cmd {
+func runQueryCmd(ctx context.Context, client *queryclient.Client, query string, req queryclient.Request) tea.Cmd {
 	return func() tea.Msg {
 		rows, err := client.Query(ctx, req)
 		if err != nil {
-			return queryErrorMsg{err: err}
+			return queryErrorMsg{query: query, err: err}
 		}
-		return queryResultMsg{rows: rows}
+		return queryResultMsg{query: query, rows: rows}
 	}
 }
 
@@ -146,15 +152,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cancelInFlight()
 		}
 		m.cancelInFlight = cancel
-		return m, runQueryCmd(ctx, m.client, m.filters.toRequest(msg.query))
+		return m, runQueryCmd(ctx, m.client, msg.query, m.filters.toRequest(msg.query))
 
 	case queryResultMsg:
+		if msg.query != m.input.Value() {
+			return m, nil
+		}
 		m.rows = msg.rows
 		m.selected = 0
+		m.statusMessage = ""
 		m.refreshPreview()
 		return m, nil
 
 	case queryErrorMsg:
+		if msg.query != m.input.Value() {
+			return m, nil
+		}
 		m.statusMessage = msg.err.Error()
 		return m, nil
 
@@ -199,8 +212,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		m.input, _ = m.input.Update(msg)
-		return m, debounceCmd(m.input.Value())
+		var inputCmd tea.Cmd
+		m.input, inputCmd = m.input.Update(msg)
+		return m, tea.Batch(inputCmd, debounceCmd(m.input.Value()))
 	}
 
 	return m, nil

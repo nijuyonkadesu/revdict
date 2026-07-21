@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -205,11 +206,39 @@ func TestResultsListRowIsTruncatedNotWrappedOnANarrowResultsColumn(t *testing.T)
 
 type fakeExecutor struct {
 	calls [][]string
+	ctxs  []context.Context
 }
 
 func (f *fakeExecutor) Run(ctx context.Context, args ...string) ([]byte, error) {
 	f.calls = append(f.calls, args)
+	f.ctxs = append(f.ctxs, ctx)
 	return []byte(`{"headword":"annoyance","pos":"noun","definition":"a feeling","stress":null,"label":"joy","polarity":"positive","synonyms":[],"examples":[],"relevance":92,"is_exact":false}` + "\n"), nil
+}
+
+// findDebounceFiredMsg extracts a debounceFiredMsg from the result of
+// invoking a tea.Cmd. Production code batches the textinput's own command
+// (e.g. its cursor-blink re-arm) together with the debounce command via
+// tea.Batch, which the real bubbletea runtime unwraps and dispatches
+// independently before Update ever sees it. Tests that call a Cmd directly
+// (bypassing the runtime) must therefore unwrap a tea.BatchMsg themselves to
+// find the sub-command they care about.
+func findDebounceFiredMsg(t *testing.T, msg tea.Msg) debounceFiredMsg {
+	t.Helper()
+	if debounce, ok := msg.(debounceFiredMsg); ok {
+		return debounce
+	}
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		for _, sub := range batch {
+			if sub == nil {
+				continue
+			}
+			if debounce, ok := sub().(debounceFiredMsg); ok {
+				return debounce
+			}
+		}
+	}
+	t.Fatalf("expected debounceFiredMsg (directly or within a tea.BatchMsg), got %T", msg)
+	return debounceFiredMsg{}
 }
 
 func TestTypingSchedulesADebouncedQuery(t *testing.T) {
@@ -224,10 +253,7 @@ func TestTypingSchedulesADebouncedQuery(t *testing.T) {
 	}
 
 	msg := cmd()
-	debounce, ok := msg.(debounceFiredMsg)
-	if !ok {
-		t.Fatalf("expected debounceFiredMsg, got %T", msg)
-	}
+	debounce := findDebounceFiredMsg(t, msg)
 	if debounce.query != "h" {
 		t.Fatalf("expected debounce for query 'h', got %q", debounce.query)
 	}
@@ -272,9 +298,71 @@ func TestQueryResultMsgReplacesRows(t *testing.T) {
 	client := queryclient.NewWithExecutor(fake)
 	m := NewLiveModel(client)
 
-	mm, _ := m.Update(queryResultMsg{rows: []queryclient.ResultRow{{Headword: "new-word"}}})
+	mm, _ := m.Update(queryResultMsg{query: "", rows: []queryclient.ResultRow{{Headword: "new-word"}}})
 	m = mm.(Model)
 	if len(m.rows) != 1 || m.rows[0].Headword != "new-word" {
 		t.Fatalf("expected rows replaced with query result, got %v", m.rows)
+	}
+}
+
+func TestStaleQueryResultIsIgnoredIfSupersededByNewerQuery(t *testing.T) {
+	fake := &fakeExecutor{}
+	client := queryclient.NewWithExecutor(fake)
+	m := NewLiveModel(client)
+	m.input.SetValue("hex")
+
+	mm, _ := m.Update(queryResultMsg{query: "he", rows: []queryclient.ResultRow{{Headword: "stale-word"}}})
+	m = mm.(Model)
+	if len(m.rows) != 0 {
+		t.Fatalf("expected a stale result (query 'he' while input is 'hex') to be ignored, got rows=%v", m.rows)
+	}
+
+	mm, _ = m.Update(queryResultMsg{query: "hex", rows: []queryclient.ResultRow{{Headword: "fresh-word"}}})
+	m = mm.(Model)
+	if len(m.rows) != 1 || m.rows[0].Headword != "fresh-word" {
+		t.Fatalf("expected the fresh result (query matches current input) to be applied, got rows=%v", m.rows)
+	}
+}
+
+func TestSuccessfulQueryResultClearsAStaleErrorMessage(t *testing.T) {
+	fake := &fakeExecutor{}
+	client := queryclient.NewWithExecutor(fake)
+	m := NewLiveModel(client)
+	m.input.SetValue("annoyance")
+
+	mm, _ := m.Update(queryErrorMsg{query: "annoyance", err: errors.New("revdict: error: boom")})
+	m = mm.(Model)
+	if m.statusMessage == "" {
+		t.Fatal("expected an error status message to be set")
+	}
+
+	mm, _ = m.Update(queryResultMsg{query: "annoyance", rows: []queryclient.ResultRow{{Headword: "annoyance"}}})
+	m = mm.(Model)
+	if m.statusMessage != "" {
+		t.Fatalf("expected the stale error message to be cleared on a subsequent successful query, got %q", m.statusMessage)
+	}
+}
+
+func TestNewerDebounceCancelsThePreviousInFlightQuery(t *testing.T) {
+	fake := &fakeExecutor{}
+	client := queryclient.NewWithExecutor(fake)
+	m := NewLiveModel(client)
+	m.input.SetValue("he")
+
+	mm, cmd1 := m.Update(debounceFiredMsg{query: "he"})
+	m = mm.(Model)
+	cmd1() // invoke so fakeExecutor captures the context; result discarded
+
+	if len(fake.ctxs) != 1 {
+		t.Fatalf("expected 1 captured context after the first dispatch, got %d", len(fake.ctxs))
+	}
+	firstCtx := fake.ctxs[0]
+
+	m.input.SetValue("hex")
+	mm, _ = m.Update(debounceFiredMsg{query: "hex"})
+	m = mm.(Model)
+
+	if firstCtx.Err() != context.Canceled {
+		t.Fatalf("expected the first query's context to be cancelled once superseded by a newer one, got err=%v", firstCtx.Err())
 	}
 }
