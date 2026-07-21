@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -199,5 +200,81 @@ func TestResultsListRowIsTruncatedNotWrappedOnANarrowResultsColumn(t *testing.T)
 		if trimmed == "counterrevolutionary" || trimmed == "(adjective)" {
 			t.Fatalf("line %d's results column looks like a wrapped continuation of the row rather than a single truncated line: %q\nfull view:\n%s", i, col, out)
 		}
+	}
+}
+
+type fakeExecutor struct {
+	calls [][]string
+}
+
+func (f *fakeExecutor) Run(ctx context.Context, args ...string) ([]byte, error) {
+	f.calls = append(f.calls, args)
+	return []byte(`{"headword":"annoyance","pos":"noun","definition":"a feeling","stress":null,"label":"joy","polarity":"positive","synonyms":[],"examples":[],"relevance":92,"is_exact":false}` + "\n"), nil
+}
+
+func TestTypingSchedulesADebouncedQuery(t *testing.T) {
+	fake := &fakeExecutor{}
+	client := queryclient.NewWithExecutor(fake)
+	m := NewLiveModel(client)
+
+	mm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
+	m = mm.(Model)
+	if cmd == nil {
+		t.Fatal("expected a debounce command to be scheduled")
+	}
+
+	msg := cmd()
+	debounce, ok := msg.(debounceFiredMsg)
+	if !ok {
+		t.Fatalf("expected debounceFiredMsg, got %T", msg)
+	}
+	if debounce.query != "h" {
+		t.Fatalf("expected debounce for query 'h', got %q", debounce.query)
+	}
+}
+
+func TestStaleDebounceIsIgnoredIfQueryChangedSince(t *testing.T) {
+	fake := &fakeExecutor{}
+	client := queryclient.NewWithExecutor(fake)
+	m := NewLiveModel(client)
+	m.input.SetValue("current")
+
+	mm, cmd := m.Update(debounceFiredMsg{query: "stale"})
+	m = mm.(Model)
+	if cmd != nil {
+		t.Fatal("expected no query dispatched for a stale debounce message")
+	}
+}
+
+func TestFreshDebounceDispatchesAQuery(t *testing.T) {
+	fake := &fakeExecutor{}
+	client := queryclient.NewWithExecutor(fake)
+	m := NewLiveModel(client)
+	m.input.SetValue("annoyance")
+
+	mm, cmd := m.Update(debounceFiredMsg{query: "annoyance"})
+	m = mm.(Model)
+	if cmd == nil {
+		t.Fatal("expected a query command to be dispatched")
+	}
+	msg := cmd()
+	result, ok := msg.(queryResultMsg)
+	if !ok {
+		t.Fatalf("expected queryResultMsg, got %T", msg)
+	}
+	if len(result.rows) != 1 || result.rows[0].Headword != "annoyance" {
+		t.Fatalf("unexpected rows: %v", result.rows)
+	}
+}
+
+func TestQueryResultMsgReplacesRows(t *testing.T) {
+	fake := &fakeExecutor{}
+	client := queryclient.NewWithExecutor(fake)
+	m := NewLiveModel(client)
+
+	mm, _ := m.Update(queryResultMsg{rows: []queryclient.ResultRow{{Headword: "new-word"}}})
+	m = mm.(Model)
+	if len(m.rows) != 1 || m.rows[0].Headword != "new-word" {
+		t.Fatalf("expected rows replaced with query result, got %v", m.rows)
 	}
 }

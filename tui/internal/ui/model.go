@@ -1,7 +1,9 @@
 package ui
 
 import (
+	"context"
 	"fmt"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -26,6 +28,55 @@ type Model struct {
 	width, height  int
 	statusMessage  string
 	onCopy         copyFunc
+	client         *queryclient.Client
+	filters        FilterState
+	cancelInFlight context.CancelFunc
+}
+
+// FilterState holds the currently-active sort/category/phonetic filters.
+// The zero value is NOT valid -- always construct via NewFilterState.
+type FilterState struct {
+	Sort         string
+	Category     string
+	Syllables    *int
+	PrimaryVowel string
+	RhymesWith   string
+	SoundsLike   string
+	Meter        string
+}
+
+func NewFilterState() FilterState {
+	return FilterState{Sort: "relevance", Category: "all"}
+}
+
+func (f FilterState) toRequest(query string) queryclient.Request {
+	return queryclient.Request{
+		Query: query, TopN: 30, Sort: f.Sort, Category: f.Category,
+		Syllables: f.Syllables, PrimaryVowel: f.PrimaryVowel,
+		RhymesWith: f.RhymesWith, SoundsLike: f.SoundsLike, Meter: f.Meter,
+	}
+}
+
+type debounceFiredMsg struct{ query string }
+type queryResultMsg struct{ rows []queryclient.ResultRow }
+type queryErrorMsg struct{ err error }
+
+const debounceDelay = 100 * time.Millisecond
+
+func debounceCmd(query string) tea.Cmd {
+	return tea.Tick(debounceDelay, func(time.Time) tea.Msg {
+		return debounceFiredMsg{query: query}
+	})
+}
+
+func runQueryCmd(ctx context.Context, client *queryclient.Client, req queryclient.Request) tea.Cmd {
+	return func() tea.Msg {
+		rows, err := client.Query(ctx, req)
+		if err != nil {
+			return queryErrorMsg{err: err}
+		}
+		return queryResultMsg{rows: rows}
+	}
 }
 
 func NewModel(rows []queryclient.ResultRow) Model {
@@ -39,6 +90,13 @@ func NewModel(rows []queryclient.ResultRow) Model {
 		previewVisible: true,
 		onCopy:         func(string) error { return nil },
 	}
+}
+
+func NewLiveModel(client *queryclient.Client) Model {
+	m := NewModel(nil)
+	m.client = client
+	m.filters = NewFilterState()
+	return m
 }
 
 func (m Model) Init() tea.Cmd {
@@ -74,6 +132,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.preview.Width = msg.Width / 2
 		m.preview.Height = msg.Height - 4
 		m.refreshPreview()
+		return m, nil
+
+	case debounceFiredMsg:
+		if msg.query != m.input.Value() {
+			return m, nil
+		}
+		if m.client == nil {
+			return m, nil
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		if m.cancelInFlight != nil {
+			m.cancelInFlight()
+		}
+		m.cancelInFlight = cancel
+		return m, runQueryCmd(ctx, m.client, m.filters.toRequest(msg.query))
+
+	case queryResultMsg:
+		m.rows = msg.rows
+		m.selected = 0
+		m.refreshPreview()
+		return m, nil
+
+	case queryErrorMsg:
+		m.statusMessage = msg.err.Error()
 		return m, nil
 
 	case tea.KeyMsg:
@@ -117,9 +199,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		var cmd tea.Cmd
-		m.input, cmd = m.input.Update(msg)
-		return m, cmd
+		m.input, _ = m.input.Update(msg)
+		return m, debounceCmd(m.input.Value())
 	}
 
 	return m, nil
