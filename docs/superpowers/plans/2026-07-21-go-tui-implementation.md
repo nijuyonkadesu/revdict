@@ -22,6 +22,7 @@
 - **Non-goals** (explicitly out of scope): not replacing the default fzf-based `revdict "query"` experience; not changing `--jsonl-query`'s existing contract in any way (a separate repo, `revdict.nvim`, depends on its exact current invocation); not touching `revdict.nvim` itself.
 - Every Go task ends with `go build ./...` and `go test ./...` run from inside `tui/`, both passing, as an explicit verification step — this is how framework usage gets confirmed correct, not by re-reading this plan's prose.
 - Full Python test suite baseline before this phase: 338 passed + 2 known pre-existing `FORCE_COLOR`-environment-artifact failures in `test_cli.py` (`test_main_error_message_is_not_mangled_by_rich_markup`, `test_main_routes_daemon_status`) — never a regression, confirmed unrelated to any code in this project's history.
+- **The UI must survive resizes without corrupting the terminal** (per the design spec's own "UI needs to be dynamic — should survive resizes" requirement). Two things jointly deliver this, not one: `tea.NewProgram(model, tea.WithAltScreen())` (Task 8) so the app renders in the terminal's alternate screen buffer instead of inline, and `Model.visibleRowRange()` (Task 4) clamping the manually-rendered results list to the available height instead of rendering all `top_n` (up to 30) rows unconditionally — a naive full-height render on a short terminal is exactly the corruption this constraint rules out.
 
 ---
 
@@ -290,7 +291,7 @@ Expected: all PASS.
 - [ ] **Step 6: Run the full test suite**
 
 Run: `pytest -q`
-Expected: 345 passed (338 baseline + 7 new tests) + the same 2 known pre-existing failures. No regressions — in particular, the existing `test_jsonl_query_*` tests must still pass unchanged, confirming the `_build_result_rows` extraction didn't alter `_run_jsonl_query`'s observable behavior.
+Expected: 346 passed (338 baseline + 8 new tests) + the same 2 known pre-existing failures. No regressions — in particular, the existing `test_jsonl_query_*` tests must still pass unchanged, confirming the `_build_result_rows` extraction didn't alter `_run_jsonl_query`'s observable behavior.
 
 - [ ] **Step 7: Commit**
 
@@ -663,6 +664,7 @@ Create `tui/internal/ui/model_test.go`:
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -770,6 +772,48 @@ func TestViewIncludesHighlightedHeadwordAndWrappedPreview(t *testing.T) {
 	out := m.View()
 	if !strings.Contains(out, "annoyance") {
 		t.Fatalf("expected view to contain the first result's headword, got: %s", out)
+	}
+}
+
+func manyTestRows(n int) []queryclient.ResultRow {
+	rows := make([]queryclient.ResultRow, n)
+	for i := range rows {
+		rows[i] = queryclient.ResultRow{Headword: fmt.Sprintf("word%d", i), POS: "noun"}
+	}
+	return rows
+}
+
+func TestVisibleRowRangeClampsToAvailableHeightOnAShortTerminal(t *testing.T) {
+	m := NewModel(manyTestRows(30))
+	mm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 10})
+	m = mm.(Model)
+	start, end := m.visibleRowRange()
+	if end-start > m.height-2 {
+		t.Fatalf("expected visible range to fit within height-2 rows, got start=%d end=%d height=%d", start, end, m.height)
+	}
+	if end-start >= len(m.rows) {
+		t.Fatalf("expected visible range to be a strict subset of 30 rows on a 10-row terminal, got %d rows", end-start)
+	}
+}
+
+func TestVisibleRowRangeKeepsSelectionInsideTheWindowWhenScrolledDown(t *testing.T) {
+	m := NewModel(manyTestRows(30))
+	mm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 10})
+	m = mm.(Model)
+	m.selected = 25
+	start, end := m.visibleRowRange()
+	if m.selected < start || m.selected >= end {
+		t.Fatalf("expected selected=25 to fall within visible range [%d,%d)", start, end)
+	}
+}
+
+func TestVisibleRowRangeShowsAllRowsWhenTheyFit(t *testing.T) {
+	m := NewModel(testRows())
+	mm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = mm.(Model)
+	start, end := m.visibleRowRange()
+	if start != 0 || end != len(m.rows) {
+		t.Fatalf("expected the full 2-row set to be visible on a tall terminal, got start=%d end=%d", start, end)
 	}
 }
 ```
@@ -913,9 +957,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// visibleRowRange returns the [start, end) slice of m.rows that fits within
+// the terminal's available height, centered on the current selection. The
+// results list is rendered as a manual loop (not bubbles/list), so nothing
+// else clamps it -- without this, a 30-row result set on a short terminal
+// would render taller than the screen and corrupt the display (bubbletea's
+// renderer does not auto-scroll the root View).
+func (m Model) visibleRowRange() (int, int) {
+	maxVisible := m.height - 2 // input line + status line
+	if maxVisible < 1 {
+		maxVisible = 1
+	}
+	if len(m.rows) <= maxVisible {
+		return 0, len(m.rows)
+	}
+	start := m.selected - maxVisible/2
+	if start < 0 {
+		start = 0
+	}
+	end := start + maxVisible
+	if end > len(m.rows) {
+		end = len(m.rows)
+		start = end - maxVisible
+		if start < 0 {
+			start = 0
+		}
+	}
+	return start, end
+}
+
 func (m Model) View() string {
 	var b []string
-	for i, row := range m.rows {
+	start, end := m.visibleRowRange()
+	for i := start; i < end; i++ {
+		row := m.rows[i]
 		marker := "  "
 		if i == m.selected {
 			marker = "> "
@@ -1857,7 +1932,7 @@ func main() {
 	model := ui.NewLiveModel(queryclient.New())
 	model.SetCopyFunc(clipboard.Copy)
 
-	p := tea.NewProgram(model)
+	p := tea.NewProgram(model, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "revdict-tui:", err)
 		os.Exit(1)
@@ -1878,6 +1953,8 @@ func (m *Model) SetCopyFunc(f func(string) error) {
 }
 ```
 
+`tea.WithAltScreen()` runs the program in the terminal's alternate screen buffer -- the standard choice for a full-screen multi-pane app like this one (search box + results + preview + status), since without it the renderer draws inline and a multi-line View is far more prone to leaving debris in scrollback on resize/exit. Combined with Task 4's `visibleRowRange` height clamp, this is what makes "survives resize, doesn't corrupt" (a Global Constraint) actually true rather than just asserted.
+
 - [ ] **Step 2: Verify it builds**
 
 ```bash
@@ -1892,7 +1969,7 @@ Expected: builds clean, all tests pass, `/tmp/revdict-tui` exists.
 ```bash
 /tmp/revdict-tui
 ```
-Manually confirm: the search box accepts typed input, results appear (assuming `revdict`'s index is built and the daemon is reachable or can cold-start), `Up`/`Down` move the selection, `Enter` on a selection doesn't crash, `Tab` opens the filter panel and `Esc` closes it, `F1` opens help and `Esc` closes it, `Ctrl-C` quits. Resize the terminal while it's running and confirm the layout adapts rather than corrupting.
+Manually confirm: the search box accepts typed input, results appear (assuming `revdict`'s index is built and the daemon is reachable or can cold-start), `Up`/`Down` move the selection, `Enter` on a selection doesn't crash, `Tab` opens the filter panel and `Esc` closes it, `F1` opens help and `Esc` closes it, `Ctrl-C` quits. Resize the terminal while it's running and confirm the layout adapts rather than corrupting. Specifically: shrink the terminal to ~10-15 rows with a query that returns 30 results (e.g. a broad query, or set `top_n` up via a `sort`/filter combo) and confirm the results list clamps to `visibleRowRange` instead of overflowing the screen — this is the discriminating check for the resize/overflow constraint, not just "does it look OK at 80x24."
 
 - [ ] **Step 4: Document it in the README**
 
@@ -1945,4 +2022,4 @@ git commit -m "Wire the real revdict-tui entrypoint and document installation"
 
 ## Post-plan note for the final whole-branch reviewer
 
-Per this project's established Phase 3/4/5 precedent, the final whole-branch review should include a real-usage check, not just passing unit tests: build the real binary (`go build -o /tmp/revdict-tui ./tui/cmd/revdict-tui`) and drive it interactively against a real, built `revdict` index — confirm a real query returns real results, a filter change in the panel actually changes them, resizing the terminal doesn't corrupt the layout, and `Ctrl-C`/double-`Esc` both cleanly exit. `go install .../tui/cmd/revdict-tui@latest` itself cannot be verified until after this branch is pushed AND a `tui/vX.Y.Z` tag exists — note this explicitly rather than trying to test it mid-review; a `go build`/local-path `go install` check is the correct pre-push substitute.
+Per this project's established Phase 3/4/5 precedent, the final whole-branch review should include a real-usage check, not just passing unit tests: build the real binary (`go build -o /tmp/revdict-tui ./tui/cmd/revdict-tui`) and drive it interactively against a real, built `revdict` index — confirm a real query returns real results, a filter change in the panel actually changes them, resizing the terminal doesn't corrupt the layout, and `Ctrl-C`/double-`Esc` both cleanly exit. In particular, run a broad query that returns close to `top_n` (30) results in a terminal shrunk to ~10-15 rows and confirm the results list stays clamped (`visibleRowRange`, Task 4) rather than overflowing — this is the one failure mode unit tests can't fully substitute for, since it depends on the real alt-screen renderer (`tea.WithAltScreen()`, Task 8) at a real small size. `go install .../tui/cmd/revdict-tui@latest` itself cannot be verified until after this branch is pushed AND a `tui/vX.Y.Z` tag exists — note this explicitly rather than trying to test it mid-review; a `go build`/local-path `go install` check is the correct pre-push substitute.
