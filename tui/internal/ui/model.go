@@ -27,6 +27,7 @@ type Model struct {
 	previewVisible bool
 	width, height  int
 	statusMessage  string
+	statusIsError  bool // true when statusMessage holds a query-error banner (set by queryErrorMsg); the next successful queryResultMsg clears it. Enter's copy feedback ("Copied: X"/"Copy failed: ...") sets this false so an unrelated, later-resolving query can never silently wipe a copy confirmation the user just triggered.
 	onCopy         copyFunc
 	client         *queryclient.Client
 	filters        FilterState
@@ -160,7 +161,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.rows = msg.rows
 		m.selected = 0
-		m.statusMessage = ""
+		if m.statusIsError {
+			m.statusMessage = ""
+			m.statusIsError = false
+		}
 		m.refreshPreview()
 		return m, nil
 
@@ -169,6 +173,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.statusMessage = msg.err.Error()
+		m.statusIsError = true
 		return m, nil
 
 	case tea.KeyMsg:
@@ -190,6 +195,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else {
 					m.statusMessage = "Copied: " + row.Headword
 				}
+				m.statusIsError = false
 			}
 			return m, nil
 

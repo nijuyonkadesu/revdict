@@ -343,6 +343,27 @@ func TestSuccessfulQueryResultClearsAStaleErrorMessage(t *testing.T) {
 	}
 }
 
+func TestSuccessfulQueryResultDoesNotClearACopyConfirmationMessage(t *testing.T) {
+	fake := &fakeExecutor{}
+	client := queryclient.NewWithExecutor(fake)
+	m := NewLiveModel(client)
+	m.rows = []queryclient.ResultRow{{Headword: "annoyance"}}
+	m.selected = 0
+	m.input.SetValue("annoyance")
+
+	mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mm.(Model)
+	if m.statusMessage != "Copied: annoyance" {
+		t.Fatalf("expected a copy confirmation, got %q", m.statusMessage)
+	}
+
+	mm, _ = m.Update(queryResultMsg{query: "annoyance", rows: []queryclient.ResultRow{{Headword: "annoyance"}}})
+	m = mm.(Model)
+	if m.statusMessage != "Copied: annoyance" {
+		t.Fatalf("expected the copy confirmation to survive an unrelated successful query result, got %q", m.statusMessage)
+	}
+}
+
 func TestNewerDebounceCancelsThePreviousInFlightQuery(t *testing.T) {
 	fake := &fakeExecutor{}
 	client := queryclient.NewWithExecutor(fake)
