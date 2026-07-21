@@ -655,6 +655,46 @@ def test_search_alpha_sort_mode_reorders_meaning_mode_candidates(monkeypatch):
     assert [c["headword"] for c in result["candidates"]] == ["aardvark", "zebra"]
 
 
+def test_search_most_formal_sort_mode_reorders_meaning_mode_candidates(monkeypatch):
+    metadata = [
+        {
+            "headword": "khazi", "pos": "noun", "definition": "a toilet",
+            "examples": [], "source": "wiktionary", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": ["slang"], "phonetics": None,
+        },
+        {
+            "headword": "lavatory", "pos": "noun", "definition": "a toilet",
+            "examples": [], "source": "wiktionary", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": ["formal"], "phonetics": None,
+        },
+    ]
+    state = {
+        "metadata": metadata,
+        "word_index": {"khazi": [0], "lavatory": [1]},
+        "literary_frequency": {},
+        "classifier": None,
+    }
+    import numpy as np
+
+    class FakeEmbedder:
+        def encode_query(self, query):
+            return np.array([1.0, 0.0], dtype="float32")
+
+    class FakeReranker:
+        def score(self, query, definitions):
+            return [1.0 for _ in definitions]
+
+    state["embedder"] = FakeEmbedder()
+    state["reranker"] = FakeReranker()
+    state["embeddings"] = np.array([[1.0, 0.0], [1.0, 0.0]], dtype="float32")
+    state["embedding_norms"] = np.array([1.0, 1.0])
+    monkeypatch.setattr(search_mod, "_load_state", lambda: state)
+
+    result = search_mod.search("toilet", top_n=10, sort_mode="most_formal")
+
+    assert [c["headword"] for c in result["candidates"]] == ["lavatory", "khazi"]
+
+
 def test_search_sort_mode_applies_to_structural_mode_results_too(monkeypatch):
     """Structural-mode results default to frequency-descending order
     (structural_search._score_and_sort) -- sort_mode="alpha" must override

@@ -7,7 +7,11 @@ def _candidates(*headwords):
     return [{"headword": hw} for hw in headwords]
 
 
-def test_sort_modes_contains_exactly_the_seven_documented_modes():
+def _candidate(headword, tags=None, phonetics=None):
+    return {"headword": headword, "tags": tags or [], "phonetics": phonetics}
+
+
+def test_sort_modes_contains_exactly_the_ten_documented_modes():
     assert SORT_MODES == (
         "relevance",
         "alpha",
@@ -16,6 +20,9 @@ def test_sort_modes_contains_exactly_the_seven_documented_modes():
         "longest",
         "most_common",
         "least_common",
+        "most_formal",
+        "oldest",
+        "most_modern",
     )
 
 
@@ -102,3 +109,82 @@ def test_frequency_lookup_is_case_insensitive():
 def test_unknown_sort_mode_raises_value_error():
     with pytest.raises(ValueError, match="nonsense"):
         apply_sort(_candidates("a"), "nonsense", {})
+
+
+def test_most_formal_ranks_formal_tagged_first():
+    candidates = [
+        _candidate("khazi", tags=["slang"]),
+        _candidate("lavatory", tags=["formal"]),
+        _candidate("toilet"),
+    ]
+
+    result = apply_sort(candidates, "most_formal", {})
+
+    assert [c["headword"] for c in result] == ["lavatory", "toilet", "khazi"]
+
+
+@pytest.mark.parametrize("tag", ["slang", "vulgar", "colloquial", "idiomatic", "informal"])
+def test_most_formal_treats_every_informal_register_tag_as_informal(tag):
+    """"informal" is included deliberately even though category.py's
+    idiom_slang CATEGORY grouping excludes it (category.py:9-13) -- a sort
+    axis and a category filter are allowed to define "informal"
+    differently; this test locks in that most_formal's definition covers
+    all 5 tags, not just the 4 category.py happens to use."""
+    candidates = [_candidate("plain"), _candidate("marked", tags=[tag])]
+
+    result = apply_sort(candidates, "most_formal", {})
+
+    assert [c["headword"] for c in result] == ["plain", "marked"]
+
+
+def test_most_formal_treats_archaic_and_dated_tags_as_neutral_not_informal():
+    """archaic/dated/obsolete/historical belong to the oldest/most_modern
+    axis, not the formal/informal axis -- a purely archaic-tagged sense
+    must tie with an untagged sense here, not get demoted like slang."""
+    candidates = [
+        _candidate("zebra", tags=["archaic"]),
+        _candidate("apple"),
+    ]
+
+    result = apply_sort(candidates, "most_formal", {})
+
+    assert [c["headword"] for c in result] == ["zebra", "apple"]
+
+
+def test_most_formal_preserves_relevance_order_within_a_tie():
+    candidates = [_candidate("zebra"), _candidate("apple"), _candidate("mango")]
+
+    result = apply_sort(candidates, "most_formal", {})
+
+    assert [c["headword"] for c in result] == ["zebra", "apple", "mango"]
+
+
+@pytest.mark.parametrize("tag", ["archaic", "dated", "obsolete", "historical"])
+def test_oldest_ranks_any_old_register_tag_first(tag):
+    candidates = [_candidate("plain"), _candidate("marked", tags=[tag])]
+
+    result = apply_sort(candidates, "oldest", {})
+
+    assert [c["headword"] for c in result] == ["marked", "plain"]
+
+
+def test_oldest_preserves_relevance_order_among_untagged_candidates():
+    candidates = [_candidate("zebra"), _candidate("apple"), _candidate("mango")]
+
+    result = apply_sort(candidates, "oldest", {})
+
+    assert [c["headword"] for c in result] == ["zebra", "apple", "mango"]
+
+
+def test_most_modern_is_the_exact_reverse_of_oldest():
+    candidates = [
+        _candidate("plain"),
+        _candidate("marked", tags=["archaic"]),
+        _candidate("other"),
+    ]
+
+    oldest_order = [c["headword"] for c in apply_sort(candidates, "oldest", {})]
+    modern_order = [c["headword"] for c in apply_sort(candidates, "most_modern", {})]
+
+    assert oldest_order == ["marked", "plain", "other"]
+    assert modern_order == ["plain", "other", "marked"]
