@@ -3,6 +3,7 @@ package queryclient
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os/exec"
 	"strings"
 )
@@ -74,6 +75,9 @@ func (c *Client) Query(ctx context.Context, req Request) ([]ResultRow, error) {
 
 	out, err := c.executor.Run(ctx, "--tui-query", string(payload))
 	if err != nil {
+		if msg := strings.TrimSpace(string(out)); msg != "" {
+			return nil, fmt.Errorf("%s", msg)
+		}
 		return nil, err
 	}
 

@@ -105,11 +105,38 @@ func TestQueryReturnsEmptyRowsForBlankOutput(t *testing.T) {
 }
 
 func TestQueryPropagatesExecutorError(t *testing.T) {
-	fake := &fakeExecutor{err: errors.New("revdict: error: Unknown sort mode: 'bogus'")}
+	// Mirrors real execExecutor behavior: revdict prints its diagnostic to
+	// stdout and exits non-zero, so the Go error itself is just the generic
+	// "exit status 1" -- the useful text lives in the captured output.
+	fake := &fakeExecutor{
+		output: []byte("revdict: error: Unknown sort mode: 'bogus'"),
+		err:    errors.New("exit status 1"),
+	}
 	c := NewWithExecutor(fake)
 
 	_, err := c.Query(context.Background(), Request{Query: "happy", TopN: 30, Sort: "bogus", Category: "all"})
 	if err == nil {
 		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "revdict: error: Unknown sort mode: 'bogus'") {
+		t.Fatalf("expected error to contain the revdict diagnostic, got %q", err.Error())
+	}
+}
+
+func TestQueryFallsBackToExecutorErrorWhenOutputEmpty(t *testing.T) {
+	// Covers cases where the subprocess fails before producing any stdout
+	// (e.g. revdict not found on PATH) -- Query must still surface an error.
+	fake := &fakeExecutor{
+		output: []byte(""),
+		err:    errors.New("exec: \"revdict\": executable file not found in $PATH"),
+	}
+	c := NewWithExecutor(fake)
+
+	_, err := c.Query(context.Background(), Request{Query: "happy", TopN: 30, Sort: "relevance", Category: "all"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "executable file not found") {
+		t.Fatalf("expected fallback to original executor error, got %q", err.Error())
 	}
 }
