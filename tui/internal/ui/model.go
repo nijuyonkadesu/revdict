@@ -19,6 +19,13 @@ import (
 // no-op default so this file has no clipboard dependency of its own.
 type copyFunc func(headword string) error
 
+type screenID int
+
+const (
+	screenSearch screenID = iota
+	screenPanel
+)
+
 type Model struct {
 	input          textinput.Model
 	preview        viewport.Model
@@ -32,6 +39,8 @@ type Model struct {
 	client         *queryclient.Client
 	filters        FilterState
 	cancelInFlight context.CancelFunc
+	screen         screenID
+	panel          panelState
 }
 
 // FilterState holds the currently-active sort/category/phonetic filters.
@@ -177,7 +186,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		if m.screen == screenPanel {
+			if msg.Type == tea.KeyEsc {
+				m.filters = m.panel.toFilterState()
+				m.screen = screenSearch
+				return m, debounceCmd(m.input.Value())
+			}
+			m.panel = m.panel.handleKey(msg)
+			return m, nil
+		}
+
 		switch msg.Type {
+		case tea.KeyTab:
+			m.panel = newPanelState(m.filters)
+			m.screen = screenPanel
+			return m, nil
 		case tea.KeyCtrlC:
 			return m, tea.Quit
 
@@ -271,6 +294,10 @@ func truncateToWidth(s string, width int) string {
 }
 
 func (m Model) View() string {
+	if m.screen == screenPanel {
+		return m.panel.View()
+	}
+
 	listWidth := m.width
 	if m.previewVisible {
 		listWidth = m.width / 2
