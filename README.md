@@ -138,16 +138,44 @@ query). Override this with `--sort`:
 | `longest` | Longest word first |
 | `most_common` | Most common in modern published fiction first |
 | `least_common` | Least common in modern published fiction first |
+| `most_formal` | Most formal-register first (e.g. "lavatory" before "toilet" before "khazi") |
+| `oldest` | Most archaic/dated/obsolete/historical-tagged first |
+| `most_modern` | Least archaic/dated/obsolete/historical-tagged first |
+| `most_lyrical` | Smoothest-sounding (fewest/shortest consonant clusters) first -- experimental |
 
 ```bash
 revdict "happy" --sort alpha --no-interactive
 revdict "blue*" --sort longest --no-interactive
+revdict "toilet" --sort most_formal --no-interactive
 ```
 
 `most_common`/`least_common` reuse the same literary-frequency data that
 already nudges the default relevance ranking — a word with no frequency
 data at all (very rare hyphenated/multi-word entries) sorts as if it had
 zero frequency.
+
+`most_formal`/`oldest`/`most_modern` reuse the same Wiktionary register
+tags `--category old`/`--category idiom_slang` are built on (see below) —
+they need the same reindex those categories need on an older index.
+`most_formal` ranks by the formal ↔ informal spectrum only, not by
+subject-matter domain — a legal term like "writ" is not specifically
+detected as legal, only as (in this case) untagged/neutral register; true
+topic/domain detection (e.g. distinguishing legal terms specifically) is
+not yet implemented. These three sorts rank by whichever single sense of
+a word actually matched your query, not by whether the word has *any*
+tagged sense anywhere — a word like "glad" can have separate obsolete and
+informal senses in Wiktionary, but if your query matches its plain,
+untagged sense, it sorts as neutral/formal-tied rather than as old or
+informal. Untagged/tied candidates keep their original relevance order
+rather than moving to an arbitrary position.
+
+`most_lyrical` is an experimental approximation of "smooth/euphonious
+sounding" based on average consonant-cluster length in the word's
+pronunciation — it needs the same `revdict build-index` reindex
+`--syllables`/`--meter`/etc. need (see "Phonetic filters" below), and
+words without precomputed phonetics data (multi-word/hyphenated
+headwords, or an un-reindexed older index) sort last rather than being
+excluded.
 
 ## Category filter
 
