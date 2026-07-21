@@ -549,6 +549,155 @@ def test_jsonl_query_candidate_without_synonyms_or_stress_defaults_cleanly(monke
     assert row["stress"] is None
 
 
+def test_tui_query_prints_one_json_object_per_candidate(monkeypatch, capsys):
+    fake_result = {
+        "exact_match": None,
+        "candidates": [
+            {
+                "headword": "joyful", "pos": "adjective",
+                "definition": "feeling great happiness",
+                "examples": [], "label": "joy", "polarity": "positive",
+                "relevance": 90,
+            }
+        ],
+    }
+    captured_kwargs = {}
+
+    def fake_get_search_result(query, top_n, sort_mode=None, category=None, syllables=None, primary_vowel=None, rhymes_with=None, sounds_like=None, meter=None):
+        captured_kwargs.update(
+            query=query, top_n=top_n, sort_mode=sort_mode, category=category,
+            syllables=syllables, primary_vowel=primary_vowel, rhymes_with=rhymes_with,
+            sounds_like=sounds_like, meter=meter,
+        )
+        return fake_result
+
+    monkeypatch.setattr(cli, "_get_search_result", fake_get_search_result)
+
+    payload = json.dumps({"query": "happy", "sort": "most_formal", "category": "noun"})
+    code = cli.main(["--tui-query", payload])
+
+    captured = capsys.readouterr()
+    assert code == 0
+    lines = captured.out.strip().splitlines()
+    assert len(lines) == 1
+    row = json.loads(lines[0])
+    assert row["headword"] == "joyful"
+    assert row["is_exact"] is False
+    assert captured_kwargs["query"] == "happy"
+    assert captured_kwargs["sort_mode"] == "most_formal"
+    assert captured_kwargs["category"] == "noun"
+
+
+def test_tui_query_defaults_top_n_when_omitted(monkeypatch, capsys):
+    captured_kwargs = {}
+
+    def fake_get_search_result(query, top_n, **kwargs):
+        captured_kwargs["top_n"] = top_n
+        return {"exact_match": None, "candidates": []}
+
+    monkeypatch.setattr(cli, "_get_search_result", fake_get_search_result)
+
+    code = cli.main(["--tui-query", json.dumps({"query": "happy"})])
+
+    assert code == 0
+    assert captured_kwargs["top_n"] == cli.LIVE_SESSION_TOP_N
+
+
+def test_tui_query_flattens_exact_match_first_sense_as_first_row(monkeypatch, capsys):
+    fake_result = {
+        "exact_match": {
+            "headword": "happy",
+            "senses": [
+                {
+                    "pos": "adjective", "definition": "feeling or showing pleasure",
+                    "stress": "\x1b[1mHAP\x1b[0mpy", "label": "joy", "polarity": "positive",
+                    "synonyms": ["glad", "cheerful"], "examples": ["a happy childhood"],
+                }
+            ],
+        },
+        "candidates": [],
+    }
+    monkeypatch.setattr(
+        cli, "_get_search_result",
+        lambda query, top_n, **kwargs: fake_result,
+    )
+
+    code = cli.main(["--tui-query", json.dumps({"query": "happy"})])
+
+    captured = capsys.readouterr()
+    lines = captured.out.strip().splitlines()
+    assert len(lines) == 1
+    row = json.loads(lines[0])
+    assert code == 0
+    assert row["is_exact"] is True
+    assert row["relevance"] == 100
+    assert row["synonyms"] == ["glad", "cheerful"]
+
+
+def test_tui_query_with_blank_query_prints_nothing(monkeypatch, capsys):
+    code = cli.main(["--tui-query", json.dumps({"query": ""})])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.out == ""
+
+
+def test_tui_query_with_empty_payload_prints_nothing(capsys):
+    code = cli.main(["--tui-query", ""])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.out == ""
+
+
+def test_tui_query_with_invalid_json_prints_a_clean_error(capsys):
+    code = cli.main(["--tui-query", "{not valid json"])
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "revdict: error:" in captured.out
+
+
+def test_tui_query_propagates_search_value_error_as_a_clean_message(monkeypatch, capsys):
+    def fake_get_search_result(query, top_n, **kwargs):
+        raise ValueError("Unknown sort mode: 'bogus'")
+
+    monkeypatch.setattr(cli, "_get_search_result", fake_get_search_result)
+
+    code = cli.main(["--tui-query", json.dumps({"query": "happy", "sort": "bogus"})])
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "revdict: error: Unknown sort mode" in captured.out
+
+
+def test_jsonl_query_and_tui_query_produce_identical_rows_for_the_same_result(monkeypatch, capsys):
+    """Both flags must share the exact same row-building logic (DRY) --
+    this test locks in that they can never silently drift apart."""
+    fake_result = {
+        "exact_match": None,
+        "candidates": [
+            {
+                "headword": "joyful", "pos": "adjective",
+                "definition": "feeling great happiness",
+                "examples": [], "label": "joy", "polarity": "positive",
+                "relevance": 90,
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        cli, "_get_search_result",
+        lambda query, top_n, **kwargs: fake_result,
+    )
+
+    code_jsonl = cli.main(["--jsonl-query", "happy"])
+    jsonl_row = json.loads(capsys.readouterr().out.strip())
+
+    code_tui = cli.main(["--tui-query", json.dumps({"query": "happy"})])
+    tui_row = json.loads(capsys.readouterr().out.strip())
+
+    assert code_jsonl == 0
+    assert code_tui == 0
+    assert jsonl_row == tui_row
+
+
 def test_main_with_no_args_and_a_tty_launches_the_live_session(monkeypatch):
     # Patches only `isatty` on the real (capsys-managed) sys.stdout object in
     # place, rather than replacing sys.stdout wholesale -- a wholesale
