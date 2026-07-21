@@ -126,6 +126,7 @@ def test_run_structural_builds_full_candidate_records_for_every_match():
         assert set(candidate.keys()) == {
             "headword", "pos", "definition", "examples",
             "label", "polarity", "relevance", "stress", "synonyms",
+            "tags", "phonetics",
         }
 
 

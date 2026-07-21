@@ -255,6 +255,8 @@ def build_candidate(record: dict, relevance: int, state: dict) -> dict:
         "relevance": relevance,
         "stress": stress.mark(record["headword"], record["pos"]),
         "synonyms": record.get("synonyms"),
+        "tags": record.get("tags") or [],
+        "phonetics": record.get("phonetics"),
     }
 
 

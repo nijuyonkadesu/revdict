@@ -284,6 +284,56 @@ def test_combine_score_real_happy_candidate_set_ranks_glad_first():
     assert order[0] == "glad"
 
 
+def test_build_candidate_carries_the_matched_senses_tags_and_phonetics():
+    """Phase 5's tag/phonetics-driven sorts (most_formal/oldest/most_modern/
+    most_lyrical) read these straight off the candidate dict -- they must
+    come from the exact matched sense's row (the one passed into
+    build_candidate), never a separate headword-keyed relookup, since tags
+    and phonetics are per-sense and a relookup could silently grab a
+    different sense of the same headword (e.g. Wiktionary's "tort" has a
+    law-topic sense with no register tag AND a separate obsolete-tagged
+    adjective sense -- a relookup keyed only on the headword "tort" could
+    return either one, independent of which sense actually matched)."""
+    record = {
+        "headword": "writ", "pos": "noun", "definition": "a legal document",
+        "examples": [], "source": "wiktionary", "sentiwordnet": None,
+        "emolex": ["joy"], "synonyms": None,
+        "tags": ["archaic"],
+        "phonetics": {
+            "syllable_count": 1, "primary_vowel": "IH", "rhyme_key": "IH T",
+            "meter": "/", "phonemes": ["R", "IH1", "T"],
+        },
+    }
+    state = {"classifier": None}
+
+    candidate = search_mod.build_candidate(record, relevance=80, state=state)
+
+    assert candidate["tags"] == ["archaic"]
+    assert candidate["phonetics"] == {
+        "syllable_count": 1, "primary_vowel": "IH", "rhyme_key": "IH T",
+        "meter": "/", "phonemes": ["R", "IH1", "T"],
+    }
+
+
+def test_build_candidate_defaults_tags_to_empty_list_and_phonetics_to_none():
+    """A record with no tags/phonetics keys at all (e.g. an older test
+    fixture, or a WordNet-sourced row that never had tags to begin with)
+    must not KeyError -- tags defaults to [], phonetics defaults to None,
+    matching category.py's and phonetics.py's own `.get(...) or []`/
+    `.get(...)` conventions for the same fields."""
+    record = {
+        "headword": "plain", "pos": "adjective", "definition": "simple",
+        "examples": [], "source": "wordnet", "sentiwordnet": None,
+        "emolex": ["joy"], "synonyms": None,
+    }
+    state = {"classifier": None}
+
+    candidate = search_mod.build_candidate(record, relevance=50, state=state)
+
+    assert candidate["tags"] == []
+    assert candidate["phonetics"] is None
+
+
 def _fake_state():
     # emolex=["joy"] (a specific category, not None) so tag_emotion's
     # classifier fallback never fires and these tests never construct a
