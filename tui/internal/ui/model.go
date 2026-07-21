@@ -154,7 +154,27 @@ func (m Model) visibleRowRange() (int, int) {
 	return start, end
 }
 
+// truncateToWidth truncates s to at most width runes, replacing the last
+// rune with an ellipsis when truncation occurs. It operates on runes (not
+// bytes) so it's safe for non-ASCII headwords in the corpus (e.g. loanwords
+// like "café"/"naïve").
+func truncateToWidth(s string, width int) string {
+	runes := []rune(s)
+	if len(runes) <= width {
+		return s
+	}
+	if width <= 1 {
+		return string(runes[:width])
+	}
+	return string(runes[:width-1]) + "…"
+}
+
 func (m Model) View() string {
+	listWidth := m.width
+	if m.previewVisible {
+		listWidth = m.width / 2
+	}
+
 	var b []string
 	start, end := m.visibleRowRange()
 	for i := start; i < end; i++ {
@@ -163,13 +183,16 @@ func (m Model) View() string {
 		if i == m.selected {
 			marker = "> "
 		}
-		b = append(b, fmt.Sprintf("%s%s (%s)", marker, row.Headword, row.POS))
+		line := fmt.Sprintf("%s%s (%s)", marker, row.Headword, row.POS)
+		if listWidth > 0 {
+			line = truncateToWidth(line, listWidth)
+		}
+		b = append(b, line)
 	}
 	resultsView := lipgloss.JoinVertical(lipgloss.Left, b...)
 
 	var body string
 	if m.previewVisible {
-		listWidth := m.width / 2
 		left := lipgloss.NewStyle().Width(listWidth).Render(resultsView)
 		right := lipgloss.NewStyle().Width(m.width - listWidth).Render(m.preview.View())
 		body = lipgloss.JoinHorizontal(lipgloss.Top, left, right)

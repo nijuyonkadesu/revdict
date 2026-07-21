@@ -153,3 +153,51 @@ func TestVisibleRowRangeShowsAllRowsWhenTheyFit(t *testing.T) {
 		t.Fatalf("expected the full 2-row set to be visible on a tall terminal, got start=%d end=%d", start, end)
 	}
 }
+
+// TestResultsListRowIsTruncatedNotWrappedOnANarrowResultsColumn guards
+// against the results list's manual rendering loop feeding an overlong row
+// string into lipgloss's Width().Render(), which word-wraps (rather than
+// truncates) any line wider than the column -- silently turning one logical
+// row into multiple physical lines and defeating visibleRowRange's height
+// clamp (the exact terminal-corruption failure mode visibleRowRange and
+// tea.WithAltScreen() exist to prevent). A single overlong row must render
+// to exactly one physical line, truncated with an ellipsis.
+func TestResultsListRowIsTruncatedNotWrappedOnANarrowResultsColumn(t *testing.T) {
+	rows := []queryclient.ResultRow{
+		{Headword: "counterrevolutionary", POS: "adjective", Definition: "opposing a revolution"},
+	}
+	m := NewModel(rows) // previewVisible defaults to true
+	mm, _ := m.Update(tea.WindowSizeMsg{Width: 40, Height: 24})
+	m = mm.(Model)
+	out := m.View()
+
+	// With previewVisible=true and width=40, the results column is
+	// listWidth = 40/2 = 20 runes -- narrower than the ~34-rune formatted
+	// row ("  counterrevolutionary (adjective)"), so this row must be
+	// truncated to fit.
+	const listWidth = 20
+
+	if !strings.Contains(out, "…") {
+		t.Fatalf("expected the overlong row to be truncated with an ellipsis, got:\n%s", out)
+	}
+	if strings.Contains(out, "counterrevolutionary (adjective)") {
+		t.Fatalf("expected the overlong row to be truncated, but the full untruncated text appears in the view:\n%s", out)
+	}
+
+	// Directly check for a wrapped continuation: isolate each physical
+	// line's results-column slice (the first listWidth runes -- the
+	// preview column, if any, starts at rune index >= listWidth) and
+	// confirm none of them is just the bare headword or POS on its own
+	// line, which is what lipgloss's word-wrap would produce pre-fix.
+	for i, line := range strings.Split(out, "\n") {
+		runes := []rune(line)
+		col := line
+		if len(runes) >= listWidth {
+			col = string(runes[:listWidth])
+		}
+		trimmed := strings.TrimSpace(col)
+		if trimmed == "counterrevolutionary" || trimmed == "(adjective)" {
+			t.Fatalf("line %d's results column looks like a wrapped continuation of the row rather than a single truncated line: %q\nfull view:\n%s", i, col, out)
+		}
+	}
+}
