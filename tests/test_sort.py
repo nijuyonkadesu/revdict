@@ -11,7 +11,7 @@ def _candidate(headword, tags=None, phonetics=None):
     return {"headword": headword, "tags": tags or [], "phonetics": phonetics}
 
 
-def test_sort_modes_contains_exactly_the_ten_documented_modes():
+def test_sort_modes_contains_exactly_the_eleven_documented_modes():
     assert SORT_MODES == (
         "relevance",
         "alpha",
@@ -23,6 +23,7 @@ def test_sort_modes_contains_exactly_the_ten_documented_modes():
         "most_formal",
         "oldest",
         "most_modern",
+        "most_lyrical",
     )
 
 
@@ -188,3 +189,66 @@ def test_most_modern_is_the_exact_reverse_of_oldest():
 
     assert oldest_order == ["marked", "plain", "other"]
     assert modern_order == ["plain", "other", "marked"]
+
+
+def test_most_lyrical_ranks_lower_average_consonant_cluster_length_first():
+    """Real measurement (see this plan's Global Constraints): "moon"
+    (phonemes M-UW1-N) has consonant clusters [1, 1] -> average 1.0;
+    "strengths" (phonemes S-T-R-EH1-NG-K-TH-S) has clusters [3, 4] ->
+    average 3.5. moon is the more lyrical (lower-cluster) word and must
+    rank first."""
+    candidates = [
+        _candidate("strengths", phonetics={
+            "phonemes": ["S", "T", "R", "EH1", "NG", "K", "TH", "S"],
+        }),
+        _candidate("moon", phonetics={"phonemes": ["M", "UW1", "N"]}),
+    ]
+
+    result = apply_sort(candidates, "most_lyrical", {})
+
+    assert [c["headword"] for c in result] == ["moon", "strengths"]
+
+
+def test_most_lyrical_treats_missing_phonetics_as_the_least_lyrical():
+    """Mirrors most_common/least_common's convention of defaulting a
+    missing signal to the worst-case value rather than dropping the
+    candidate or giving it an arbitrary rank."""
+    candidates = [
+        _candidate("strengths", phonetics={
+            "phonemes": ["S", "T", "R", "EH1", "NG", "K", "TH", "S"],
+        }),
+        _candidate("unresolved", phonetics=None),
+    ]
+
+    result = apply_sort(candidates, "most_lyrical", {})
+
+    assert [c["headword"] for c in result] == ["strengths", "unresolved"]
+
+
+def test_most_lyrical_treats_a_word_with_no_consonants_as_maximally_lyrical():
+    candidates = [
+        _candidate("strengths", phonetics={
+            "phonemes": ["S", "T", "R", "EH1", "NG", "K", "TH", "S"],
+        }),
+        _candidate("aye", phonetics={"phonemes": ["AY1"]}),
+    ]
+
+    result = apply_sort(candidates, "most_lyrical", {})
+
+    assert [c["headword"] for c in result] == ["aye", "strengths"]
+
+
+def test_most_lyrical_preserves_relevance_order_within_a_tie():
+    """Real phonemes (confirmed via stressmark): "flow" is F-L-OW1 and
+    "glow" is G-L-OW1 -- both have exactly one cluster of length 2 (the
+    two consonants before the vowel) and nothing after, so both average
+    2.0. A genuine tie, so relevance order (input order) must be
+    preserved."""
+    candidates = [
+        _candidate("flow", phonetics={"phonemes": ["F", "L", "OW1"]}),
+        _candidate("glow", phonetics={"phonemes": ["G", "L", "OW1"]}),
+    ]
+
+    result = apply_sort(candidates, "most_lyrical", {})
+
+    assert [c["headword"] for c in result] == ["flow", "glow"]

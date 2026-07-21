@@ -9,6 +9,7 @@ SORT_MODES = (
     "most_formal",
     "oldest",
     "most_modern",
+    "most_lyrical",
 )
 
 # Wiktionary sense tags treated as the informal end of the formal/informal
@@ -61,6 +62,43 @@ def _modernness_rank(candidate: dict) -> int:
     return 1 - _oldness_rank(candidate)
 
 
+def _consonant_cluster_lengths(phonemes: list[str]) -> list[int]:
+    lengths = []
+    run = 0
+    for phoneme in phonemes:
+        if phoneme[-1].isdigit():
+            if run:
+                lengths.append(run)
+            run = 0
+        else:
+            run += 1
+    if run:
+        lengths.append(run)
+    return lengths
+
+
+def _lyrical_rank(candidate: dict) -> float:
+    """Ascending average consonant-cluster length -- lower is more
+    lyrical/euphonious. Grounded via real measurement (see this plan's
+    Global Constraints): lyrical words (melody, luminous, flow, moon)
+    measured 1.0-2.0; clunky words (strengths, angst, twelfths) measured
+    2.5-4.0, controlled for syllable count. A candidate with no phonetics
+    data (multi-word/hyphenated headword, or an index without a Phase 4
+    reindex) ranks last (float("inf")) -- the same "missing data sorts to
+    the worst end" convention most_common/least_common already use for a
+    missing literary_frequency entry."""
+    phonetics_data = candidate.get("phonetics")
+    if not phonetics_data:
+        return float("inf")
+    phonemes = phonetics_data.get("phonemes")
+    if not phonemes:
+        return float("inf")
+    lengths = _consonant_cluster_lengths(phonemes)
+    if not lengths:
+        return 0.0
+    return sum(lengths) / len(lengths)
+
+
 def apply_sort(
     candidates: list[dict], sort_mode: str | None, literary_frequency: dict[str, float]
 ) -> list[dict]:
@@ -96,4 +134,6 @@ def apply_sort(
         return sorted(candidates, key=_oldness_rank)
     if sort_mode == "most_modern":
         return sorted(candidates, key=_modernness_rank)
+    if sort_mode == "most_lyrical":
+        return sorted(candidates, key=_lyrical_rank)
     raise ValueError(f"Unknown sort mode: {sort_mode!r}")

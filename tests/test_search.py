@@ -695,6 +695,54 @@ def test_search_most_formal_sort_mode_reorders_meaning_mode_candidates(monkeypat
     assert [c["headword"] for c in result["candidates"]] == ["lavatory", "khazi"]
 
 
+def test_search_most_lyrical_sort_mode_reorders_meaning_mode_candidates(monkeypatch):
+    metadata = [
+        {
+            "headword": "strengths", "pos": "noun", "definition": "plural of strength",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+            "phonetics": {
+                "syllable_count": 1, "primary_vowel": "EH", "rhyme_key": "EH NG K TH S",
+                "meter": "/", "phonemes": ["S", "T", "R", "EH1", "NG", "K", "TH", "S"],
+            },
+        },
+        {
+            "headword": "moon", "pos": "noun", "definition": "the moon",
+            "examples": [], "source": "wordnet", "sentiwordnet": None,
+            "emolex": ["joy"], "synonyms": None, "tags": [],
+            "phonetics": {
+                "syllable_count": 1, "primary_vowel": "UW", "rhyme_key": "UW N",
+                "meter": "/", "phonemes": ["M", "UW1", "N"],
+            },
+        },
+    ]
+    state = {
+        "metadata": metadata,
+        "word_index": {"strengths": [0], "moon": [1]},
+        "literary_frequency": {},
+        "classifier": None,
+    }
+    import numpy as np
+
+    class FakeEmbedder:
+        def encode_query(self, query):
+            return np.array([1.0, 0.0], dtype="float32")
+
+    class FakeReranker:
+        def score(self, query, definitions):
+            return [1.0 for _ in definitions]
+
+    state["embedder"] = FakeEmbedder()
+    state["reranker"] = FakeReranker()
+    state["embeddings"] = np.array([[1.0, 0.0], [1.0, 0.0]], dtype="float32")
+    state["embedding_norms"] = np.array([1.0, 1.0])
+    monkeypatch.setattr(search_mod, "_load_state", lambda: state)
+
+    result = search_mod.search("night sky", top_n=10, sort_mode="most_lyrical")
+
+    assert [c["headword"] for c in result["candidates"]] == ["moon", "strengths"]
+
+
 def test_search_sort_mode_applies_to_structural_mode_results_too(monkeypatch):
     """Structural-mode results default to frequency-descending order
     (structural_search._score_and_sort) -- sort_mode="alpha" must override
