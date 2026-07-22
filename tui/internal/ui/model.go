@@ -356,7 +356,7 @@ func (m Model) visibleRowRange() (int, int) {
 
 // selectedRowStyle highlights the currently-selected row in the results
 // list so it's visually distinguished from the plain "> " marker alone.
-var selectedRowStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
+var selectedRowStyle = lipgloss.NewStyle().Bold(true).Reverse(true)
 
 // truncateToWidth truncates s to at most width runes, replacing the last
 // rune with an ellipsis when truncation occurs. It operates on runes (not

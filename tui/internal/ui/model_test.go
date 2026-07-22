@@ -582,16 +582,19 @@ func TestNewModelSetsAStaticAlwaysVisibleCursor(t *testing.T) {
 	}
 }
 
-// TestSelectedRowStyleIsBoldAndColored guards the results-list selection
+// TestSelectedRowStyleIsBoldAndReversed guards the results-list selection
 // highlight added alongside the panel's focus/selection highlighting: the
-// style must actually carry bold+color, not just exist as an unconfigured
-// zero-value lipgloss.Style (which would render as a no-op and leave the
-// selected row visually identical to every other row).
-func TestSelectedRowStyleIsBoldAndColored(t *testing.T) {
+// style must actually carry bold+reverse-video, not just exist as an
+// unconfigured zero-value lipgloss.Style (which would render as a no-op and
+// leave the selected row visually identical to every other row). Reverse
+// video (rather than a hardcoded color) is used so the highlight adapts to
+// whatever colors the user's terminal theme has set, instead of a fixed
+// 256-color-palette entry that theme switching can't touch.
+func TestSelectedRowStyleIsBoldAndReversed(t *testing.T) {
 	if !selectedRowStyle.GetBold() {
 		t.Fatal("expected selectedRowStyle to be bold")
 	}
-	if selectedRowStyle.GetForeground() != lipgloss.Color("212") {
-		t.Fatalf("expected selectedRowStyle foreground to be color 212, got %v", selectedRowStyle.GetForeground())
+	if !selectedRowStyle.GetReverse() {
+		t.Fatalf("expected selectedRowStyle to use reverse video (theme-adaptive highlight), got Reverse=%v", selectedRowStyle.GetReverse())
 	}
 }

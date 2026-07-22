@@ -155,11 +155,14 @@ func TestRadioLineMarksOnlyTheSelectedOption(t *testing.T) {
 	}
 }
 
-// TestFocusedFieldAndSelectedOptionStylesAreBoldAndColored guards against
+// TestFocusedFieldAndSelectedOptionStylesAreBoldAndReversed guards against
 // the styles being left as unconfigured zero-value lipgloss.Styles (which
 // would render as a no-op, leaving the focus/selection indicators
-// indistinguishable from plain text).
-func TestFocusedFieldAndSelectedOptionStylesAreBoldAndColored(t *testing.T) {
+// indistinguishable from plain text). They use reverse video rather than a
+// hardcoded color so the highlight adapts to whatever colors the user's
+// terminal theme has set, instead of a fixed 256-color-palette entry that
+// theme switching can't touch.
+func TestFocusedFieldAndSelectedOptionStylesAreBoldAndReversed(t *testing.T) {
 	styles := map[string]lipgloss.Style{
 		"focusedFieldStyle":   focusedFieldStyle,
 		"selectedOptionStyle": selectedOptionStyle,
@@ -168,8 +171,8 @@ func TestFocusedFieldAndSelectedOptionStylesAreBoldAndColored(t *testing.T) {
 		if !s.GetBold() {
 			t.Fatalf("expected %s to be bold", name)
 		}
-		if s.GetForeground() != lipgloss.Color("212") {
-			t.Fatalf("expected %s foreground to be color 212, got %v", name, s.GetForeground())
+		if !s.GetReverse() {
+			t.Fatalf("expected %s to use reverse video (theme-adaptive highlight), got Reverse=%v", name, s.GetReverse())
 		}
 	}
 }

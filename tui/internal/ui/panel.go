@@ -17,8 +17,8 @@ var sortModes = []string{
 var categories = []string{"all", "noun", "adjective", "verb", "adverb", "idiom_slang", "old"}
 
 var (
-	focusedFieldStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
-	selectedOptionStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
+	focusedFieldStyle   = lipgloss.NewStyle().Bold(true).Reverse(true)
+	selectedOptionStyle = lipgloss.NewStyle().Bold(true).Reverse(true)
 )
 
 func nextSortMode(current string) string {
