@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/bubbles/cursor"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/nijuyonkadesu/revdict/tui/internal/queryclient"
@@ -571,5 +572,12 @@ func TestRunQueryCmdSurfacesARealErrorWhenContextIsNotCancelled(t *testing.T) {
 	}
 	if !strings.Contains(errMsg.err.Error(), "revdict: index not found") {
 		t.Fatalf("expected the original error text to be preserved, got %q", errMsg.err.Error())
+	}
+}
+
+func TestNewModelSetsAStaticAlwaysVisibleCursor(t *testing.T) {
+	m := NewModel(testRows())
+	if m.input.Cursor.Mode() != cursor.CursorStatic {
+		t.Fatalf("expected a static (always-visible) cursor mode, got %v", m.input.Cursor.Mode())
 	}
 }

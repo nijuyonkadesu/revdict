@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/cursor"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -127,6 +128,7 @@ func runQueryCmd(ctx context.Context, client *queryclient.Client, query string, 
 
 func NewModel(rows []queryclient.ResultRow) Model {
 	ti := textinput.New()
+	ti.Cursor.SetMode(cursor.CursorStatic)
 	ti.Focus()
 	vp := viewport.New(0, 0)
 	return Model{
