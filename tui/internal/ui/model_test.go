@@ -581,3 +581,17 @@ func TestNewModelSetsAStaticAlwaysVisibleCursor(t *testing.T) {
 		t.Fatalf("expected a static (always-visible) cursor mode, got %v", m.input.Cursor.Mode())
 	}
 }
+
+// TestSelectedRowStyleIsBoldAndColored guards the results-list selection
+// highlight added alongside the panel's focus/selection highlighting: the
+// style must actually carry bold+color, not just exist as an unconfigured
+// zero-value lipgloss.Style (which would render as a no-op and leave the
+// selected row visually identical to every other row).
+func TestSelectedRowStyleIsBoldAndColored(t *testing.T) {
+	if !selectedRowStyle.GetBold() {
+		t.Fatal("expected selectedRowStyle to be bold")
+	}
+	if selectedRowStyle.GetForeground() != lipgloss.Color("212") {
+		t.Fatalf("expected selectedRowStyle foreground to be color 212, got %v", selectedRowStyle.GetForeground())
+	}
+}

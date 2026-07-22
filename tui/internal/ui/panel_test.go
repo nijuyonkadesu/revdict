@@ -1,9 +1,11 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 func TestNewPanelStartsOnSortField(t *testing.T) {
@@ -108,5 +110,66 @@ func TestEscInPanelClosesItAndReturnsToSearch(t *testing.T) {
 	}
 	if m.filters.Sort != sortModes[1] {
 		t.Fatalf("expected Esc to apply the panel's edited sort selection (%s) to m.filters, got %q", sortModes[1], m.filters.Sort)
+	}
+}
+
+// TestViewMarksTheFocusedFieldAndChangesAsFocusMoves guards against the
+// panel rendering all 7 fields identically regardless of which one has
+// keyboard focus -- previously a user pressing Tab had no way to tell which
+// field was receiving their keystrokes. The rendered view must both change
+// when focus moves, and carry the "> " marker on the newly-focused field
+// only.
+func TestViewMarksTheFocusedFieldAndChangesAsFocusMoves(t *testing.T) {
+	p := newPanelState(NewFilterState())
+	sortView := p.View()
+	if !strings.Contains(sortView, "> Sort:") {
+		t.Fatalf("expected the focused Sort field to carry the '> ' marker, got:\n%s", sortView)
+	}
+	if strings.Contains(sortView, "> Category:") {
+		t.Fatalf("expected only the focused field to carry the '> ' marker, got:\n%s", sortView)
+	}
+
+	p.focusedField = fieldCategory
+	categoryView := p.View()
+	if categoryView == sortView {
+		t.Fatal("expected the rendered view to change once focus moves to a different field")
+	}
+	if !strings.Contains(categoryView, "> Category:") {
+		t.Fatalf("expected the focused Category field to carry the '> ' marker, got:\n%s", categoryView)
+	}
+	if strings.Contains(categoryView, "> Sort:") {
+		t.Fatalf("expected the '> ' marker to move away from Sort once focus moves, got:\n%s", categoryView)
+	}
+}
+
+// TestRadioLineMarksOnlyTheSelectedOption is a regression guard on the
+// radioLine rewrite (added to bold/color the selected option): it must
+// still mark exactly the selected index and no other.
+func TestRadioLineMarksOnlyTheSelectedOption(t *testing.T) {
+	out := radioLine([]string{"a", "b", "c"}, 1)
+	if !strings.Contains(out, "(*) b") {
+		t.Fatalf("expected option b marked as selected, got: %q", out)
+	}
+	if strings.Contains(out, "(*) a") || strings.Contains(out, "(*) c") {
+		t.Fatalf("expected only option b to carry the selected marker, got: %q", out)
+	}
+}
+
+// TestFocusedFieldAndSelectedOptionStylesAreBoldAndColored guards against
+// the styles being left as unconfigured zero-value lipgloss.Styles (which
+// would render as a no-op, leaving the focus/selection indicators
+// indistinguishable from plain text).
+func TestFocusedFieldAndSelectedOptionStylesAreBoldAndColored(t *testing.T) {
+	styles := map[string]lipgloss.Style{
+		"focusedFieldStyle":   focusedFieldStyle,
+		"selectedOptionStyle": selectedOptionStyle,
+	}
+	for name, s := range styles {
+		if !s.GetBold() {
+			t.Fatalf("expected %s to be bold", name)
+		}
+		if s.GetForeground() != lipgloss.Color("212") {
+			t.Fatalf("expected %s foreground to be color 212, got %v", name, s.GetForeground())
+		}
 	}
 }

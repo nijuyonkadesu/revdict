@@ -354,6 +354,10 @@ func (m Model) visibleRowRange() (int, int) {
 	return start, end
 }
 
+// selectedRowStyle highlights the currently-selected row in the results
+// list so it's visually distinguished from the plain "> " marker alone.
+var selectedRowStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
+
 // truncateToWidth truncates s to at most width runes, replacing the last
 // rune with an ellipsis when truncation occurs. It operates on runes (not
 // bytes) so it's safe for non-ASCII headwords in the corpus (e.g. loanwords
@@ -398,6 +402,9 @@ func (m Model) View() string {
 		line := fmt.Sprintf("%s%s (%s)", marker, row.Headword, row.POS)
 		if listWidth > 0 {
 			line = truncateToWidth(line, listWidth)
+		}
+		if i == m.selected {
+			line = selectedRowStyle.Render(line)
 		}
 		b = append(b, line)
 	}

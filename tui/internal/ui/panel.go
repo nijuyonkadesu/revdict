@@ -6,6 +6,7 @@ import (
 	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 var sortModes = []string{
@@ -14,6 +15,11 @@ var sortModes = []string{
 }
 
 var categories = []string{"all", "noun", "adjective", "verb", "adverb", "idiom_slang", "old"}
+
+var (
+	focusedFieldStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
+	selectedOptionStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
+)
 
 func nextSortMode(current string) string {
 	for i, mode := range sortModes {
@@ -168,24 +174,36 @@ func (p panelState) toFilterState() FilterState {
 	return fs
 }
 
+// fieldLabel marks a field's label with a highlighted "> " prefix when it is
+// the currently focused field (so Tab-navigation between the 7 filter
+// fields is visible to the user), or a plain two-space indent otherwise.
+func fieldLabel(label string, focused bool) string {
+	if focused {
+		return focusedFieldStyle.Render("> " + label)
+	}
+	return "  " + label
+}
+
 func (p panelState) View() string {
 	var b strings.Builder
-	b.WriteString("Sort:     " + radioLine(sortModes, p.sortSelected) + "\n")
-	b.WriteString("Category: " + radioLine(categories, p.categorySelected) + "\n")
-	b.WriteString("Syllables: [" + p.syllablesText + "]  Primary vowel: [" + p.primaryVowelText + "]\n")
-	b.WriteString("Rhymes with: [" + p.rhymesWithText + "]  Sounds like: [" + p.soundsLikeText + "]\n")
-	b.WriteString("Meter: [" + p.meterText + "]\n")
+	b.WriteString(fieldLabel("Sort:     ", p.focusedField == fieldSort) + radioLine(sortModes, p.sortSelected) + "\n")
+	b.WriteString(fieldLabel("Category: ", p.focusedField == fieldCategory) + radioLine(categories, p.categorySelected) + "\n")
+	b.WriteString(fieldLabel("Syllables: ", p.focusedField == fieldSyllables) + "[" + p.syllablesText + "]  " +
+		fieldLabel("Primary vowel: ", p.focusedField == fieldPrimaryVowel) + "[" + p.primaryVowelText + "]\n")
+	b.WriteString(fieldLabel("Rhymes with: ", p.focusedField == fieldRhymesWith) + "[" + p.rhymesWithText + "]  " +
+		fieldLabel("Sounds like: ", p.focusedField == fieldSoundsLike) + "[" + p.soundsLikeText + "]\n")
+	b.WriteString(fieldLabel("Meter: ", p.focusedField == fieldMeter) + "[" + p.meterText + "]\n")
 	return b.String()
 }
 
 func radioLine(options []string, selected int) string {
 	var b strings.Builder
 	for i, opt := range options {
-		marker := "( )"
+		text := "( ) " + opt
 		if i == selected {
-			marker = "(*)"
+			text = selectedOptionStyle.Render("(*) " + opt)
 		}
-		b.WriteString(marker + " " + opt + "  ")
+		b.WriteString(text + "  ")
 	}
 	return b.String()
 }
