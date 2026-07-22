@@ -226,16 +226,52 @@ Rhyme/sounds-like matches for obscure words not in the CMU Pronouncing Dictionar
 
 For a live, keyboard-driven interface exposing every filter/sort/category
 option at once (rather than one-shot CLI flags), install the standalone
-`revdict-tui` binary:
+`revdict-tui` binary. This requires Go 1.24+.
+
+### Install through git
 
 ```bash
 go install github.com/nijuyonkadesu/revdict/tui/cmd/revdict-tui@latest
 ```
 
-This requires Go 1.24+ and a tagged release of this repo (`go install`
-against a subdirectory module only resolves `@latest` once a git tag of
-the form `tui/vX.Y.Z` exists — until then, install a specific commit with
-`go install github.com/nijuyonkadesu/revdict/tui/cmd/revdict-tui@<commit-sha>`).
+`@latest` resolves against the newest `tui/vX.Y.Z` git tag — a subdirectory-module
+convention Go requires since `tui/` isn't the repo root's own module (the root
+has no `go.mod` of its own). To pin an exact version instead of `@latest`:
+
+```bash
+go install github.com/nijuyonkadesu/revdict/tui/cmd/revdict-tui@tui/v0.1.1
+```
+
+**If `go install ...@latest` appears to install an old/unchanged build**, this
+is a known Go modules gotcha, not specific to this repo: the module proxy or
+your local module cache can serve a stale resolution left over from an earlier
+attempt (this is especially likely right after this repo's very first tag was
+cut, or right after a new tag is published). Force a clean re-fetch:
+
+```bash
+go clean -modcache
+GOPROXY=direct go install github.com/nijuyonkadesu/revdict/tui/cmd/revdict-tui@latest
+```
+
+### Install from a local clone
+
+For development, or to build uncommitted local changes:
+
+```bash
+cd tui
+go install ./cmd/revdict-tui
+```
+
+This always builds whatever's currently on disk in your checkout of this
+repo — no network access, no tag resolution, no caching involved.
+
+### Updating
+
+- **Git install:** re-run the `go install ...@latest` command above once a
+  newer `tui/vX.Y.Z` tag has been published — see the stale-cache note above
+  if the update doesn't seem to take effect.
+- **Local install:** `git pull`, then re-run `go install ./cmd/revdict-tui`
+  from inside `tui/`.
 
 `revdict-tui` shells out to the `revdict` binary already on your `PATH` --
 it needs the same index built (`revdict build-index`) as the regular CLI,
