@@ -370,7 +370,11 @@ func (m Model) View() string {
 	}
 
 	if m.screen == screenHelp {
-		return helpText
+		lines := strings.Split(helpText, "\n")
+		if m.height > 0 && len(lines) > m.height {
+			lines = lines[:m.height]
+		}
+		return strings.Join(lines, "\n")
 	}
 
 	listWidth := m.width

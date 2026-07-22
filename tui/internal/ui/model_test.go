@@ -491,6 +491,22 @@ func TestRefreshPreviewIncludesSynonymsExamplesAndStress(t *testing.T) {
 	}
 }
 
+func TestHelpScreenClampsToAvailableHeightOnAShortTerminal(t *testing.T) {
+	m := NewModel(testRows())
+	mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyF1})
+	m = mm.(Model)
+	mm, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 10})
+	m = mm.(Model)
+	out := m.View()
+	lines := strings.Split(out, "\n")
+	if len(lines) > 10 {
+		t.Fatalf("expected help view clamped to 10 lines, got %d", len(lines))
+	}
+	if !strings.Contains(out, "revdict-tui -- keyboard shortcuts") {
+		t.Fatalf("expected the title (top-anchored) to still be visible, got: %s", out)
+	}
+}
+
 func TestNewerDebounceCancelsThePreviousInFlightQuery(t *testing.T) {
 	fake := &fakeExecutor{}
 	client := queryclient.NewWithExecutor(fake)
