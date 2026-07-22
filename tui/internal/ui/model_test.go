@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/nijuyonkadesu/revdict/tui/internal/queryclient"
 )
 
@@ -226,6 +227,22 @@ func TestResultsListRowIsTruncatedNotWrappedOnANarrowResultsColumn(t *testing.T)
 		trimmed := strings.TrimSpace(col)
 		if trimmed == "counterrevolutionary" || trimmed == "(adjective)" {
 			t.Fatalf("line %d's results column looks like a wrapped continuation of the row rather than a single truncated line: %q\nfull view:\n%s", i, col, out)
+		}
+	}
+}
+
+func TestFilterSummaryLineIsTruncatedOnANarrowTerminal(t *testing.T) {
+	m := NewModel(testRows())
+	m.filters = FilterState{
+		Sort: "relevance", Category: "all",
+		RhymesWith: "a-very-long-rhymes-with-value-that-would-otherwise-wrap-the-terminal",
+	}
+	mm, _ := m.Update(tea.WindowSizeMsg{Width: 30, Height: 24})
+	m = mm.(Model)
+	out := m.View()
+	for _, line := range strings.Split(out, "\n") {
+		if lipgloss.Width(line) > 30 {
+			t.Fatalf("expected every line to fit within width 30, got a %d-wide line: %q", lipgloss.Width(line), line)
 		}
 	}
 }

@@ -358,6 +358,9 @@ func (m Model) View() string {
 	}
 
 	filterSummary := m.filters.summary()
+	if m.width > 0 {
+		filterSummary = truncateToWidth(filterSummary, m.width)
+	}
 	status := m.statusMessage
 	return lipgloss.JoinVertical(lipgloss.Left, m.input.View(), filterSummary, status, body)
 }
