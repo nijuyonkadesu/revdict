@@ -250,11 +250,15 @@ func TestFilterSummaryLineIsTruncatedOnANarrowTerminal(t *testing.T) {
 type fakeExecutor struct {
 	calls [][]string
 	ctxs  []context.Context
+	err   error // when set, Run returns this error instead of the canned success payload
 }
 
 func (f *fakeExecutor) Run(ctx context.Context, args ...string) ([]byte, error) {
 	f.calls = append(f.calls, args)
 	f.ctxs = append(f.ctxs, ctx)
+	if f.err != nil {
+		return nil, f.err
+	}
 	return []byte(`{"headword":"annoyance","pos":"noun","definition":"a feeling","stress":null,"label":"joy","polarity":"positive","synonyms":[],"examples":[],"relevance":92,"is_exact":false}` + "\n"), nil
 }
 
@@ -528,5 +532,44 @@ func TestNewerDebounceCancelsThePreviousInFlightQuery(t *testing.T) {
 
 	if firstCtx.Err() != context.Canceled {
 		t.Fatalf("expected the first query's context to be cancelled once superseded by a newer one, got err=%v", firstCtx.Err())
+	}
+}
+
+// TestRunQueryCmdSuppressesErrorsWhenContextIsCancelled guards against a
+// real usage bug: cancelling a superseded query's context (as
+// m.cancelInFlight does on every newer debounce) kills the real
+// exec.CommandContext subprocess with SIGKILL, which surfaces as a generic
+// "signal: killed" error from the executor. That's expected, routine
+// cancellation -- not a genuine query failure -- so it must not be surfaced
+// to the user as a queryErrorMsg.
+func TestRunQueryCmdSuppressesErrorsWhenContextIsCancelled(t *testing.T) {
+	fake := &fakeExecutor{err: errors.New("signal: killed")}
+	client := queryclient.NewWithExecutor(fake)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	cmd := runQueryCmd(ctx, client, "x", queryclient.Request{Query: "x", TopN: 30, Sort: "relevance", Category: "all"})
+	msg := cmd()
+	if msg != nil {
+		t.Fatalf("expected a cancelled query's error to be suppressed (nil message), got %T: %v", msg, msg)
+	}
+}
+
+// TestRunQueryCmdSurfacesARealErrorWhenContextIsNotCancelled guards against
+// the fix above over-suppressing: a genuine executor error on a live
+// (non-cancelled) context must still reach the user as a queryErrorMsg.
+func TestRunQueryCmdSurfacesARealErrorWhenContextIsNotCancelled(t *testing.T) {
+	fake := &fakeExecutor{err: errors.New("revdict: index not found")}
+	client := queryclient.NewWithExecutor(fake)
+	ctx := context.Background()
+
+	cmd := runQueryCmd(ctx, client, "x", queryclient.Request{Query: "x", TopN: 30, Sort: "relevance", Category: "all"})
+	msg := cmd()
+	errMsg, ok := msg.(queryErrorMsg)
+	if !ok {
+		t.Fatalf("expected a genuine error on a live context to surface as queryErrorMsg, got %T: %v", msg, msg)
+	}
+	if !strings.Contains(errMsg.err.Error(), "revdict: index not found") {
+		t.Fatalf("expected the original error text to be preserved, got %q", errMsg.err.Error())
 	}
 }

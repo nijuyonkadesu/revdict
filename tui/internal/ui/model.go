@@ -116,6 +116,9 @@ func runQueryCmd(ctx context.Context, client *queryclient.Client, query string, 
 	return func() tea.Msg {
 		rows, err := client.Query(ctx, req)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil // superseded/cancelled query -- not a real error, don't surface it
+			}
 			return queryErrorMsg{query: query, err: err}
 		}
 		return queryResultMsg{query: query, rows: rows}
