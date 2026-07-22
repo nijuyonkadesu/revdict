@@ -38,6 +38,7 @@ type Model struct {
 	width, height  int
 	statusMessage  string
 	statusIsError  bool // true when statusMessage holds a query-error banner (set by queryErrorMsg); the next successful queryResultMsg clears it. Enter's copy feedback ("Copied: X"/"Copy failed: ...") sets this false so an unrelated, later-resolving query can never silently wipe a copy confirmation the user just triggered.
+	querying       bool // true whenever a query is pending (debounce not yet fired, or subprocess round-trip in flight); shown as a "Searching..." indicator in View() and cleared only once a result/error lands for the current, settled query text.
 	onCopy         copyFunc
 	client         *queryclient.Client
 	filters        FilterState
@@ -214,6 +215,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.client == nil {
+			m.querying = false
 			return m, nil
 		}
 		ctx, cancel := context.WithCancel(context.Background())
@@ -227,6 +229,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.query != m.input.Value() {
 			return m, nil
 		}
+		m.querying = false
 		m.rows = msg.rows
 		m.selected = 0
 		if m.statusIsError {
@@ -240,6 +243,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.query != m.input.Value() {
 			return m, nil
 		}
+		m.querying = false
 		m.statusMessage = msg.err.Error()
 		m.statusIsError = true
 		return m, nil
@@ -253,6 +257,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.Type == tea.KeyEsc {
 				m.filters = m.panel.toFilterState()
 				m.screen = screenSearch
+				m.querying = true
 				return m, debounceCmd(m.input.Value())
 			}
 			m.panel = m.panel.handleKey(msg)
@@ -314,11 +319,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case tea.KeyCtrlR:
 			m.filters.Sort = nextSortMode(m.filters.Sort)
+			m.querying = true
 			return m, debounceCmd(m.input.Value())
 		}
 
 		var inputCmd tea.Cmd
 		m.input, inputCmd = m.input.Update(msg)
+		m.querying = true
 		return m, tea.Batch(inputCmd, debounceCmd(m.input.Value()))
 	}
 
@@ -420,6 +427,9 @@ func (m Model) View() string {
 	}
 
 	filterSummary := m.filters.summary()
+	if m.querying {
+		filterSummary += "  Searching..."
+	}
 	if m.width > 0 {
 		filterSummary = truncateToWidth(filterSummary, m.width)
 	}

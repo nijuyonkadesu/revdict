@@ -598,3 +598,62 @@ func TestSelectedRowStyleIsBoldAndReversed(t *testing.T) {
 		t.Fatalf("expected selectedRowStyle to use reverse video (theme-adaptive highlight), got Reverse=%v", selectedRowStyle.GetReverse())
 	}
 }
+
+func TestTypingShowsAQueryingIndicatorUntilResultsArrive(t *testing.T) {
+	client := queryclient.NewWithExecutor(&fakeExecutor{})
+	m := NewLiveModel(client)
+	mm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = mm.(Model)
+
+	mm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
+	m = mm.(Model)
+	if !m.querying {
+		t.Fatal("expected querying=true immediately after typing")
+	}
+	if !strings.Contains(m.View(), "Searching...") {
+		t.Fatalf("expected the view to show a querying indicator, got: %s", m.View())
+	}
+
+	mm, _ = m.Update(queryResultMsg{query: "h", rows: []queryclient.ResultRow{{Headword: "happy"}}})
+	m = mm.(Model)
+	if m.querying {
+		t.Fatal("expected querying=false once a matching result arrives")
+	}
+	if strings.Contains(m.View(), "Searching...") {
+		t.Fatalf("expected the querying indicator to disappear once results arrive, got: %s", m.View())
+	}
+}
+
+func TestQueryErrorAlsoClearsTheQueryingIndicator(t *testing.T) {
+	client := queryclient.NewWithExecutor(&fakeExecutor{})
+	m := NewLiveModel(client)
+	m.input.SetValue("x")
+	m.querying = true
+
+	mm, _ := m.Update(queryErrorMsg{query: "x", err: errors.New("boom")})
+	m = mm.(Model)
+	if m.querying {
+		t.Fatal("expected querying=false once an error arrives for the current query")
+	}
+}
+
+func TestSupersededQueryKeepsTheIndicatorShowingUntilTheNewerOneSettles(t *testing.T) {
+	client := queryclient.NewWithExecutor(&fakeExecutor{})
+	m := NewLiveModel(client)
+	m.input.SetValue("he")
+	m.querying = true
+
+	// a stale result for an already-superseded query must not clear it
+	mm, _ := m.Update(queryResultMsg{query: "h", rows: []queryclient.ResultRow{{Headword: "stale"}}})
+	m = mm.(Model)
+	if !m.querying {
+		t.Fatal("expected querying to remain true -- this result is for a stale, superseded query")
+	}
+
+	// the result for the CURRENT text clears it
+	mm, _ = m.Update(queryResultMsg{query: "he", rows: []queryclient.ResultRow{{Headword: "hex"}}})
+	m = mm.(Model)
+	if m.querying {
+		t.Fatal("expected querying=false once the current query's result arrives")
+	}
+}
