@@ -94,9 +94,19 @@ func TestEscInPanelClosesItAndReturnsToSearch(t *testing.T) {
 	m := NewModel(nil)
 	mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	m = mm.(Model)
+
+	// Move the sort selection while the panel is open, so closing the panel
+	// can be verified to actually apply the panel's edited state (via
+	// toFilterState()) to m.filters, not just flip m.screen back.
+	mm, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = mm.(Model)
+
 	mm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	m = mm.(Model)
 	if m.screen != screenSearch {
 		t.Fatalf("expected screen=screenSearch after Esc, got %v", m.screen)
+	}
+	if m.filters.Sort != sortModes[1] {
+		t.Fatalf("expected Esc to apply the panel's edited sort selection (%s) to m.filters, got %q", sortModes[1], m.filters.Sort)
 	}
 }

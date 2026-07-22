@@ -114,6 +114,32 @@ func TestViewIncludesHighlightedHeadwordAndWrappedPreview(t *testing.T) {
 	}
 }
 
+func TestViewShowsThePersistentFilterSummaryLine(t *testing.T) {
+	m := NewModel(testRows())
+	mm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = mm.(Model)
+	out := m.View()
+	if !strings.Contains(out, "sort:relevance") || !strings.Contains(out, "cat:all") {
+		t.Fatalf("expected the view to show the persistent filter summary, got: %s", out)
+	}
+}
+
+func TestCtrlCQuitsEvenWhileThePanelIsOpen(t *testing.T) {
+	m := NewModel(testRows())
+	mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = mm.(Model)
+	if m.screen != screenPanel {
+		t.Fatal("expected the panel to be open")
+	}
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd == nil {
+		t.Fatal("expected a quit command")
+	}
+	if _, isQuit := cmd().(tea.QuitMsg); !isQuit {
+		t.Fatal("expected tea.QuitMsg")
+	}
+}
+
 func manyTestRows(n int) []queryclient.ResultRow {
 	rows := make([]queryclient.ResultRow, n)
 	for i := range rows {
@@ -127,8 +153,8 @@ func TestVisibleRowRangeClampsToAvailableHeightOnAShortTerminal(t *testing.T) {
 	mm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 10})
 	m = mm.(Model)
 	start, end := m.visibleRowRange()
-	if end-start > m.height-2 {
-		t.Fatalf("expected visible range to fit within height-2 rows, got start=%d end=%d height=%d", start, end, m.height)
+	if end-start > m.height-3 {
+		t.Fatalf("expected visible range to fit within height-3 rows, got start=%d end=%d height=%d", start, end, m.height)
 	}
 	if end-start >= len(m.rows) {
 		t.Fatalf("expected visible range to be a strict subset of 30 rows on a 10-row terminal, got %d rows", end-start)

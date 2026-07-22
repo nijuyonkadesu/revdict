@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -67,6 +68,31 @@ func (f FilterState) toRequest(query string) queryclient.Request {
 	}
 }
 
+// summary renders a persistent, one-line synopsis of the currently active
+// sort/category/phonetic filters (e.g. "sort:relevance  cat:all"). Unlike
+// Model.statusMessage (a transient copy-confirmation/query-error banner that
+// clears or changes), this line always reflects the current FilterState and
+// is shown even when the filter panel is closed, per the design spec.
+func (f FilterState) summary() string {
+	parts := []string{"sort:" + f.Sort, "cat:" + f.Category}
+	if f.Syllables != nil {
+		parts = append(parts, fmt.Sprintf("syl:%d", *f.Syllables))
+	}
+	if f.PrimaryVowel != "" {
+		parts = append(parts, "vowel:"+f.PrimaryVowel)
+	}
+	if f.RhymesWith != "" {
+		parts = append(parts, "rhymes:"+f.RhymesWith)
+	}
+	if f.SoundsLike != "" {
+		parts = append(parts, "soundslike:"+f.SoundsLike)
+	}
+	if f.Meter != "" {
+		parts = append(parts, "meter:"+f.Meter)
+	}
+	return strings.Join(parts, "  ")
+}
+
 type debounceFiredMsg struct{ query string }
 type queryResultMsg struct {
 	query string
@@ -105,6 +131,7 @@ func NewModel(rows []queryclient.ResultRow) Model {
 		rows:           rows,
 		previewVisible: true,
 		onCopy:         func(string) error { return nil },
+		filters:        NewFilterState(),
 	}
 }
 
@@ -186,6 +213,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		if msg.Type == tea.KeyCtrlC {
+			return m, tea.Quit
+		}
+
 		if m.screen == screenPanel {
 			if msg.Type == tea.KeyEsc {
 				m.filters = m.panel.toFilterState()
@@ -201,8 +232,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.panel = newPanelState(m.filters)
 			m.screen = screenPanel
 			return m, nil
-		case tea.KeyCtrlC:
-			return m, tea.Quit
 
 		case tea.KeyEsc:
 			if m.input.Value() == "" {
@@ -256,7 +285,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // would render taller than the screen and corrupt the display (bubbletea's
 // renderer does not auto-scroll the root View).
 func (m Model) visibleRowRange() (int, int) {
-	maxVisible := m.height - 2 // input line + status line
+	maxVisible := m.height - 3 // input line + filter summary line + status line
 	if maxVisible < 1 {
 		maxVisible = 1
 	}
@@ -328,6 +357,7 @@ func (m Model) View() string {
 		body = resultsView
 	}
 
+	filterSummary := m.filters.summary()
 	status := m.statusMessage
-	return lipgloss.JoinVertical(lipgloss.Left, m.input.View(), status, body)
+	return lipgloss.JoinVertical(lipgloss.Left, m.input.View(), filterSummary, status, body)
 }
