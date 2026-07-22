@@ -221,3 +221,36 @@ revdict "small carnivore" --rhymes-with hat --no-interactive
 `--rhymes-with`/`--sounds-like` resolve their target word's pronunciation as a **noun** by default, since the CLI doesn't collect a part of speech for the target word — this matters for a heteronym like "record" (`--rhymes-with record` uses the noun pronunciation "REH-kerd", not the verb "ri-KORD"), which can produce a different rhyme key than you might expect.
 
 Rhyme/sounds-like matches for obscure words not in the CMU Pronouncing Dictionary rely on a machine-predicted (G2P) pronunciation, which isn't always linguistically correct — so an occasional odd match (e.g. a rare compound word matching a target it doesn't actually rhyme with) is expected, not necessarily a bug.
+
+## Advanced TUI
+
+For a live, keyboard-driven interface exposing every filter/sort/category
+option at once (rather than one-shot CLI flags), install the standalone
+`revdict-tui` binary:
+
+```bash
+go install github.com/nijuyonkadesu/revdict/tui/cmd/revdict-tui@latest
+```
+
+This requires Go 1.24+ and a tagged release of this repo (`go install`
+against a subdirectory module only resolves `@latest` once a git tag of
+the form `tui/vX.Y.Z` exists — until then, install a specific commit with
+`go install github.com/nijuyonkadesu/revdict/tui/cmd/revdict-tui@<commit-sha>`).
+
+`revdict-tui` shells out to the `revdict` binary already on your `PATH` --
+it needs the same index built (`revdict build-index`) as the regular CLI,
+and benefits from the same background daemon for fast repeat queries.
+
+Keyboard shortcuts (also shown in-app via `F1`):
+
+| Key | Action |
+|---|---|
+| (typing) | live search, debounced |
+| `Up`/`Down` | move the highlighted result |
+| `Enter` | copy the highlighted candidate to the clipboard |
+| `Esc` | clear the query; press again on an empty query to quit |
+| `Ctrl-C` | quit immediately |
+| `Tab` | open the filter/sort/category panel |
+| `Ctrl-R` | quick-cycle the sort mode |
+| `F2` | toggle the preview pane |
+| `F1` | help |

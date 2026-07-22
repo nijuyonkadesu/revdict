@@ -143,6 +143,15 @@ func NewLiveModel(client *queryclient.Client) Model {
 	return m
 }
 
+// SetCopyFunc overrides the clipboard behavior invoked on Enter. Exported
+// so cmd/revdict-tui can wire in the real clipboard.Copy without this
+// package needing to import the clipboard package itself (keeping
+// dependency direction one-way: cmd -> ui -> queryclient, never ui ->
+// clipboard).
+func (m *Model) SetCopyFunc(f func(string) error) {
+	m.onCopy = f
+}
+
 func (m Model) Init() tea.Cmd {
 	return m.input.Focus()
 }
