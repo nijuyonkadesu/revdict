@@ -657,3 +657,19 @@ func TestSupersededQueryKeepsTheIndicatorShowingUntilTheNewerOneSettles(t *testi
 		t.Fatal("expected querying=false once the current query's result arrives")
 	}
 }
+
+func TestEscClearingTheQueryAlsoClearsTheQueryingIndicator(t *testing.T) {
+	client := queryclient.NewWithExecutor(&fakeExecutor{})
+	m := NewLiveModel(client)
+	m.input.SetValue("he")
+	m.querying = true
+
+	mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = mm.(Model)
+	if m.querying {
+		t.Fatal("expected querying=false after Esc clears the query -- the pending debounce for the old text will be ignored as stale and will never clear it otherwise")
+	}
+	if strings.Contains(m.View(), "Searching...") {
+		t.Fatalf("expected no querying indicator after Esc clears the query, got: %s", m.View())
+	}
+}

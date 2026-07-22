@@ -282,6 +282,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			}
 			m.input.SetValue("")
+			m.querying = false
 			return m, nil
 
 		case tea.KeyEnter:
