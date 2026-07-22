@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/bubbles/cursor"
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/nijuyonkadesu/revdict/tui/internal/queryclient"
@@ -287,6 +288,34 @@ func findDebounceFiredMsg(t *testing.T, msg tea.Msg) debounceFiredMsg {
 	}
 	t.Fatalf("expected debounceFiredMsg (directly or within a tea.BatchMsg), got %T", msg)
 	return debounceFiredMsg{}
+}
+
+// findSpinnerTickMsg extracts a spinner.TickMsg from the result of invoking
+// a tea.Cmd, mirroring findDebounceFiredMsg above: production code batches
+// the spinner's own tick command together with the debounce (and, for plain
+// typing, the textinput's) command via tea.Batch, so a test calling the Cmd
+// directly must unwrap a tea.BatchMsg to find the sub-command it cares
+// about. Non-matching subs are still invoked (so their real delays elapse,
+// same as findDebounceFiredMsg does for its non-matching subs) but their
+// results are discarded, and the failure is only reported once the whole
+// batch has been searched.
+func findSpinnerTickMsg(t *testing.T, msg tea.Msg) spinner.TickMsg {
+	t.Helper()
+	if tick, ok := msg.(spinner.TickMsg); ok {
+		return tick
+	}
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		for _, sub := range batch {
+			if sub == nil {
+				continue
+			}
+			if tick, ok := sub().(spinner.TickMsg); ok {
+				return tick
+			}
+		}
+	}
+	t.Fatalf("expected spinner.TickMsg (directly or within a tea.BatchMsg), got %T", msg)
+	return spinner.TickMsg{}
 }
 
 func TestTypingSchedulesADebouncedQuery(t *testing.T) {
@@ -599,6 +628,21 @@ func TestSelectedRowStyleIsBoldAndReversed(t *testing.T) {
 	}
 }
 
+// TestErrorStatusStyleIsBoldAndReversed guards the error-banner highlight
+// the same way TestSelectedRowStyleIsBoldAndReversed guards the results-list
+// highlight: the style must actually carry bold+reverse-video, not just
+// exist as an unconfigured zero-value lipgloss.Style, otherwise an error
+// would render visually identical to ordinary status text (e.g. "Copied:
+// X") -- defeating the user's requirement that errors never blend in.
+func TestErrorStatusStyleIsBoldAndReversed(t *testing.T) {
+	if !errorStatusStyle.GetBold() {
+		t.Fatal("expected errorStatusStyle to be bold")
+	}
+	if !errorStatusStyle.GetReverse() {
+		t.Fatalf("expected errorStatusStyle to use reverse video (theme-adaptive highlight), got Reverse=%v", errorStatusStyle.GetReverse())
+	}
+}
+
 func TestTypingShowsAQueryingIndicatorUntilResultsArrive(t *testing.T) {
 	client := queryclient.NewWithExecutor(&fakeExecutor{})
 	m := NewLiveModel(client)
@@ -671,5 +715,78 @@ func TestEscClearingTheQueryAlsoClearsTheQueryingIndicator(t *testing.T) {
 	}
 	if strings.Contains(m.View(), "Searching...") {
 		t.Fatalf("expected no querying indicator after Esc clears the query, got: %s", m.View())
+	}
+}
+
+func TestSpinnerTicksWhileQueryingAndStopsOnceSettled(t *testing.T) {
+	client := queryclient.NewWithExecutor(&fakeExecutor{})
+	m := NewLiveModel(client)
+
+	mm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
+	m = mm.(Model)
+	if cmd == nil {
+		t.Fatal("expected a command to be returned")
+	}
+	tickMsg := findSpinnerTickMsg(t, cmd())
+	mm, cmd = m.Update(tickMsg)
+	m = mm.(Model)
+	if cmd == nil {
+		t.Fatal("expected the spinner to keep ticking while querying")
+	}
+
+	// once settled (a matching result arrives), further ticks must not
+	// perpetuate the animation loop
+	mm, _ = m.Update(queryResultMsg{query: "h", rows: []queryclient.ResultRow{{Headword: "happy"}}})
+	m = mm.(Model)
+	_, cmd = m.Update(tickMsg)
+	if cmd != nil {
+		t.Fatal("expected the spinner to stop ticking once querying is false")
+	}
+}
+
+func TestQueryErrorIsStyledDistinctlyAndAutoDismisses(t *testing.T) {
+	client := queryclient.NewWithExecutor(&fakeExecutor{})
+	m := NewLiveModel(client)
+	m.input.SetValue("x")
+	mm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = mm.(Model)
+
+	mm, cmd := m.Update(queryErrorMsg{query: "x", err: errors.New("revdict: error: boom")})
+	m = mm.(Model)
+	if !strings.Contains(m.View(), "boom") {
+		t.Fatalf("expected the exact error text to appear in the view, got: %s", m.View())
+	}
+	if cmd == nil {
+		t.Fatal("expected a dismiss timer command to be scheduled")
+	}
+	dismissMsg, ok := cmd().(dismissErrorMsg)
+	if !ok {
+		t.Fatalf("expected dismissErrorMsg, got %T", cmd())
+	}
+
+	mm, _ = m.Update(dismissMsg)
+	m = mm.(Model)
+	if m.statusMessage != "" || m.statusIsError {
+		t.Fatalf("expected the error to auto-dismiss, got statusMessage=%q statusIsError=%v", m.statusMessage, m.statusIsError)
+	}
+}
+
+func TestANewerErrorsDismissTimerDoesNotWipeAnEvenNewerError(t *testing.T) {
+	client := queryclient.NewWithExecutor(&fakeExecutor{})
+	m := NewLiveModel(client)
+	m.input.SetValue("x")
+
+	mm, cmd1 := m.Update(queryErrorMsg{query: "x", err: errors.New("first error")})
+	m = mm.(Model)
+	firstDismiss := cmd1().(dismissErrorMsg)
+
+	mm, _ = m.Update(queryErrorMsg{query: "x", err: errors.New("second error")})
+	m = mm.(Model)
+
+	// the FIRST error's dismiss timer fires late -- it must not clear the SECOND error
+	mm, _ = m.Update(firstDismiss)
+	m = mm.(Model)
+	if m.statusMessage != "second error" {
+		t.Fatalf("expected the second error to survive the first error's stale dismiss timer, got %q", m.statusMessage)
 	}
 }

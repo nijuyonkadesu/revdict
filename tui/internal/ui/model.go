@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/cursor"
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -30,21 +31,23 @@ const (
 )
 
 type Model struct {
-	input          textinput.Model
-	preview        viewport.Model
-	rows           []queryclient.ResultRow
-	selected       int
-	previewVisible bool
-	width, height  int
-	statusMessage  string
-	statusIsError  bool // true when statusMessage holds a query-error banner (set by queryErrorMsg); the next successful queryResultMsg clears it. Enter's copy feedback ("Copied: X"/"Copy failed: ...") sets this false so an unrelated, later-resolving query can never silently wipe a copy confirmation the user just triggered.
-	querying       bool // true whenever a query is pending (debounce not yet fired, or subprocess round-trip in flight); shown as a "Searching..." indicator in View() and cleared only once a result/error lands for the current, settled query text.
-	onCopy         copyFunc
-	client         *queryclient.Client
-	filters        FilterState
-	cancelInFlight context.CancelFunc
-	screen         screenID
-	panel          panelState
+	input           textinput.Model
+	preview         viewport.Model
+	rows            []queryclient.ResultRow
+	selected        int
+	previewVisible  bool
+	width, height   int
+	statusMessage   string
+	statusIsError   bool          // true when statusMessage holds a query-error banner (set by queryErrorMsg); the next successful queryResultMsg clears it. Enter's copy feedback ("Copied: X"/"Copy failed: ...") sets this false so an unrelated, later-resolving query can never silently wipe a copy confirmation the user just triggered.
+	errorGeneration int           // incremented on every queryErrorMsg; lets a stale dismiss timer (dismissErrorMsg) recognize it's been superseded by a newer error and avoid wiping it out.
+	querying        bool          // true whenever a query is pending (debounce not yet fired, or subprocess round-trip in flight); shown as a "Searching..." indicator in View() and cleared only once a result/error lands for the current, settled query text.
+	spinner         spinner.Model // animates alongside the "Searching..." indicator while querying is true.
+	onCopy          copyFunc
+	client          *queryclient.Client
+	filters         FilterState
+	cancelInFlight  context.CancelFunc
+	screen          screenID
+	panel           panelState
 }
 
 // FilterState holds the currently-active sort/category/phonetic filters.
@@ -106,11 +109,26 @@ type queryErrorMsg struct {
 	err   error
 }
 
+// dismissErrorMsg fires dismissErrorDelay after a queryErrorMsg is shown, to
+// auto-clear the error banner. generation is checked against
+// Model.errorGeneration so a newer error's dismiss timer can't be
+// pre-empted -- and, symmetrically, an older error's stale timer firing late
+// can't wipe out a newer error (or an unrelated copy confirmation) that has
+// since replaced it.
+type dismissErrorMsg struct{ generation int }
+
 const debounceDelay = 100 * time.Millisecond
+const dismissErrorDelay = 5 * time.Second
 
 func debounceCmd(query string) tea.Cmd {
 	return tea.Tick(debounceDelay, func(time.Time) tea.Msg {
 		return debounceFiredMsg{query: query}
+	})
+}
+
+func dismissErrorCmd(generation int) tea.Cmd {
+	return tea.Tick(dismissErrorDelay, func(time.Time) tea.Msg {
+		return dismissErrorMsg{generation: generation}
 	})
 }
 
@@ -132,11 +150,13 @@ func NewModel(rows []queryclient.ResultRow) Model {
 	ti.Cursor.SetMode(cursor.CursorStatic)
 	ti.Focus()
 	vp := viewport.New(0, 0)
+	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	return Model{
 		input:          ti,
 		preview:        vp,
 		rows:           rows,
 		previewVisible: true,
+		spinner:        sp,
 		onCopy:         func(string) error { return nil },
 		filters:        NewFilterState(),
 	}
@@ -246,7 +266,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.querying = false
 		m.statusMessage = msg.err.Error()
 		m.statusIsError = true
+		m.errorGeneration++
+		return m, dismissErrorCmd(m.errorGeneration)
+
+	case dismissErrorMsg:
+		if msg.generation != m.errorGeneration {
+			return m, nil
+		}
+		if m.statusIsError {
+			m.statusMessage = ""
+			m.statusIsError = false
+		}
 		return m, nil
+
+	case spinner.TickMsg:
+		if !m.querying {
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
 
 	case tea.KeyMsg:
 		if msg.Type == tea.KeyCtrlC {
@@ -258,7 +297,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.filters = m.panel.toFilterState()
 				m.screen = screenSearch
 				m.querying = true
-				return m, debounceCmd(m.input.Value())
+				return m, tea.Batch(debounceCmd(m.input.Value()), m.spinner.Tick)
 			}
 			m.panel = m.panel.handleKey(msg)
 			return m, nil
@@ -321,13 +360,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyCtrlR:
 			m.filters.Sort = nextSortMode(m.filters.Sort)
 			m.querying = true
-			return m, debounceCmd(m.input.Value())
+			return m, tea.Batch(debounceCmd(m.input.Value()), m.spinner.Tick)
 		}
 
 		var inputCmd tea.Cmd
 		m.input, inputCmd = m.input.Update(msg)
 		m.querying = true
-		return m, tea.Batch(inputCmd, debounceCmd(m.input.Value()))
+		return m, tea.Batch(inputCmd, debounceCmd(m.input.Value()), m.spinner.Tick)
 	}
 
 	return m, nil
@@ -365,6 +404,13 @@ func (m Model) visibleRowRange() (int, int) {
 // selectedRowStyle highlights the currently-selected row in the results
 // list so it's visually distinguished from the plain "> " marker alone.
 var selectedRowStyle = lipgloss.NewStyle().Bold(true).Reverse(true)
+
+// errorStatusStyle highlights the status line when it holds a query-error
+// banner, so a real failure never blends into ordinary status text (e.g. a
+// "Copied: X" confirmation). Reverse video, not a hardcoded color, so it
+// stays legible under whatever terminal theme is active -- same technique as
+// selectedRowStyle.
+var errorStatusStyle = lipgloss.NewStyle().Bold(true).Reverse(true)
 
 // truncateToWidth truncates s to at most width runes, replacing the last
 // rune with an ellipsis when truncation occurs. It operates on runes (not
@@ -429,11 +475,17 @@ func (m Model) View() string {
 
 	filterSummary := m.filters.summary()
 	if m.querying {
-		filterSummary += "  Searching..."
+		filterSummary += "  " + m.spinner.View() + " Searching..."
 	}
 	if m.width > 0 {
 		filterSummary = truncateToWidth(filterSummary, m.width)
 	}
 	status := m.statusMessage
+	if m.width > 0 {
+		status = truncateToWidth(status, m.width)
+	}
+	if m.statusIsError {
+		status = errorStatusStyle.Render(status)
+	}
 	return lipgloss.JoinVertical(lipgloss.Left, m.input.View(), filterSummary, status, body)
 }
