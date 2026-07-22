@@ -173,8 +173,25 @@ func (m *Model) refreshPreview() {
 	if previewWidth < 1 {
 		previewWidth = 1
 	}
-	text := fmt.Sprintf("%s\n\n%s", row.Headword, row.Definition)
-	wrapped := lipgloss.NewStyle().Width(previewWidth).Render(text)
+
+	var b strings.Builder
+	b.WriteString(row.Headword)
+	if row.Stress != nil && *row.Stress != "" {
+		b.WriteString("\n" + *row.Stress)
+	}
+	b.WriteString("\n\n")
+	b.WriteString(row.Definition)
+	if len(row.Synonyms) > 0 {
+		b.WriteString("\n\nSynonyms: " + strings.Join(row.Synonyms, ", "))
+	}
+	if len(row.Examples) > 0 {
+		b.WriteString("\n\nExamples:")
+		for _, ex := range row.Examples {
+			b.WriteString("\n- " + ex)
+		}
+	}
+
+	wrapped := lipgloss.NewStyle().Width(previewWidth).Render(b.String())
 	m.preview.SetContent(wrapped)
 }
 

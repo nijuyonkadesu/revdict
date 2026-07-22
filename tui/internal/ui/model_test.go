@@ -470,6 +470,27 @@ func TestEnterSurfacesACopyFailureInStatusMessage(t *testing.T) {
 	}
 }
 
+func TestRefreshPreviewIncludesSynonymsExamplesAndStress(t *testing.T) {
+	stress := "HAP-py"
+	rows := []queryclient.ResultRow{
+		{
+			Headword: "happy", Definition: "feeling joy",
+			Stress:   &stress,
+			Synonyms: []string{"glad", "cheerful"},
+			Examples: []string{"a happy childhood"},
+		},
+	}
+	m := NewModel(rows)
+	mm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = mm.(Model)
+	out := m.preview.View()
+	for _, want := range []string{"HAP-py", "glad", "cheerful", "a happy childhood"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected preview to contain %q, got: %s", want, out)
+		}
+	}
+}
+
 func TestNewerDebounceCancelsThePreviousInFlightQuery(t *testing.T) {
 	fake := &fakeExecutor{}
 	client := queryclient.NewWithExecutor(fake)
