@@ -407,6 +407,69 @@ func TestSuccessfulQueryResultDoesNotClearACopyConfirmationMessage(t *testing.T)
 	}
 }
 
+func TestF1OpensHelpScreen(t *testing.T) {
+	m := NewModel(nil)
+	mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyF1})
+	m = mm.(Model)
+	if m.screen != screenHelp {
+		t.Fatalf("expected screen=screenHelp, got %v", m.screen)
+	}
+}
+
+func TestEscClosesHelpScreen(t *testing.T) {
+	m := NewModel(nil)
+	mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyF1})
+	m = mm.(Model)
+	mm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = mm.(Model)
+	if m.screen != screenSearch {
+		t.Fatalf("expected screen=screenSearch after Esc, got %v", m.screen)
+	}
+}
+
+func TestCtrlRCyclesSortMode(t *testing.T) {
+	m := NewModel(nil)
+	m.filters = NewFilterState()
+	if m.filters.Sort != "relevance" {
+		t.Fatalf("expected initial sort=relevance, got %s", m.filters.Sort)
+	}
+	mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	m = mm.(Model)
+	if m.filters.Sort != "alpha" {
+		t.Fatalf("expected sort cycled to alpha, got %s", m.filters.Sort)
+	}
+}
+
+func TestCtrlRWrapsAroundAfterLastSortMode(t *testing.T) {
+	m := NewModel(nil)
+	m.filters = FilterState{Sort: "most_lyrical", Category: "all"}
+	mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	m = mm.(Model)
+	if m.filters.Sort != "relevance" {
+		t.Fatalf("expected wraparound to relevance, got %s", m.filters.Sort)
+	}
+}
+
+func TestEnterCallsOnCopyWithSelectedHeadword(t *testing.T) {
+	m := NewModel([]queryclient.ResultRow{{Headword: "annoyance"}})
+	var copied string
+	m.onCopy = func(h string) error { copied = h; return nil }
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if copied != "annoyance" {
+		t.Fatalf("expected onCopy called with 'annoyance', got %q", copied)
+	}
+}
+
+func TestEnterSurfacesACopyFailureInStatusMessage(t *testing.T) {
+	m := NewModel([]queryclient.ResultRow{{Headword: "annoyance"}})
+	m.onCopy = func(h string) error { return errors.New("no clipboard utility found") }
+	mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = mm.(Model)
+	if !strings.Contains(m.statusMessage, "no clipboard utility found") {
+		t.Fatalf("expected copy failure in status message, got %q", m.statusMessage)
+	}
+}
+
 func TestNewerDebounceCancelsThePreviousInFlightQuery(t *testing.T) {
 	fake := &fakeExecutor{}
 	client := queryclient.NewWithExecutor(fake)

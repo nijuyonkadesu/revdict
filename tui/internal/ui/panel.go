@@ -15,6 +15,15 @@ var sortModes = []string{
 
 var categories = []string{"all", "noun", "adjective", "verb", "adverb", "idiom_slang", "old"}
 
+func nextSortMode(current string) string {
+	for i, mode := range sortModes {
+		if mode == current {
+			return sortModes[(i+1)%len(sortModes)]
+		}
+	}
+	return sortModes[0]
+}
+
 var arpabetVowels = []string{
 	"AA", "AE", "AH", "AO", "AW", "AY", "EH", "ER", "EY",
 	"IH", "IY", "OW", "OY", "UH", "UW",

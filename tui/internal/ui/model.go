@@ -25,6 +25,7 @@ type screenID int
 const (
 	screenSearch screenID = iota
 	screenPanel
+	screenHelp
 )
 
 type Model struct {
@@ -227,6 +228,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		if m.screen == screenHelp {
+			if msg.Type == tea.KeyEsc {
+				m.screen = screenSearch
+			}
+			return m, nil
+		}
+
 		switch msg.Type {
 		case tea.KeyTab:
 			m.panel = newPanelState(m.filters)
@@ -268,6 +276,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyF2:
 			m.previewVisible = !m.previewVisible
 			return m, nil
+
+		case tea.KeyF1:
+			m.screen = screenHelp
+			return m, nil
+
+		case tea.KeyCtrlR:
+			m.filters.Sort = nextSortMode(m.filters.Sort)
+			return m, debounceCmd(m.input.Value())
 		}
 
 		var inputCmd tea.Cmd
@@ -325,6 +341,10 @@ func truncateToWidth(s string, width int) string {
 func (m Model) View() string {
 	if m.screen == screenPanel {
 		return m.panel.View()
+	}
+
+	if m.screen == screenHelp {
+		return helpText
 	}
 
 	listWidth := m.width
