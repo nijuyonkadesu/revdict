@@ -369,31 +369,6 @@ def _run_jsonl_query(query: str) -> int:
     return 0
 
 
-def _run_tui_query(payload: str) -> int:
-    if not payload.strip():
-        return 0
-
-    request = json.loads(payload)
-    query = request.get("query", "")
-    if not query.strip():
-        return 0
-
-    result = _get_search_result(
-        query,
-        request.get("top_n", LIVE_SESSION_TOP_N),
-        sort_mode=request.get("sort"),
-        category=request.get("category"),
-        syllables=request.get("syllables"),
-        primary_vowel=request.get("primary_vowel"),
-        rhymes_with=request.get("rhymes_with"),
-        sounds_like=request.get("sounds_like"),
-        meter=request.get("meter"),
-    )
-    for row in _build_result_rows(result):
-        print(json.dumps(row))
-    return 0
-
-
 _CLIPBOARD_TOOL_CANDIDATES = [
     ["wl-copy"],
     ["xclip", "-selection", "clipboard"],
@@ -481,10 +456,6 @@ def main(argv: list[str] | None = None) -> int:
         if argv and argv[0] == "--jsonl-query":
             query = argv[1] if len(argv) > 1 else ""
             return _run_jsonl_query(query)
-
-        if argv and argv[0] == "--tui-query":
-            payload = argv[1] if len(argv) > 1 else ""
-            return _run_tui_query(payload)
 
         if argv and argv[0] == "--copy-selection":
             headword = argv[1] if len(argv) > 1 else ""
