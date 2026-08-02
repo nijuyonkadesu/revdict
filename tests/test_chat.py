@@ -54,6 +54,85 @@ def test_gemini_chat_uses_generate_content_shape_and_parses_text():
     assert "Search query: closely woven pillow fabric" in payload["systemInstruction"]["parts"][0]["text"]
 
 
+def test_openai_compatible_chat_streams_each_sse_delta_with_full_context():
+    calls = []
+    chunks = []
+
+    def stream_transport(url, headers, payload):
+        calls.append((url, headers, payload))
+        return [
+            b'data: {"choices": [{"delta": {"content": "Use "}}]}\n',
+            b'data: {"choices": [{"delta": {"content": "tailor."}}]}\n',
+            b"data: [DONE]\n",
+        ]
+
+    client = chat.ChatClient(stream_transport=stream_transport, environment={})
+    response = client.stream(
+        chat.ProviderSettings("ollama", "http://example.test:11434", "Qwen3.6:35b-a3b", None),
+        chat.LexicalContext("make clothing fit", "tailor", "a person who makes or alters garments", "noun"),
+        [],
+        "How should I use it?",
+        chunks.append,
+    )
+
+    assert response == "Use tailor."
+    assert chunks == ["Use ", "tailor."]
+    url, _headers, payload = calls[0]
+    assert url == "http://example.test:11434/v1/chat/completions"
+    assert payload["stream"] is True
+    assert "Definition: a person who makes or alters garments" in payload["messages"][0]["content"]
+
+
+def test_gemini_chat_streams_server_sent_events():
+    calls = []
+    chunks = []
+
+    def stream_transport(url, headers, payload):
+        calls.append((url, headers, payload))
+        return [
+            'data: {"candidates": [{"content": {"parts": [{"text": "Natural "}]}}]}\n',
+            'data: {"candidates": [{"content": {"parts": [{"text": "speech."}]}}]}\n',
+        ]
+
+    client = chat.ChatClient(stream_transport=stream_transport, environment={"REVDICT_GEMINI_API_KEY": "test-key"})
+    response = client.stream(
+        chat.ProviderSettings("gemini", "https://generativelanguage.googleapis.com/v1beta", "gemini-3.6-flash", "REVDICT_GEMINI_API_KEY"),
+        chat.LexicalContext("closely woven pillow fabric", "percale", "a fine cotton fabric", "noun"),
+        [],
+        "Give spoken examples.",
+        chunks.append,
+    )
+
+    assert response == "Natural speech."
+    assert chunks == ["Natural ", "speech."]
+    url, headers, payload = calls[0]
+    assert url.endswith("/models/gemini-3.6-flash:streamGenerateContent?alt=sse")
+    assert headers["x-goog-api-key"] == "test-key"
+    assert "Definition: a fine cotton fabric" in payload["systemInstruction"]["parts"][0]["text"]
+
+
+def test_anthropic_chat_streams_content_block_deltas():
+    chunks = []
+
+    def stream_transport(_url, _headers, _payload):
+        return [
+            'event: content_block_delta\n',
+            'data: {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "Use it naturally."}}\n',
+        ]
+
+    client = chat.ChatClient(stream_transport=stream_transport, environment={"ANTHROPIC_API_KEY": "test-key"})
+    response = client.stream(
+        chat.ProviderSettings("anthropic", "https://api.anthropic.com/v1", "claude-sonnet-4-5", "ANTHROPIC_API_KEY"),
+        chat.LexicalContext("make clothing fit", "tailor", "a person who makes garments", "noun"),
+        [],
+        "Give an example.",
+        chunks.append,
+    )
+
+    assert response == "Use it naturally."
+    assert chunks == ["Use it naturally."]
+
+
 def test_required_key_is_reported_without_attempting_a_request():
     client = chat.ChatClient(transport=lambda *_args: pytest.fail("must not request"), environment={})
 

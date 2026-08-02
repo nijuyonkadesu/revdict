@@ -379,6 +379,50 @@ def test_chat_settings_are_editable_and_close_back_to_the_main_tui(monkeypatch):
         ui.close()
 
 
+def test_chat_settings_only_show_cached_gemini_models_for_gemini():
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    try:
+        ui._chat_settings.active_provider = "ollama"
+        ui._update_chat_known_models()
+        assert ui.chat_known_models_container.filter() is False
+
+        ui._chat_settings.active_provider = "gemini"
+        ui._update_chat_known_models()
+        assert ui.chat_known_models_container.filter() is True
+    finally:
+        ui.close()
+
+
+def test_markdown_fragments_render_emphasis_without_painting_chat_colours():
+    fragments = tui.markdown_fragments("**bold** and *italic* and `code`")
+
+    assert "".join(text for _style, text, *_ in fragments) == "bold and italic and code"
+    assert any(style == "bold" and text == "bold" for style, text, *_ in fragments)
+    assert any(style == "italic" and text == "italic" for style, text, *_ in fragments)
+    assert any(style == "bold" and text == "code" for style, text, *_ in fragments)
+    assert not any("ansicolor" in style or "bg:" in style for style, _text, *_ in fragments)
+
+
+def test_chat_renders_streamed_chunks_before_the_final_reply_arrives():
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    try:
+        ui._begin_chat_response()
+        ui._queue_chat_chunk("**Natural**")
+        ui._flush_chat_chunks()
+
+        assert ui._chat_spinner_active is True
+        assert ui._chat_streamed_answer == "**Natural**"
+        assert ui.chat_transcript_control.markdown.endswith("**Natural**")
+
+        ui._receive_chat_answer("**Natural**")
+
+        assert ui._chat_spinner_active is False
+        assert ui._chat_history[-1] == ("assistant", "**Natural**")
+        assert ui._chat_transcript_text.count("**Natural**") == 1
+    finally:
+        ui.close()
+
+
 def test_results_mouse_wheel_moves_selection_and_updates_the_preview():
     ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
     ui._rows = [

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from io import StringIO
 import re
 import threading
 import time
@@ -17,6 +19,8 @@ from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.widgets import RadioList
+from rich.console import Console
+from rich.markdown import Markdown
 
 from revdict.category import CATEGORIES
 from revdict import chat as chat_module
@@ -149,6 +153,59 @@ def candidate_preview_fragments(candidate: dict):
     fragments = [("", text)]
     if candidate.get("stress"):
         fragments.extend([("", "\nStress: "), *to_formatted_text(ANSI(candidate["stress"].rstrip()))])
+    return fragments
+
+
+def markdown_fragments(markdown: str, width: int = 120):
+    """Render Markdown through Rich, retaining terminal attributes but no colours."""
+    console = Console(
+        file=StringIO(),
+        force_terminal=True,
+        color_system=None,
+        width=max(1, width),
+    )
+    fragments: list[tuple[str, str]] = []
+
+    def append(style: str, text: str) -> None:
+        if not text:
+            return
+        if fragments and fragments[-1][0] == style:
+            fragments[-1] = (style, fragments[-1][1] + text)
+        else:
+            fragments.append((style, text))
+
+    def trim_line_padding() -> None:
+        while fragments and fragments[-1][1].endswith(" "):
+            style, text = fragments[-1]
+            text = text.rstrip(" ")
+            if text:
+                fragments[-1] = (style, text)
+                return
+            fragments.pop()
+
+    for segment in console.render(Markdown(markdown)):
+        style = segment.style
+        attributes = [
+            name
+            for name in ("bold", "italic", "underline", "reverse", "dim", "strike")
+            if style is not None and getattr(style, name, False)
+        ]
+        style = " ".join(attributes)
+        for part in segment.text.splitlines(keepends=True):
+            if part.endswith("\n"):
+                append(style, part[:-1])
+                trim_line_padding()
+                append("", "\n")
+            else:
+                append(style, part)
+    while fragments and fragments[-1][1].endswith("\n"):
+        style, text = fragments[-1]
+        text = text.rstrip("\n")
+        if text:
+            fragments[-1] = (style, text)
+            break
+        fragments.pop()
+    trim_line_padding()
     return fragments
 
 
@@ -313,6 +370,18 @@ class WordWrappedControl(UIControl):
         return NotImplemented
 
 
+class MarkdownControl(WordWrappedControl):
+    """A Rich Markdown document adapted to prompt-toolkit's scrollable text API."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.markdown = ""
+
+    def create_content(self, width: int, height: int | None) -> UIContent:
+        self.fragments = markdown_fragments(self.markdown, width)
+        return super().create_content(width, height)
+
+
 class MouseScrollableWindow(Window):
     """A Window whose wheel handler persists a viewport change and repaints."""
 
@@ -450,6 +519,13 @@ class NativeTui:
         self._chat_client = chat_module.ChatClient()
         self._chat_loading_settings = False
         self._chat_form_provider = self._chat_settings.active_provider
+        self._chat_transcript_text = ""
+        self._chat_streamed_answer = ""
+        self._chat_spinner_active = False
+        self._chat_spinner_frame = 0
+        self._chat_chunk_lock = threading.Lock()
+        self._chat_pending_chunks: list[str] = []
+        self._chat_chunk_flush_scheduled = False
         self.query = TextArea(prompt="> ", multiline=False, height=1, style="class:query", focus_on_click=True)
         self.sort_field = TrackingRadioList(SORT_CHOICES, default=None, select_on_focus=True, on_change=self._schedule_search)
         self.category_field = TrackingRadioList(CATEGORY_CHOICES, default=None, select_on_focus=True, on_change=self._schedule_search)
@@ -459,7 +535,13 @@ class NativeTui:
         self.sounds_field = TextArea(prompt="Sounds like: ", multiline=False, height=1)
         self.meter_field = TextArea(prompt="Meter: ", multiline=False, height=1)
         self.chat_header = Label(text="")
-        self.chat_transcript = TextArea(text="", multiline=True, read_only=True, focusable=False, wrap_lines=True, scrollbar=True)
+        self.chat_transcript_control = MarkdownControl()
+        self.chat_transcript = MouseScrollableWindow(
+            content=self.chat_transcript_control,
+            wrap_lines=False,
+            right_margins=[ScrollbarMargin(display_arrows=True)],
+            always_hide_cursor=True,
+        )
         self.chat_input = TextArea(prompt="You: ", multiline=True, height=Dimension(min=1, preferred=3, max=6), wrap_lines=True)
         self.chat_input_label = Label(text="Message · Enter sends", style="class:muted")
         self.chat_provider_field = TrackingRadioList(
@@ -483,6 +565,7 @@ class NativeTui:
         self.preview_control = WordWrappedControl()
         self.preview = MouseScrollableWindow(content=self.preview_control, wrap_lines=False, right_margins=[ScrollbarMargin(display_arrows=True)], always_hide_cursor=True)
         self.progress = Label(text=self._progress_fragments(), dont_extend_height=True, wrap_lines=False)
+        self.chat_progress = Label(text="", style="class:muted", dont_extend_height=True, wrap_lines=False)
         self.active_filters = Label(text="sort: relevance  category: all", style="class:muted")
         self.status = Label(text="F1 help · F2 filters · F3 preview · F4 chat · Ctrl-R sort · Enter copy", style="class:muted")
         controls = Frame(HSplit([self.sort_field, self.category_field, self.syllables_field, self.vowel_field, self.rhymes_field, self.sounds_field, self.meter_field], padding=0), title="Search controls — arrows choose Sort and Category")
@@ -496,8 +579,12 @@ class NativeTui:
             padding=1,
             height=Dimension(weight=1),
         )
+        self.chat_known_models_container = ConditionalContainer(
+            self.chat_known_models,
+            Condition(lambda: self._chat_settings.active_provider == "gemini"),
+        )
         self.chat_settings_frame = Frame(
-            HSplit([self.chat_provider_field, self.chat_model_field, self.chat_endpoint_field, self.chat_api_key_field, self.chat_known_models], padding=0),
+            HSplit([self.chat_provider_field, self.chat_model_field, self.chat_endpoint_field, self.chat_api_key_field, self.chat_known_models_container], padding=0),
             title="Chat provider settings — ↑/↓ provider · Tab fields · F5 saves locally",
         )
         chat_conversation = ConditionalContainer(
@@ -525,6 +612,7 @@ class NativeTui:
             ConditionalContainer(Frame(Label(text=build_help_text()), title="Help"), Condition(lambda: self._show_help)),
             self.status,
             self.progress,
+            ConditionalContainer(self.chat_progress, Condition(lambda: self._chat_spinner_active)),
         ], padding=1)
         bindings = KeyBindings()
         @bindings.add("f1")
@@ -612,6 +700,7 @@ class NativeTui:
         self.application.run()
 
     def close(self) -> None:
+        self._chat_spinner_active = False
         self._controller.close()
         self._chat_controller.close()
         if self.application.future is not None:
@@ -713,6 +802,9 @@ class NativeTui:
         self.chat_header.text = f"Provider: {provider.provider} · Model: {provider.model}{subject}"
 
     def _update_chat_known_models(self) -> None:
+        if self._chat_settings.active_provider != "gemini":
+            self.chat_known_models.text = ""
+            return
         models = self._chat_settings.gemini_models
         self.chat_known_models.text = "Cached Gemini models: " + (", ".join(models) if models else "none — run chat-config --provider gemini --test")
 
@@ -801,6 +893,7 @@ class NativeTui:
         elif self._chat_controller.send((self._active_chat_provider(), context, list(self._chat_history), message)):
             self._chat_history.append(("user", message))
             self._append_chat_turn("You", message)
+            self._begin_chat_response()
             self.chat_input.text = ""
             self.status.text = "Writing assistant is responding…"
         else:
@@ -809,22 +902,89 @@ class NativeTui:
 
     def _execute_chat(self, request: tuple[chat_module.ProviderSettings, chat_module.LexicalContext, list[tuple[str, str]], str]) -> str:
         provider, context, history, message = request
-        return self._chat_client.complete(provider, context, history, message)
+        return self._chat_client.stream(provider, context, history, message, self._queue_chat_chunk)
 
     def _receive_chat_answer(self, answer: str) -> None:
+        self._flush_chat_chunks()
         self._chat_history.append(("assistant", answer))
-        self._append_chat_turn("Assistant", answer)
+        if self._chat_streamed_answer:
+            self._chat_transcript_text += "\n\n"
+            self._render_chat_transcript()
+        else:
+            self._append_chat_turn("Assistant", answer)
+        self._stop_chat_spinner()
         self.status.text = "Chat response received."
         self.application.invalidate()
 
     def _receive_chat_error(self, error: Exception) -> None:
-        self._append_chat_turn("Chat error", str(error))
+        self._flush_chat_chunks()
+        if self._chat_streamed_answer:
+            self._chat_transcript_text += f"\n\n**Chat error:** {error}\n\n"
+            self._render_chat_transcript()
+        else:
+            self._append_chat_turn("Chat error", str(error))
+        self._stop_chat_spinner()
         self.status.text = "Chat request failed."
         self.application.invalidate()
 
     def _append_chat_turn(self, speaker: str, text: str) -> None:
-        self.chat_transcript.text += f"{speaker}:\n{text}\n\n"
-        self.chat_transcript.buffer.cursor_position = len(self.chat_transcript.text)
+        self._chat_transcript_text += f"**{speaker}:**\n{text}\n\n"
+        self._render_chat_transcript()
+
+    def _render_chat_transcript(self) -> None:
+        self.chat_transcript_control.markdown = self._chat_transcript_text
+        self.chat_transcript_control.set_cursor_line(1_000_000)
+
+    def _begin_chat_response(self) -> None:
+        self._chat_streamed_answer = ""
+        self._chat_transcript_text += "**Assistant:**\n"
+        self._render_chat_transcript()
+        self._chat_spinner_active = True
+        self._chat_spinner_frame = 0
+        self.chat_progress.text = "⠋ Writing assistant · streaming"
+        if self.application.loop is not None:
+            self.application.create_background_task(self._animate_chat_spinner())
+
+    async def _animate_chat_spinner(self) -> None:
+        frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        while self._chat_spinner_active:
+            self.chat_progress.text = f"{frames[self._chat_spinner_frame % len(frames)]} Writing assistant · streaming"
+            self._chat_spinner_frame += 1
+            self.application.invalidate()
+            await asyncio.sleep(0.12)
+
+    def _stop_chat_spinner(self) -> None:
+        self._chat_spinner_active = False
+        self.chat_progress.text = ""
+
+    def _queue_chat_chunk(self, chunk: str) -> None:
+        """Coalesce network chunks to at most one terminal redraw every 33 ms."""
+        if not chunk:
+            return
+        with self._chat_chunk_lock:
+            self._chat_pending_chunks.append(chunk)
+            if self._chat_chunk_flush_scheduled:
+                return
+            self._chat_chunk_flush_scheduled = True
+        self._schedule_on_ui_thread(self._schedule_chat_chunk_flush)
+
+    def _schedule_chat_chunk_flush(self) -> None:
+        loop = self.application.loop
+        if loop is None:
+            return
+        loop.call_later(1 / 30, self._flush_chat_chunks)
+
+    def _flush_chat_chunks(self) -> None:
+        with self._chat_chunk_lock:
+            chunks = self._chat_pending_chunks
+            self._chat_pending_chunks = []
+            self._chat_chunk_flush_scheduled = False
+        if not chunks:
+            return
+        self._chat_streamed_answer += "".join(chunks)
+        self._chat_transcript_text += "".join(chunks)
+        self._render_chat_transcript()
+        self.application.invalidate()
 
     def _copy_selected(self) -> None:
         if self._rows:
