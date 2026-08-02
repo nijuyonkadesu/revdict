@@ -98,6 +98,29 @@ def test_mark_honors_no_color_while_preserving_stress_attributes(monkeypatch):
     assert stress.mark("tailor", "noun") == "\x1b[1mTAI\x1b[0m"
 
 
+def test_mark_can_preserve_pigment_for_daemon_transport_when_no_color_is_set(monkeypatch):
+    """The server must not let its environment erase a client's stress hue."""
+    from rich.text import Text
+
+    class FakeEngine:
+        def resolve_word_by_pos(self, word, pos):
+            return "fake-word-result"
+
+    class FakeRender:
+        def render_word(self, result):
+            return Text("TAI", style="bold yellow")
+
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setattr(stress, "_engine", FakeEngine())
+    monkeypatch.setattr(stress, "_render", FakeRender())
+
+    rendered = stress.mark("tailor", "noun", preserve_color=True)
+
+    assert "\x1b[" in rendered
+    assert "TAI" in rendered
+    assert "33" in rendered or "38;5;" in rendered
+
+
 def test_mark_preserves_reverse_video_when_no_color_is_set(monkeypatch):
     from rich.text import Text
 

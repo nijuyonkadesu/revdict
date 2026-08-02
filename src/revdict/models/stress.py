@@ -39,14 +39,15 @@ def is_available() -> bool:
     return _engine is not None and _render is not None
 
 
-def mark(word: str, pos: str) -> str | None:
+def mark(word: str, pos: str, *, preserve_color: bool = False) -> str | None:
     """Return one word as the nuclear unit of its own intonation phrase.
 
     The terminal stressmark renderer provides the authoritative nuclear,
     prominent, and secondary semantics. A single dictionary headword has no
     sentence context, so its primary stress is deliberately the nuclear span.
-    The result remains JSON-safe ANSI for the daemon protocol; NO_COLOR
-    removes pigment while preserving non-colour attributes.
+    The result remains JSON-safe ANSI for the daemon protocol. ``NO_COLOR``
+    removes pigment for direct display, while ``preserve_color`` retains it
+    for transport so the eventual UI client can apply its own policy.
     """
     if not is_available():
         return None
@@ -57,7 +58,7 @@ def mark(word: str, pos: str) -> str | None:
 
         result = _engine.resolve_word_by_pos(word, pos)
         buffer = StringIO()
-        no_color = "NO_COLOR" in os.environ
+        no_color = "NO_COLOR" in os.environ and not preserve_color
         truecolor = os.environ.get("COLORTERM", "").casefold() in {"truecolor", "24bit"}
         console = Console(
             file=buffer,

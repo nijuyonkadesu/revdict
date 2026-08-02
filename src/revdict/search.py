@@ -271,7 +271,7 @@ def build_candidate(record: dict, relevance: int, state: dict) -> dict:
         "label": emotion["label"],
         "polarity": emotion["polarity"],
         "relevance": relevance,
-        "stress": stress.mark(record["headword"], record["pos"]),
+        "stress": stress.mark(record["headword"], record["pos"], preserve_color=True),
         "synonyms": record.get("synonyms"),
         "tags": record.get("tags") or [],
         "phonetics": record.get("phonetics"),
@@ -307,7 +307,7 @@ def tag_exact_match_senses(exact_match_raw: dict | None, classifier_factory) -> 
                 "synonyms": sense.get("synonyms"),
                 "label": emotion["label"],
                 "polarity": emotion["polarity"],
-                "stress": stress.mark(exact_match_raw["headword"], sense["pos"]),
+                "stress": stress.mark(exact_match_raw["headword"], sense["pos"], preserve_color=True),
             }
         )
     return {"headword": exact_match_raw["headword"], "senses": tagged_senses}
