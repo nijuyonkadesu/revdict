@@ -599,6 +599,7 @@ class NativeTui:
         self.preview_control = WordWrappedControl()
         self.preview = MouseScrollableWindow(content=self.preview_control, wrap_lines=False, right_margins=[ScrollbarMargin(display_arrows=True)], always_hide_cursor=True)
         self.progress = Label(text="", dont_extend_height=True, wrap_lines=False)
+        self.progress_container = ConditionalContainer(self.progress, Condition(lambda: bool(self.progress.text)))
         self.chat_progress = Label(text="", style="class:muted", dont_extend_height=True, wrap_lines=False)
         self.function_key_buttons = tuple(
             Button(
@@ -663,17 +664,17 @@ class NativeTui:
             title="Writing assistant",
             height=Dimension(weight=1),
         )
-        root = HSplit([
+        self.root = HSplit([
             Frame(self.query, title="revdict"), self.active_filters,
             ConditionalContainer(panes, Condition(lambda: not (self._show_chat or self._show_chat_settings))),
             ConditionalContainer(chat_panel, Condition(lambda: self._show_chat or self._show_chat_settings)),
             ConditionalContainer(controls, Condition(lambda: self._show_controls)),
             ConditionalContainer(Frame(Label(text=build_help_text()), title="Help"), Condition(lambda: self._show_help)),
             self.status_container,
-            self.progress,
+            self.progress_container,
             ConditionalContainer(self.chat_progress, Condition(lambda: self._chat_spinner_active)),
             self.function_key_bar,
-        ], padding=1)
+        ], padding=0)
         bindings = KeyBindings()
         @bindings.add("f1")
         def toggle_help(event): self._invoke_function_key("F1")
@@ -708,7 +709,7 @@ class NativeTui:
         @bindings.add("c-c")
         def quit_ui(event): self.close()
         self.application = Application(
-            layout=Layout(root, focused_element=self.query),
+            layout=Layout(self.root, focused_element=self.query),
             key_bindings=bindings,
             style=Style.from_dict(
                 {

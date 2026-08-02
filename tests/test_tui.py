@@ -371,6 +371,20 @@ def test_idle_status_is_hidden_and_function_buttons_are_a_single_compact_row():
         ui.close()
 
 
+def test_idle_footer_reserves_no_blank_status_or_progress_rows():
+    """Catches invisible footer content leaving vertical holes above the buttons."""
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    try:
+        assert ui.root.padding == 0
+        assert ui.status_container.filter() is False
+        assert ui.progress_container.filter() is False
+
+        ui.progress.text = [("bold", "Searching 50% · 5/9 · Retrieving candidates")]
+        assert ui.progress_container.filter() is True
+    finally:
+        ui.close()
+
+
 def test_results_and_preview_stack_on_narrow_terminals():
     """Catches mobile layouts compressing two reading panes side by side."""
     ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
