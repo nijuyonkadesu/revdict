@@ -23,6 +23,7 @@ from revdict.tui import (
     build_help_text,
     candidate_preview_fragments,
     format_progress_line,
+    markdown_fragments,
     word_wrap_fragments,
     format_candidate_preview,
 )
@@ -442,6 +443,10 @@ def test_repeated_result_navigation_moves_the_rendered_results_viewport():
 def test_generated_help_lists_every_filter_and_the_preview_key():
     help_text = build_help_text()
 
+    assert "## Query syntax" in help_text
+    assert "## Filters" in help_text
+    assert "## Keyboard" in help_text
+    assert "**[F3]**" in help_text
     assert "F3" in help_text
     assert "F4" in help_text
     assert "F5" in help_text
@@ -449,6 +454,14 @@ def test_generated_help_lists_every_filter_and_the_preview_key():
     assert "Sort" in help_text
     assert "Sounds like" in help_text
     assert "Idioms and slang" in help_text
+
+
+def test_generated_help_markdown_emphasizes_sections_examples_and_keys():
+    fragments = markdown_fragments(build_help_text(), width=100)
+
+    assert any("underline" in style and "Query syntax" in text for style, text, *_ in fragments)
+    assert any("bold" in style and "[F3]" in text for style, text, *_ in fragments)
+    assert "\x1b" not in "".join(text for _style, text, *_ in fragments)
 
 
 def test_progress_line_reports_percent_phase_count_and_live_detail_in_one_line():

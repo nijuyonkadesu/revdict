@@ -280,15 +280,20 @@ QUERY_HELP = (
 
 
 def build_help_text() -> str:
-    lines = ["Query syntax:"]
-    lines.extend(f"  {query:<29} {description}" for query, description in QUERY_HELP)
-    lines.extend(["", "Filters:"])
+    """Build rich, data-driven Help Markdown from the UI's actual controls."""
+    lines = [
+        "Search by meaning, spelling, sound, or rhythm. Every control below is live in this interface.",
+        "",
+        "## Query syntax",
+    ]
+    lines.extend(f"- **`{query}`** — {description}" for query, description in QUERY_HELP)
+    lines.extend(["", "## Filters"])
     for item in fields(SearchControls):
         spec: ControlSpec = item.metadata["spec"]
-        choices = " (" + ", ".join(label for _, label in spec.choices) + ")" if spec.choices else ""
-        lines.append(f"  {spec.label}: {spec.help_text}{choices}")
-    lines.extend(["", "Keys:"])
-    lines.extend(f"  {action.key:<15} {action.description}" for action in ACTIONS)
+        choices = f" _Choices: {', '.join(label for _, label in spec.choices)}._" if spec.choices else ""
+        lines.append(f"- **{spec.label}** — {spec.help_text}{choices}")
+    lines.extend(["", "## Keyboard"])
+    lines.extend(f"- **[{action.key}]** — {action.description}" for action in ACTIONS)
     return "\n".join(lines)
 
 
@@ -906,7 +911,15 @@ class NativeTui:
             height=Dimension(weight=1),
         )
         self.query_section = HairlineSection(self.query, "revdict")
-        self.help_section = HairlineSection(Label(text=build_help_text()), "Help")
+        self.help_control = MarkdownControl()
+        self.help_control.markdown = build_help_text()
+        self.help = MouseScrollableWindow(
+            content=self.help_control,
+            wrap_lines=False,
+            right_margins=[ProportionalScrollbarMargin()],
+            always_hide_cursor=True,
+        )
+        self.help_section = HairlineSection(self.help, "Help")
         self.root = HSplit([
             self.query_section, self.active_filters,
             ConditionalContainer(panes, Condition(lambda: not (self._show_chat or self._show_chat_settings))),
