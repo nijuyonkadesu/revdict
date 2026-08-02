@@ -6,7 +6,7 @@ from prompt_toolkit.application.current import create_app_session
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.input.defaults import create_pipe_input
 from prompt_toolkit.keys import Keys
-from prompt_toolkit.mouse_events import MouseEvent, MouseEventType
+from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from prompt_toolkit.output import DummyOutput
 
 from revdict import tui
@@ -324,6 +324,38 @@ def test_progress_line_reports_percent_phase_count_and_live_detail_in_one_line()
 
     assert line == "Searching 11% · 2/9 · Validating query & filters — Checking selected filters"
     assert "\n" not in line
+
+
+def test_completed_search_progress_expires_without_clearing_a_new_search():
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    try:
+        ui.progress.text = [("bold", "Searching 100% · 9/9 · Done")]
+        token = ui._progress_visibility_token
+        ui._clear_completed_progress(token)
+        assert ui.progress.text == []
+
+        ui.progress.text = [("bold", "Searching 100% · 9/9 · Done")]
+        ui._reset_progress()
+        ui._clear_completed_progress(token)
+        assert ui.progress.text != []
+    finally:
+        ui.close()
+
+
+def test_bottom_function_buttons_invoke_the_same_actions_as_f_keys():
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    try:
+        content = ui.function_key_bar_control.create_content(width=80, height=1)
+        labels = "".join("".join(text for _style, text, *_ in content.get_line(line)) for line in range(content.line_count))
+        handled = ui.function_key_bar_control.mouse_handler(
+            MouseEvent(position=Point(x=1, y=0), event_type=MouseEventType.MOUSE_UP, button=MouseButton.LEFT, modifiers=frozenset())
+        )
+
+        assert handled is None
+        assert ui._show_help is True
+        assert all(key in labels for key in ("F1", "F2", "F3", "F4", "F5"))
+    finally:
+        ui.close()
 
 
 def test_escape_clears_a_nonempty_query_before_it_can_quit():

@@ -98,6 +98,7 @@ class SearchControls:
 class UiAction:
     key: str
     description: str
+    button_label: str | None = None
 
 
 @dataclass(frozen=True)
@@ -131,9 +132,9 @@ class ChatSessionRequestError(RuntimeError):
 
 
 ACTIONS = (
-    UiAction("F1", "Toggle generated help"), UiAction("F2", "Open or close filters"),
-    UiAction("F3", "Toggle preview"), UiAction("F4", "Toggle writing chat"),
-    UiAction("F5", "Open or save chat provider settings"),
+    UiAction("F1", "Toggle generated help", "Help"), UiAction("F2", "Open or close filters", "Filters"),
+    UiAction("F3", "Toggle preview", "Preview"), UiAction("F4", "Toggle writing chat", "Chat"),
+    UiAction("F5", "Open or save chat provider settings", "Settings"),
     UiAction("Enter (chat)", "Send chat message"), UiAction("Ctrl-R", "Cycle sort order"),
     UiAction("Ctrl-N / Ctrl-P", "Select next / previous result"), UiAction("Enter (query)", "Copy selected headword"),
     UiAction("Esc", "Clear query, then quit"), UiAction("Ctrl-C", "Quit"),
@@ -431,6 +432,48 @@ class MouseScrollableWindow(Window):
         return None
 
 
+class FunctionKeyBarControl(UIControl):
+    """Mouse-selectable equivalents of the TUI's supported function keys."""
+
+    def __init__(self, actions: tuple[UiAction, ...], on_press: Callable[[str], None]) -> None:
+        self._actions = tuple(action for action in actions if action.key.startswith("F"))
+        self._on_press = on_press
+        self._regions: list[tuple[int, int, int, str]] = []
+
+    def _layout(self, width: int) -> list[list[tuple[str, str]]]:
+        width = max(1, width)
+        self._regions = []
+        lines: list[list[tuple[str, str]]] = [[]]
+        row = used = 0
+        for action in self._actions:
+            text = f" {action.key} {action.button_label or action.description} "
+            text_width = get_cwidth(text)
+            if used and used + text_width > width:
+                lines.append([])
+                row += 1
+                used = 0
+            lines[row].append(("class:function-key", text))
+            self._regions.append((row, used, used + text_width, action.key))
+            used += text_width
+        return lines
+
+    def create_content(self, width: int, height: int | None) -> UIContent:
+        lines = self._layout(width)
+        return UIContent(get_line=lambda index: lines[index], line_count=len(lines), show_cursor=False)
+
+    def preferred_height(self, width: int, max_available_height: int, wrap_lines: bool, get_line_prefix) -> int | None:
+        return min(len(self._layout(width)), max_available_height)
+
+    def mouse_handler(self, mouse_event: MouseEvent):
+        if mouse_event.event_type not in {MouseEventType.MOUSE_DOWN, MouseEventType.MOUSE_UP} or mouse_event.button != MouseButton.LEFT:
+            return NotImplemented
+        for row, start, end, key in self._regions:
+            if mouse_event.position.y == row and start <= mouse_event.position.x < end:
+                self._on_press(key)
+                return None
+        return NotImplemented
+
+
 class TrackingRadioList(RadioList):
     def __init__(self, *args, on_change: Callable[[], None], **kwargs) -> None:
         self._on_change = on_change
@@ -539,6 +582,8 @@ class NativeTui:
         self._controls = SearchControls()
         self._stage_states = {stage.id: "pending" for stage in STAGES}
         self._stage_details: dict[str, str] = {}
+        self._progress_visibility_token = 0
+        self._progress_clear_handle = None
         try:
             self._chat_settings = chat_module.load_settings()
             self._chat_settings_error = None
@@ -594,8 +639,10 @@ class NativeTui:
         self.results = Window(content=self.results_control, wrap_lines=False, right_margins=[ScrollbarMargin(display_arrows=True)], always_hide_cursor=True)
         self.preview_control = WordWrappedControl()
         self.preview = MouseScrollableWindow(content=self.preview_control, wrap_lines=False, right_margins=[ScrollbarMargin(display_arrows=True)], always_hide_cursor=True)
-        self.progress = Label(text=self._progress_fragments(), dont_extend_height=True, wrap_lines=False)
+        self.progress = Label(text="", dont_extend_height=True, wrap_lines=False)
         self.chat_progress = Label(text="", style="class:muted", dont_extend_height=True, wrap_lines=False)
+        self.function_key_bar_control = FunctionKeyBarControl(ACTIONS, self._invoke_function_key)
+        self.function_key_bar = Window(content=self.function_key_bar_control, wrap_lines=False, always_hide_cursor=True)
         self.active_filters = Label(text="sort: relevance  category: all", style="class:muted")
         self.status = Label(text="F1 help · F2 filters · F3 preview · F4 chat · Ctrl-R sort · Enter copy", style="class:muted")
         controls = Frame(HSplit([self.sort_field, self.category_field, self.syllables_field, self.vowel_field, self.rhymes_field, self.sounds_field, self.meter_field], padding=0), title="Search controls — arrows choose Sort and Category")
@@ -643,21 +690,19 @@ class NativeTui:
             self.status,
             self.progress,
             ConditionalContainer(self.chat_progress, Condition(lambda: self._chat_spinner_active)),
+            self.function_key_bar,
         ], padding=1)
         bindings = KeyBindings()
         @bindings.add("f1")
-        def toggle_help(event): self._show_help = not self._show_help; event.app.invalidate()
+        def toggle_help(event): self._invoke_function_key("F1")
         @bindings.add("f2")
-        def toggle_controls(event):
-            self._show_controls = not self._show_controls
-            event.app.layout.focus(self.sort_field if self._show_controls else self.query)
-            event.app.invalidate()
+        def toggle_controls(event): self._invoke_function_key("F2")
         @bindings.add("f3")
-        def toggle_preview(event): self._show_preview = not self._show_preview; event.app.invalidate()
+        def toggle_preview(event): self._invoke_function_key("F3")
         @bindings.add("f4")
-        def toggle_chat(event): self._toggle_chat()
+        def toggle_chat(event): self._invoke_function_key("F4")
         @bindings.add("f5")
-        def toggle_chat_settings(event): self._toggle_chat_settings()
+        def toggle_chat_settings(event): self._invoke_function_key("F5")
         @bindings.add("tab", filter=Condition(lambda: self._show_chat_settings))
         def next_chat_setting(event): self._focus_chat_setting(1)
         @bindings.add("s-tab", filter=Condition(lambda: self._show_chat_settings))
@@ -690,6 +735,7 @@ class NativeTui:
                     "result.headword": "bold",
                     "result.pos": "dim",
                     "result.selected": "reverse",
+                    "function-key": "reverse",
                 }
             ),
             full_screen=True,
@@ -722,15 +768,56 @@ class NativeTui:
         return [("bold", format_progress_line(self._stage_states, self._stage_details))]
 
     def _reset_progress(self) -> None:
+        self._progress_visibility_token += 1
+        if self._progress_clear_handle is not None:
+            self._progress_clear_handle.cancel()
+            self._progress_clear_handle = None
         self._stage_states = {stage.id: "pending" for stage in STAGES}
         self._stage_details = {}
         self.progress.text = self._progress_fragments()
+
+    def _clear_completed_progress(self, token: int) -> None:
+        if token != self._progress_visibility_token:
+            return
+        self._progress_clear_handle = None
+        self.progress.text = []
+        self.application.invalidate()
+
+    def _schedule_completed_progress_clear(self) -> None:
+        token = self._progress_visibility_token
+        loop = self.application.loop
+        if loop is not None:
+            self._progress_clear_handle = loop.call_later(3, self._clear_completed_progress, token)
+
+    def _hide_progress(self) -> None:
+        self._progress_visibility_token += 1
+        if self._progress_clear_handle is not None:
+            self._progress_clear_handle.cancel()
+            self._progress_clear_handle = None
+        self.progress.text = []
+
+    def _invoke_function_key(self, key: str) -> None:
+        if key == "F1":
+            self._show_help = not self._show_help
+        elif key == "F2":
+            self._show_controls = not self._show_controls
+            self.application.layout.focus(self.sort_field if self._show_controls else self.query)
+        elif key == "F3":
+            self._show_preview = not self._show_preview
+        elif key == "F4":
+            self._toggle_chat()
+        elif key == "F5":
+            self._toggle_chat_settings()
+        self.application.invalidate()
 
     def run(self) -> None:
         self.application.run()
 
     def close(self) -> None:
         self._chat_spinner_active = False
+        if self._progress_clear_handle is not None:
+            self._progress_clear_handle.cancel()
+            self._progress_clear_handle = None
         self._controller.close()
         self._chat_controller.close()
         if self.application.future is not None:
@@ -758,7 +845,7 @@ class NativeTui:
         query = self.query.text.strip()
         if not query:
             self._controller.clear(); self._rows = []; self._selected_index = 0; self.preview_control.fragments = []
-            self._reset_progress(); self.status.text = "F1 help · F2 filters · F3 preview · F4 chat · Ctrl-R sort · Enter copy"; self.application.invalidate(); return
+            self._hide_progress(); self.status.text = "F1 help · F2 filters · F3 preview · F4 chat · Ctrl-R sort · Enter copy"; self.application.invalidate(); return
         try:
             controls = self._read_controls(); controls.validate()
         except ValidationError as error:
@@ -782,7 +869,7 @@ class NativeTui:
 
     def _receive_result(self, result: dict) -> None:
         self._rows = self._result_rows(result); self._selected_index = 0
-        self.status.text = f"{len(self._rows)} result{'s' if len(self._rows) != 1 else ''}"; self._render_selection(); self.application.invalidate()
+        self.status.text = f"{len(self._rows)} result{'s' if len(self._rows) != 1 else ''}"; self._render_selection(); self._schedule_completed_progress_clear(); self.application.invalidate()
 
     def _receive_error(self, error: Exception) -> None:
         self.status.text = f"Search error: {error}"; self.application.invalidate()
