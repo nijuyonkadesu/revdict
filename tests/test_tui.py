@@ -1,5 +1,6 @@
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 from prompt_toolkit.application.current import create_app_session
@@ -8,6 +9,7 @@ from prompt_toolkit.input.defaults import create_pipe_input
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from prompt_toolkit.output import DummyOutput
+from prompt_toolkit.output.color_depth import ColorDepth
 
 from revdict import tui
 from revdict.tui import (
@@ -229,13 +231,42 @@ def test_candidate_preview_includes_all_available_search_details():
 def test_stress_preview_parses_ansi_instead_of_rendering_escape_characters():
     """Regression for the literal ^[[38;5… text shown by the old TextArea."""
     fragments = candidate_preview_fragments(
-        {"headword": "console", "pos": "noun", "definition": "comfort", "examples": [], "synonyms": [], "stress": "\x1b[1;33mCON\x1b[0msole", "label": "joy", "polarity": "positive", "relevance": 90}
+        {"headword": "console", "pos": "noun", "definition": "comfort", "examples": [], "synonyms": [], "stress": "\x1b[1;33mCON\x1b[0msole", "label": "joy", "polarity": "positive", "relevance": 90},
+        no_color=False,
     )
 
     visible_text = "".join(text for _, text, *_ in fragments)
-    assert any("ansiyellow" in style and "bold" in style for style, *_ in fragments)
+    assert "".join(text for style, text, *_ in fragments if style == "class:stress") == "CON"
     assert "\x1b" not in visible_text
     assert "CON" in visible_text
+
+
+def test_terminal_theme_uses_terminal_ansi_roles_and_gates_truecolor():
+    theme = tui.TerminalTheme.from_environment({"COLORTERM": "truecolor", "COLORFGBG": "15;0"})
+
+    assert theme.color_depth is ColorDepth.DEPTH_24_BIT
+    assert theme.colorfgbg == "15;0"
+    assert theme.styles["result.headword"] == "ansicyan bold"
+    assert theme.styles["result.pos"] == "ansiblue dim"
+    assert theme.styles["result.sentiment.positive"] == "ansigreen"
+    assert theme.styles["result.sentiment.negative"] == "ansired"
+    assert theme.styles["result.confidence"] == "ansimagenta"
+    assert theme.styles["result.selected"] == "reverse dim"
+
+    disabled = tui.TerminalTheme.from_environment({"COLORTERM": "24bit"}, truecolor_requested=False)
+    assert disabled.color_depth is ColorDepth.DEPTH_8_BIT
+
+
+def test_no_color_removes_ui_colours_and_stress_falls_back_to_bold():
+    theme = tui.TerminalTheme.from_environment({"NO_COLOR": "1", "COLORTERM": "truecolor"}, truecolor_requested=True)
+    fragments = candidate_preview_fragments(
+        {"headword": "console", "pos": "noun", "definition": "comfort", "examples": [], "synonyms": [], "stress": "\x1b[1;33mCON\x1b[0msole", "label": "joy", "polarity": "positive", "relevance": 90},
+        no_color=True,
+    )
+
+    assert theme.color_depth is ColorDepth.DEPTH_1_BIT
+    assert all("ansi" not in style and "#" not in style for style in theme.styles.values())
+    assert "".join(text for style, text, *_ in fragments if style == "class:stress.no_color") == "CON"
 
 
 def test_preview_wrapper_moves_a_whole_word_to_the_next_line():
@@ -246,6 +277,21 @@ def test_preview_wrapper_moves_a_whole_word_to_the_next_line():
         "woven cotton",
         "fabric",
     ]
+
+
+def test_proportional_scrollbar_uses_a_themeable_thumb_without_arrow_chrome():
+    margin = tui.ProportionalScrollbarMargin()
+    fragments = margin.create_margin(
+        SimpleNamespace(content_height=100, window_height=10, displayed_lines=range(10), vertical_scroll=45),
+        width=1,
+        height=10,
+    )
+
+    glyphs = "".join(text for _style, text, *_ in fragments)
+    assert glyphs.count("█") == 1
+    assert glyphs.count("░") == 9
+    assert "^" not in glyphs and "v" not in glyphs
+    assert any(style == "class:scrollbar.thumb" and text == "█" for style, text, *_ in fragments)
 
 
 def test_result_renderer_wraps_before_a_definition_word_and_marks_selection():
@@ -355,6 +401,19 @@ def test_bottom_function_buttons_invoke_the_same_actions_as_f_keys():
         ui.close()
 
 
+def test_tui_uses_hairline_sections_instead_of_box_frames():
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    try:
+        assert all(
+            isinstance(section, tui.HairlineSection)
+            for section in (ui.query_section, ui.results_section, ui.preview_section, ui.controls_section)
+        )
+        assert ui.results_section.title == "Results"
+        assert ui.preview_section.title == "Preview"
+    finally:
+        ui.close()
+
+
 def test_idle_status_is_hidden_and_function_buttons_are_a_single_compact_row():
     """Catches the footer duplicating shortcuts or consuming a second row."""
     ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
@@ -444,6 +503,18 @@ def test_chat_settings_are_editable_and_close_back_to_the_main_tui(monkeypatch):
         assert ui._show_chat_settings is False
         assert ui._show_chat is False
         assert ui.application.layout.current_window == ui.query.window
+    finally:
+        ui.close()
+
+
+def test_chat_header_reuses_the_semantic_headword_and_pos_styles():
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    ui._rows = [{"headword": "tailor", "pos": "noun", "definition": "a person who makes and alters garments", "stress": None, "synonyms": [], "examples": [], "label": "neutral", "polarity": "neutral", "relevance": 100}]
+    try:
+        ui._render_selection()
+
+        assert ("class:result.headword", "tailor") in ui.chat_header.text
+        assert ("class:result.pos", " (noun)") in ui.chat_header.text
     finally:
         ui.close()
 

@@ -63,18 +63,24 @@ revdict --fzf
 
 Bare `revdict` opens the native terminal UI. Type ordinary reverse-dictionary
 queries or any form from the [query syntax](#query-syntax) table. It shows up
-to 50 results, with the list, filters, preview, and an always-visible one-line
-search progress status. It shows the completed percentage, current phase, phase
+to 50 results, with the list, filters, preview, and a one-line live search
+progress status that disappears when idle. It shows the completed percentage, current phase, phase
 number, and live details such as the model or index currently loading. `F2` opens every supported filter:
 Sort and Category are arrow-key/mouse radio lists, while phonetic filters are
 validated text fields. `F1` is generated from those control definitions and
 the keybinding registry, so it always reflects the UI.
 
-The UI intentionally uses terminal-default colours and terminal attributes
-(bold and reverse-video selection), so it follows your terminal theme. Stress
-marks retain their own syllable palette. Results and previews have usable
-scrollbars: mouse-wheel scrolling works in either pane, and words wrap only
-at word boundaries.
+The UI uses your terminal's ANSI palette rather than a bundled theme: headwords,
+parts of speech, sentiment, confidence, section rules, and the focused footer
+action receive semantic ANSI roles while all other text inherits the terminal
+foreground/background. It automatically uses 24-bit output only when
+`COLORTERM` advertises `truecolor` or `24bit`; `revdict --truecolor` makes the
+same explicit request but never overrides a terminal that does not advertise
+support. `NO_COLOR` disables every colour, including stress, while preserving
+readability attributes. Stress marks otherwise retain a fixed gold accent that
+does not depend on a terminal theme's yellow slot. Results and previews have
+proportional, arrow-free scrollbars: mouse-wheel scrolling works in either pane,
+and words wrap only at word boundaries.
 
 | Key | Action |
 |---|---|

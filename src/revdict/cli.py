@@ -131,6 +131,11 @@ def _query_parser() -> argparse.ArgumentParser:
         help="Print a plain table instead of launching the fzf picker.",
     )
     parser.add_argument(
+        "--truecolor",
+        action="store_true",
+        help="Use 24-bit rendering in the native TUI when COLORTERM advertises truecolor or 24bit.",
+    )
+    parser.add_argument(
         "--sort",
         choices=list(sort.SORT_MODES),
         default=None,
@@ -543,12 +548,15 @@ def main(argv: list[str] | None = None) -> int:
             picker.run_live_session()
             return 0
 
-        if not argv:
+        if not argv or argv == ["--truecolor"]:
             if not _index_exists():
                 _print_no_index_error()
                 return 1
             if sys.stdout.isatty():
-                tui.run()
+                if argv == ["--truecolor"]:
+                    tui.run(truecolor=True)
+                else:
+                    tui.run()
                 return 0
             query = console.input("[bold]> [/bold]")
             return _run_query(query, top_n=30, interactive=False)

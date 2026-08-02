@@ -4,21 +4,24 @@ from __future__ import annotations
 
 import asyncio
 from io import StringIO
+import os
 import re
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, fields
 from typing import Any
 
 from prompt_toolkit.formatted_text import ANSI, to_formatted_text
 from prompt_toolkit.application.current import get_app
-from prompt_toolkit.layout import Window
+from prompt_toolkit.layout import HSplit, VSplit, Window
 from prompt_toolkit.layout.controls import UIContent, UIControl
+from prompt_toolkit.layout.margins import ScrollbarMargin
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from prompt_toolkit.data_structures import Point
+from prompt_toolkit.output.color_depth import ColorDepth
 from prompt_toolkit.utils import get_cwidth
-from prompt_toolkit.widgets import RadioList
+from prompt_toolkit.widgets import Label, RadioList
 from rich.console import Console
 from rich.markdown import Markdown
 
@@ -34,6 +37,100 @@ ARPABET_VOWELS = frozenset(
 LIVE_TUI_TOP_N = 50
 COMPACT_PANE_MAX_COLUMNS = 99
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+@dataclass(frozen=True)
+class TerminalTheme:
+    """Semantic styles expressed through the user's terminal ANSI palette."""
+
+    no_color: bool
+    truecolor: bool
+    colorfgbg: str | None
+
+    @classmethod
+    def from_environment(
+        cls,
+        environment: Mapping[str, str] | None = None,
+        *,
+        truecolor_requested: bool | None = None,
+    ) -> TerminalTheme:
+        environment = os.environ if environment is None else environment
+        no_color = "NO_COLOR" in environment
+        truecolor = (
+            not no_color
+            and truecolor_requested is not False
+            and environment.get("COLORTERM", "").casefold() in {"truecolor", "24bit"}
+        )
+        return cls(no_color, truecolor, environment.get("COLORFGBG"))
+
+    @property
+    def color_depth(self) -> ColorDepth:
+        if self.no_color:
+            return ColorDepth.DEPTH_1_BIT
+        return ColorDepth.DEPTH_24_BIT if self.truecolor else ColorDepth.DEPTH_8_BIT
+
+    @property
+    def styles(self) -> dict[str, str]:
+        if self.no_color:
+            return {
+                "query": "bold", "muted": "dim", "border": "", "section.title": "bold",
+                "result.headword": "bold", "result.pos": "dim", "result.selected": "reverse dim",
+                "result.sentiment.positive": "", "result.sentiment.negative": "", "result.confidence": "",
+                "stress": "bold", "stress.no_color": "bold",
+                "scrollbar.thumb": "", "scrollbar.track": "dim",
+                "button": "dim", "button.focused": "bold underline", "button.arrow": "", "button.text": "",
+            }
+        return {
+            "query": "bold", "muted": "dim", "border": "ansiblue", "section.title": "ansiblue bold",
+            "result.headword": "ansicyan bold", "result.pos": "ansiblue dim", "result.selected": "reverse dim",
+            "result.sentiment.positive": "ansigreen", "result.sentiment.negative": "ansired", "result.confidence": "ansimagenta",
+            "stress": "#ffcc00 bold", "stress.no_color": "bold",
+            "scrollbar.thumb": "ansiblue", "scrollbar.track": "dim",
+            "button": "dim", "button.focused": "ansimagenta bold", "button.arrow": "", "button.text": "",
+        }
+
+
+class ProportionalScrollbarMargin(ScrollbarMargin):
+    """A compact, readable scrollbar with no arrow-button chrome."""
+
+    def __init__(self) -> None:
+        super().__init__(display_arrows=False)
+
+    def create_margin(self, window_render_info, width: int, height: int):
+        content_height = window_render_info.content_height
+        track_height = min(height, window_render_info.window_height)
+        if content_height <= 0 or track_height <= 0:
+            return []
+        visible = len(window_render_info.displayed_lines)
+        thumb_height = min(track_height, max(1, round(track_height * visible / content_height)))
+        scrollable = max(1, content_height - window_render_info.window_height)
+        top = round((track_height - thumb_height) * window_render_info.vertical_scroll / scrollable)
+        fragments = []
+        for row in range(track_height):
+            is_thumb = top <= row < top + thumb_height
+            fragments.append(("class:scrollbar.thumb" if is_thumb else "class:scrollbar.track", "█" if is_thumb else "░"))
+            if row + 1 < track_height:
+                fragments.append(("", "\n"))
+        return fragments
+
+
+class HairlineSection:
+    """A titled section with one rule, replacing heavyweight box chrome."""
+
+    def __init__(self, body, title: str, *, width=None, height=None) -> None:
+        self.title = title
+        title_rule = VSplit(
+            [
+                Window(width=1, height=1, char="─", style="class:border"),
+                Label(f" {title} ", style="class:section.title", dont_extend_width=True),
+                Window(height=1, char="─", style="class:border"),
+            ],
+            height=1,
+        )
+        self.container = HSplit([title_rule, body], padding=0, width=width, height=height)
+
+    def __pt_container__(self):
+        return self.container
 
 
 class ValidationError(ValueError):
@@ -180,11 +277,46 @@ def format_candidate_preview(candidate: dict) -> str:
     return "\n".join(lines)
 
 
-def candidate_preview_fragments(candidate: dict):
-    text = format_candidate_preview({**candidate, "stress": None})
-    fragments = [("", text)]
+def _stress_fragments(value: str, *, no_color: bool) -> list[tuple[str, str]]:
+    """Keep stress attributes while pinning the stress-marker hue itself."""
+    fragments: list[tuple[str, str]] = []
+    for style, text, *_ in to_formatted_text(ANSI(value.rstrip())):
+        attributes = " ".join(attribute for attribute in ("bold", "italic", "underline", "dim") if attribute in style)
+        is_stress_marker = "ansiyellow" in style or "#d7d700" in style
+        if is_stress_marker:
+            mapped_style = "class:stress.no_color" if no_color else "class:stress"
+        elif "#" in style or "ansi" in style:
+            mapped_style = "class:muted"
+        else:
+            mapped_style = attributes
+        fragments.append((mapped_style, text))
+    return fragments
+
+
+def candidate_preview_fragments(candidate: dict, *, no_color: bool | None = None):
+    """Render semantic preview fields without painting over the terminal theme."""
+    no_color = "NO_COLOR" in os.environ if no_color is None else no_color
+    fragments = [
+        ("class:result.headword", candidate["headword"]),
+        ("class:result.pos", f" ({candidate['pos']})"),
+        ("", f"\n\n{candidate['definition']}"),
+    ]
+    synonyms = candidate.get("synonyms") or []
+    if synonyms:
+        fragments.append(("", "\n\nSynonyms: " + ", ".join(synonyms)))
+    polarity = candidate.get("polarity", "neutral")
+    sentiment_style = f"class:result.sentiment.{polarity}" if polarity in {"positive", "negative"} else ""
+    fragments.extend([
+        ("", "\nEmotion: "),
+        (sentiment_style, f"{candidate['label']} · {polarity}"),
+        ("", "\nMatch confidence: "),
+        ("class:result.confidence", f"{candidate['relevance']}%"),
+    ])
     if candidate.get("stress"):
-        fragments.extend([("", "\nStress: "), *to_formatted_text(ANSI(candidate["stress"].rstrip()))])
+        fragments.extend([("", "\nStress: "), *_stress_fragments(candidate["stress"], no_color=no_color)])
+    examples = candidate.get("examples") or []
+    if examples:
+        fragments.append(("", '\n\nExample: "' + examples[0] + '"'))
     return fragments
 
 
@@ -521,17 +653,16 @@ class DebouncedSearchController:
 class NativeTui:
     """A colour-neutral prompt-toolkit interface over the daemon-backed API."""
 
-    def __init__(self, search_executor: Callable[..., dict]) -> None:
+    def __init__(self, search_executor: Callable[..., dict], *, truecolor: bool | None = None) -> None:
         from prompt_toolkit.application import Application
         from prompt_toolkit.filters import Condition
         from prompt_toolkit.key_binding import KeyBindings
-        from prompt_toolkit.layout import ConditionalContainer, DynamicContainer, HSplit, Layout, VSplit
+        from prompt_toolkit.layout import ConditionalContainer, DynamicContainer, Layout
         from prompt_toolkit.layout.dimension import Dimension
-        from prompt_toolkit.layout.margins import ScrollbarMargin
-        from prompt_toolkit.output.color_depth import ColorDepth
         from prompt_toolkit.styles import Style
-        from prompt_toolkit.widgets import Button, Frame, Label, TextArea
+        from prompt_toolkit.widgets import Button, TextArea
 
+        self.theme = TerminalTheme.from_environment(truecolor_requested=truecolor)
         self._search_executor, self._show_controls, self._show_help, self._show_preview = search_executor, False, False, True
         self._show_chat = False
         self._show_chat_settings = False
@@ -573,7 +704,7 @@ class NativeTui:
         self.chat_transcript = MouseScrollableWindow(
             content=self.chat_transcript_control,
             wrap_lines=False,
-            right_margins=[ScrollbarMargin(display_arrows=True)],
+            right_margins=[ProportionalScrollbarMargin()],
             always_hide_cursor=True,
         )
         self.chat_input = TextArea(prompt="You: ", multiline=True, height=Dimension(min=1, preferred=3, max=6), wrap_lines=True)
@@ -595,9 +726,9 @@ class NativeTui:
             self._move_selection_from_mouse,
             self._select_result_from_mouse,
         )
-        self.results = Window(content=self.results_control, wrap_lines=False, right_margins=[ScrollbarMargin(display_arrows=True)], always_hide_cursor=True)
+        self.results = Window(content=self.results_control, wrap_lines=False, right_margins=[ProportionalScrollbarMargin()], always_hide_cursor=True)
         self.preview_control = WordWrappedControl()
-        self.preview = MouseScrollableWindow(content=self.preview_control, wrap_lines=False, right_margins=[ScrollbarMargin(display_arrows=True)], always_hide_cursor=True)
+        self.preview = MouseScrollableWindow(content=self.preview_control, wrap_lines=False, right_margins=[ProportionalScrollbarMargin()], always_hide_cursor=True)
         self.progress = Label(text="", dont_extend_height=True, wrap_lines=False)
         self.progress_container = ConditionalContainer(self.progress, Condition(lambda: bool(self.progress.text)))
         self.chat_progress = Label(text="", style="class:muted", dont_extend_height=True, wrap_lines=False)
@@ -616,22 +747,25 @@ class NativeTui:
         self.active_filters = Label(text="sort: relevance  category: all", style="class:muted")
         self.status = Label(text="", style="class:muted")
         self.status_container = ConditionalContainer(self.status, Condition(lambda: bool(self.status.text)))
-        controls = Frame(HSplit([self.sort_field, self.category_field, self.syllables_field, self.vowel_field, self.rhymes_field, self.sounds_field, self.meter_field], padding=0), title="Search controls — arrows choose Sort and Category")
-        wide_results_frame = Frame(self.results, title="Results", width=Dimension(weight=3))
-        wide_preview_frame = Frame(self.preview, title="Preview", width=Dimension(weight=2))
+        self.controls_section = HairlineSection(
+            HSplit([self.sort_field, self.category_field, self.syllables_field, self.vowel_field, self.rhymes_field, self.sounds_field, self.meter_field], padding=0),
+            "Search controls — arrows choose Sort and Category",
+        )
+        self.results_section = HairlineSection(self.results, "Results", width=Dimension(weight=3))
+        self.preview_section = HairlineSection(self.preview, "Preview", width=Dimension(weight=2))
         self.side_by_side_panes = VSplit(
             [
-                wide_results_frame,
-                ConditionalContainer(wide_preview_frame, Condition(lambda: self._show_preview)),
+                self.results_section,
+                ConditionalContainer(self.preview_section, Condition(lambda: self._show_preview)),
             ],
             padding=1,
             height=Dimension(weight=1),
         )
         self.stacked_panes = HSplit(
             [
-                Frame(self.results, title="Results", height=Dimension(weight=3)),
+                HairlineSection(self.results, "Results", height=Dimension(weight=3)),
                 ConditionalContainer(
-                    Frame(self.preview, title="Preview", height=Dimension(weight=2)),
+                    HairlineSection(self.preview, "Preview", height=Dimension(weight=2)),
                     Condition(lambda: self._show_preview),
                 ),
             ],
@@ -643,9 +777,9 @@ class NativeTui:
             self.chat_known_models,
             Condition(lambda: self._chat_settings.active_provider == "gemini"),
         )
-        self.chat_settings_frame = Frame(
+        self.chat_settings_frame = HairlineSection(
             HSplit([self.chat_provider_field, self.chat_model_field, self.chat_endpoint_field, self.chat_api_key_field, self.chat_known_models_container], padding=0),
-            title="Chat provider settings — ↑/↓ provider · Tab fields · F5 saves locally",
+            "Chat provider settings — ↑/↓ provider · Tab fields · F5 saves locally",
         )
         chat_conversation = ConditionalContainer(
             HSplit([
@@ -656,20 +790,22 @@ class NativeTui:
             ], padding=1),
             Condition(lambda: not self._show_chat_settings),
         )
-        chat_panel = Frame(
+        self.chat_section = HairlineSection(
             HSplit([
                 chat_conversation,
                 ConditionalContainer(self.chat_settings_frame, Condition(lambda: self._show_chat_settings)),
             ], padding=1),
-            title="Writing assistant",
+            "Writing assistant",
             height=Dimension(weight=1),
         )
+        self.query_section = HairlineSection(self.query, "revdict")
+        self.help_section = HairlineSection(Label(text=build_help_text()), "Help")
         self.root = HSplit([
-            Frame(self.query, title="revdict"), self.active_filters,
+            self.query_section, self.active_filters,
             ConditionalContainer(panes, Condition(lambda: not (self._show_chat or self._show_chat_settings))),
-            ConditionalContainer(chat_panel, Condition(lambda: self._show_chat or self._show_chat_settings)),
-            ConditionalContainer(controls, Condition(lambda: self._show_controls)),
-            ConditionalContainer(Frame(Label(text=build_help_text()), title="Help"), Condition(lambda: self._show_help)),
+            ConditionalContainer(self.chat_section, Condition(lambda: self._show_chat or self._show_chat_settings)),
+            ConditionalContainer(self.controls_section, Condition(lambda: self._show_controls)),
+            ConditionalContainer(self.help_section, Condition(lambda: self._show_help)),
             self.status_container,
             self.progress_container,
             ConditionalContainer(self.chat_progress, Condition(lambda: self._chat_spinner_active)),
@@ -711,22 +847,10 @@ class NativeTui:
         self.application = Application(
             layout=Layout(self.root, focused_element=self.query),
             key_bindings=bindings,
-            style=Style.from_dict(
-                {
-                    "query": "bold",
-                    "muted": "dim",
-                    "result.headword": "bold",
-                    "result.pos": "dim",
-                    "result.selected": "reverse",
-                    "button": "reverse",
-                    "button.focused": "reverse bold",
-                    "button.arrow": "reverse",
-                    "button.text": "reverse",
-                }
-            ),
+            style=Style.from_dict(self.theme.styles),
             full_screen=True,
             mouse_support=True,
-            color_depth=ColorDepth.DEPTH_8_BIT,
+            color_depth=self.theme.color_depth,
         )
         # A bare Escape is otherwise delayed for 500ms while prompt-toolkit
         # waits to see whether it begins an Alt/terminal escape sequence.
@@ -895,7 +1019,7 @@ class NativeTui:
 
     def _render_selection(self) -> None:
         self.preview_control.reset_scroll()
-        self.preview_control.fragments = candidate_preview_fragments(self._rows[self._selected_index]) if self._rows else []
+        self.preview_control.fragments = candidate_preview_fragments(self._rows[self._selected_index], no_color=self.theme.no_color) if self._rows else []
         if self._show_chat:
             context = self._current_chat_context()
             if context is not None:
@@ -943,8 +1067,16 @@ class NativeTui:
     def _update_chat_header(self) -> None:
         provider = self._active_chat_provider()
         context = self._current_chat_context()
-        subject = f" · Context: {context.headword} ({context.part_of_speech})" if context else " · Select a result to add lexical context"
-        self.chat_header.text = f"Provider: {provider.provider} · Model: {provider.model}{subject}"
+        header = [("class:muted", f"Provider: {provider.provider} · Model: {provider.model}")]
+        if context is None:
+            header.append(("class:muted", " · Select a result to add lexical context"))
+        else:
+            header.extend([
+                ("class:muted", " · Context: "),
+                ("class:result.headword", context.headword),
+                ("class:result.pos", f" ({context.part_of_speech})"),
+            ])
+        self.chat_header.text = header
 
     def _update_chat_known_models(self) -> None:
         if self._chat_settings.active_provider != "gemini":
@@ -1176,6 +1308,8 @@ class NativeTui:
             headword = self._rows[self._selected_index]["headword"]; _run_copy_selection(headword); self.status.text = f"Copied: {headword}"
 
 
-def run() -> None:
+def run(*, truecolor: bool | None = None) -> None:
     from revdict.cli import _get_search_result_with_progress
-    NativeTui(lambda query, on_progress=lambda _event: None, **kwargs: _get_search_result_with_progress(query, LIVE_TUI_TOP_N, on_progress, **kwargs)).run()
+    execute = lambda query, on_progress=lambda _event: None, **kwargs: _get_search_result_with_progress(query, LIVE_TUI_TOP_N, on_progress, **kwargs)
+    ui = NativeTui(execute) if truecolor is None else NativeTui(execute, truecolor=truecolor)
+    ui.run()

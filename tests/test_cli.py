@@ -470,6 +470,16 @@ def test_main_with_no_args_checks_isatty_before_going_interactive(monkeypatch):
     assert calls["interactive"] is False
 
 
+def test_truecolor_flag_starts_the_native_tui_with_truecolor_enabled(monkeypatch):
+    monkeypatch.setattr(cli, "_index_exists", lambda: True)
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True)
+    calls = []
+    monkeypatch.setattr(cli.tui, "run", lambda **kwargs: calls.append(kwargs))
+
+    assert cli.main(["--truecolor"]) == 0
+    assert calls == [{"truecolor": True}]
+
+
 def test_main_fzf_flag_starts_the_legacy_live_session(monkeypatch):
     """Catches removing the established fzf workflow without an escape hatch."""
     monkeypatch.setattr(cli, "_index_exists", lambda: True)
