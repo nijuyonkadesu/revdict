@@ -345,13 +345,10 @@ def test_completed_search_progress_expires_without_clearing_a_new_search():
 def test_bottom_function_buttons_invoke_the_same_actions_as_f_keys():
     ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
     try:
-        content = ui.function_key_bar_control.create_content(width=80, height=1)
-        labels = "".join("".join(text for _style, text, *_ in content.get_line(line)) for line in range(content.line_count))
-        handled = ui.function_key_bar_control.mouse_handler(
-            MouseEvent(position=Point(x=1, y=0), event_type=MouseEventType.MOUSE_UP, button=MouseButton.LEFT, modifiers=frozenset())
-        )
+        labels = " ".join(button.text for button in ui.function_key_buttons)
+        click = ui.function_key_buttons[0].control.text()[0][2]
+        click(MouseEvent(position=Point(x=0, y=0), event_type=MouseEventType.MOUSE_UP, button=MouseButton.LEFT, modifiers=frozenset()))
 
-        assert handled is None
         assert ui._show_help is True
         assert all(key in labels for key in ("F1", "F2", "F3", "F4", "F5"))
     finally:

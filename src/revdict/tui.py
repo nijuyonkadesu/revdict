@@ -134,7 +134,7 @@ class ChatSessionRequestError(RuntimeError):
 ACTIONS = (
     UiAction("F1", "Toggle generated help", "Help"), UiAction("F2", "Open or close filters", "Filters"),
     UiAction("F3", "Toggle preview", "Preview"), UiAction("F4", "Toggle writing chat", "Chat"),
-    UiAction("F5", "Open or save chat provider settings", "Settings"),
+    UiAction("F5", "Open or save chat provider settings", "Setup"),
     UiAction("Enter (chat)", "Send chat message"), UiAction("Ctrl-R", "Cycle sort order"),
     UiAction("Ctrl-N / Ctrl-P", "Select next / previous result"), UiAction("Enter (query)", "Copy selected headword"),
     UiAction("Esc", "Clear query, then quit"), UiAction("Ctrl-C", "Quit"),
@@ -432,48 +432,6 @@ class MouseScrollableWindow(Window):
         return None
 
 
-class FunctionKeyBarControl(UIControl):
-    """Mouse-selectable equivalents of the TUI's supported function keys."""
-
-    def __init__(self, actions: tuple[UiAction, ...], on_press: Callable[[str], None]) -> None:
-        self._actions = tuple(action for action in actions if action.key.startswith("F"))
-        self._on_press = on_press
-        self._regions: list[tuple[int, int, int, str]] = []
-
-    def _layout(self, width: int) -> list[list[tuple[str, str]]]:
-        width = max(1, width)
-        self._regions = []
-        lines: list[list[tuple[str, str]]] = [[]]
-        row = used = 0
-        for action in self._actions:
-            text = f" {action.key} {action.button_label or action.description} "
-            text_width = get_cwidth(text)
-            if used and used + text_width > width:
-                lines.append([])
-                row += 1
-                used = 0
-            lines[row].append(("class:function-key", text))
-            self._regions.append((row, used, used + text_width, action.key))
-            used += text_width
-        return lines
-
-    def create_content(self, width: int, height: int | None) -> UIContent:
-        lines = self._layout(width)
-        return UIContent(get_line=lambda index: lines[index], line_count=len(lines), show_cursor=False)
-
-    def preferred_height(self, width: int, max_available_height: int, wrap_lines: bool, get_line_prefix) -> int | None:
-        return min(len(self._layout(width)), max_available_height)
-
-    def mouse_handler(self, mouse_event: MouseEvent):
-        if mouse_event.event_type not in {MouseEventType.MOUSE_DOWN, MouseEventType.MOUSE_UP} or mouse_event.button != MouseButton.LEFT:
-            return NotImplemented
-        for row, start, end, key in self._regions:
-            if mouse_event.position.y == row and start <= mouse_event.position.x < end:
-                self._on_press(key)
-                return None
-        return NotImplemented
-
-
 class TrackingRadioList(RadioList):
     def __init__(self, *args, on_change: Callable[[], None], **kwargs) -> None:
         self._on_change = on_change
@@ -571,7 +529,7 @@ class NativeTui:
         from prompt_toolkit.layout.margins import ScrollbarMargin
         from prompt_toolkit.output.color_depth import ColorDepth
         from prompt_toolkit.styles import Style
-        from prompt_toolkit.widgets import Frame, Label, TextArea
+        from prompt_toolkit.widgets import Button, Frame, Label, TextArea
 
         self._search_executor, self._show_controls, self._show_help, self._show_preview = search_executor, False, False, True
         self._show_chat = False
@@ -641,8 +599,19 @@ class NativeTui:
         self.preview = MouseScrollableWindow(content=self.preview_control, wrap_lines=False, right_margins=[ScrollbarMargin(display_arrows=True)], always_hide_cursor=True)
         self.progress = Label(text="", dont_extend_height=True, wrap_lines=False)
         self.chat_progress = Label(text="", style="class:muted", dont_extend_height=True, wrap_lines=False)
-        self.function_key_bar_control = FunctionKeyBarControl(ACTIONS, self._invoke_function_key)
-        self.function_key_bar = Window(content=self.function_key_bar_control, wrap_lines=False, always_hide_cursor=True)
+        self.function_key_buttons = tuple(
+            Button(
+                f"{action.key} {action.button_label}",
+                handler=lambda key=action.key: self._invoke_function_key(key),
+                width=12,
+            )
+            for action in ACTIONS
+            if action.key.startswith("F")
+        )
+        self.function_key_bar = HSplit([
+            VSplit(self.function_key_buttons[:3], padding=1, height=1),
+            VSplit(self.function_key_buttons[3:], padding=1, height=1),
+        ], padding=0)
         self.active_filters = Label(text="sort: relevance  category: all", style="class:muted")
         self.status = Label(text="F1 help · F2 filters · F3 preview · F4 chat · Ctrl-R sort · Enter copy", style="class:muted")
         controls = Frame(HSplit([self.sort_field, self.category_field, self.syllables_field, self.vowel_field, self.rhymes_field, self.sounds_field, self.meter_field], padding=0), title="Search controls — arrows choose Sort and Category")
@@ -735,7 +704,10 @@ class NativeTui:
                     "result.headword": "bold",
                     "result.pos": "dim",
                     "result.selected": "reverse",
-                    "function-key": "reverse",
+                    "button": "reverse",
+                    "button.focused": "reverse bold",
+                    "button.arrow": "reverse",
+                    "button.text": "reverse",
                 }
             ),
             full_screen=True,
