@@ -236,9 +236,18 @@ def test_stress_preview_parses_ansi_instead_of_rendering_escape_characters():
     )
 
     visible_text = "".join(text for _, text, *_ in fragments)
-    assert "".join(text for style, text, *_ in fragments if style == "class:stress") == "CON"
+    assert "".join(text for style, text, *_ in fragments if "class:stress" in style) == "CON"
     assert "\x1b" not in visible_text
     assert "CON" in visible_text
+
+
+def test_stress_preview_preserves_reverse_video_highlighter_spans():
+    fragments = candidate_preview_fragments(
+        {"headword": "pearlstone", "pos": "noun", "definition": "a pearl-like stone", "examples": [], "synonyms": [], "stress": "pearl\x1b[7mstone\x1b[0m", "label": "neutral", "polarity": "neutral", "relevance": 90},
+        no_color=False,
+    )
+
+    assert "".join(text for style, text, *_ in fragments if "reverse" in style) == "stone"
 
 
 def test_terminal_theme_uses_terminal_ansi_roles_and_gates_truecolor():

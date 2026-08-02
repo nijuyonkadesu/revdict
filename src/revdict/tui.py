@@ -313,14 +313,17 @@ def _stress_fragments(value: str, *, no_color: bool) -> list[tuple[str, str]]:
     """Keep stress attributes while pinning the stress-marker hue itself."""
     fragments: list[tuple[str, str]] = []
     for style, text, *_ in to_formatted_text(ANSI(value.rstrip())):
-        attributes = " ".join(attribute for attribute in ("bold", "italic", "underline", "dim") if attribute in style)
+        attributes = " ".join(attribute for attribute in ("bold", "italic", "underline", "reverse", "dim") if attribute in style)
         is_stress_marker = "ansiyellow" in style or "#d7d700" in style
         if is_stress_marker:
             mapped_style = "class:stress.no_color" if no_color else "class:stress"
+            attributes = " ".join(attribute for attribute in attributes.split() if attribute != "bold")
         elif "#" in style or "ansi" in style:
             mapped_style = "class:muted"
         else:
             mapped_style = attributes
+        if mapped_style and attributes and mapped_style != attributes:
+            mapped_style = f"{mapped_style} {attributes}"
         fragments.append((mapped_style, text))
     return fragments
 
