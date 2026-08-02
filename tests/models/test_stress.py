@@ -49,6 +49,36 @@ def test_mark_calls_engine_and_render_and_returns_a_captured_ansi_string(monkeyp
     assert "HAPpy" in result  # the captured ANSI string contains the plain text
 
 
+def test_mark_uses_terminal_renderer_with_a_nuclear_tier(monkeypatch):
+    from rich.text import Text
+
+    calls = {}
+
+    class WordResult:
+        tier = None
+
+    class FakeEngine:
+        def resolve_word_by_pos(self, word, pos):
+            calls["word"] = word
+            calls["pos"] = pos
+            return WordResult()
+
+    class FakeRender:
+        def render_terminal(self, raw_tokens, results, console):
+            calls["tokens"] = raw_tokens
+            calls["tier"] = results[0].tier
+            console.print(Text("PEARL", style="bold reverse yellow"), end="")
+
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setattr(stress, "_engine", FakeEngine())
+    monkeypatch.setattr(stress, "_render", FakeRender())
+
+    result = stress.mark("pearlstone", "noun")
+
+    assert calls == {"word": "pearlstone", "pos": "noun", "tokens": [(True, "pearlstone")], "tier": "nuclear"}
+    assert "\x1b[7;33mPEARL" in result or "\x1b[1;7;33mPEARL" in result
+
+
 def test_mark_honors_no_color_while_preserving_stress_attributes(monkeypatch):
     """NO_COLOR removes pigment but preserves non-colour stress semantics."""
     from rich.text import Text

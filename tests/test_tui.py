@@ -250,6 +250,16 @@ def test_stress_preview_preserves_reverse_video_highlighter_spans():
     assert "".join(text for style, text, *_ in fragments if "reverse" in style) == "stone"
 
 
+def test_stress_preview_renders_a_nuclear_syllable_with_reverse_video():
+    fragments = candidate_preview_fragments(
+        {"headword": "pearlstone", "pos": "noun", "definition": "a pearl-like stone", "examples": [], "synonyms": [], "stress": "\x1b[1;7mPEARL\x1b[0m\x1b[4mstone\x1b[0m", "label": "neutral", "polarity": "neutral", "relevance": 90},
+        no_color=True,
+    )
+
+    assert "".join(text for style, text, *_ in fragments if "reverse" in style) == "PEARL"
+    assert "".join(text for style, text, *_ in fragments if "underline" in style) == "stone"
+
+
 def test_stress_preview_preserves_reverse_video_when_no_color_is_set():
     fragments = candidate_preview_fragments(
         {"headword": "nuclear", "pos": "noun", "definition": "atomic", "examples": [], "synonyms": [], "stress": "\x1b[7mnuclear\x1b[0m", "label": "neutral", "polarity": "neutral", "relevance": 90},

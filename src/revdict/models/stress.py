@@ -40,14 +40,14 @@ def is_available() -> bool:
 
 
 def mark(word: str, pos: str) -> str | None:
-    """Returns a captured ANSI-coded string of the word's stress-highlighted
-    syllable breakdown, or None if stressmark isn't installed or fails for
-    this specific word (never raises). Returns a plain string rather than a
-    Rich Text object so this stays JSON-safe for the daemon's socket
-    protocol -- reconstruct a Text object with
-    `rich.text.Text.from_ansi(result)` if you need one.  `NO_COLOR` returns
-    plain text by convention; otherwise the terminal capability selects 256
-    or truecolor ANSI output."""
+    """Return one word as the nuclear unit of its own intonation phrase.
+
+    The terminal stressmark renderer provides the authoritative nuclear,
+    prominent, and secondary semantics. A single dictionary headword has no
+    sentence context, so its primary stress is deliberately the nuclear span.
+    The result remains JSON-safe ANSI for the daemon protocol; NO_COLOR
+    removes pigment while preserving non-colour attributes.
+    """
     if not is_available():
         return None
     try:
@@ -56,7 +56,6 @@ def mark(word: str, pos: str) -> str | None:
         from rich.console import Console
 
         result = _engine.resolve_word_by_pos(word, pos)
-        text = _render.render_word(result)
         buffer = StringIO()
         no_color = "NO_COLOR" in os.environ
         truecolor = os.environ.get("COLORTERM", "").casefold() in {"truecolor", "24bit"}
@@ -67,7 +66,12 @@ def mark(word: str, pos: str) -> str | None:
             width=200,
             color_system="truecolor" if truecolor else "256",
         )
-        console.print(text, end="")
+        terminal_renderer = getattr(_render, "render_terminal", None)
+        if terminal_renderer is None:
+            console.print(_render.render_word(result), end="")
+        else:
+            result.tier = "nuclear"
+            terminal_renderer([(True, word)], [result], console=console)
         rendered = buffer.getvalue()
         return _strip_ansi_colours(rendered) if no_color else rendered
     except Exception:
