@@ -189,7 +189,11 @@ def test_search_candidates_and_exact_match_senses_include_a_stress_key(monkeypat
     default; the key is always present."""
     import revdict.search as search_mod
 
-    monkeypatch.setattr(search_mod.stress, "mark", lambda word, pos: f"STRESS[{word}/{pos}]")
+    monkeypatch.setattr(
+        search_mod.stress,
+        "mark",
+        lambda word, pos, *, preserve_color=False: f"STRESS[{word}/{pos}]",
+    )
 
     exact_match_raw = {
         "headword": "happy",

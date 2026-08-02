@@ -1,5 +1,6 @@
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 from prompt_toolkit.application.current import create_app_session
@@ -8,6 +9,8 @@ from prompt_toolkit.input.defaults import create_pipe_input
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from prompt_toolkit.output import DummyOutput
+from prompt_toolkit.output.color_depth import ColorDepth
+from prompt_toolkit.styles import Style
 
 from revdict import tui
 from revdict.tui import (
@@ -20,6 +23,7 @@ from revdict.tui import (
     build_help_text,
     candidate_preview_fragments,
     format_progress_line,
+    markdown_fragments,
     word_wrap_fragments,
     format_candidate_preview,
 )
@@ -229,13 +233,100 @@ def test_candidate_preview_includes_all_available_search_details():
 def test_stress_preview_parses_ansi_instead_of_rendering_escape_characters():
     """Regression for the literal ^[[38;5… text shown by the old TextArea."""
     fragments = candidate_preview_fragments(
-        {"headword": "console", "pos": "noun", "definition": "comfort", "examples": [], "synonyms": [], "stress": "\x1b[1;33mCON\x1b[0msole", "label": "joy", "polarity": "positive", "relevance": 90}
+        {"headword": "console", "pos": "noun", "definition": "comfort", "examples": [], "synonyms": [], "stress": "\x1b[1;33mCON\x1b[0msole", "label": "joy", "polarity": "positive", "relevance": 90},
+        no_color=False,
     )
 
     visible_text = "".join(text for _, text, *_ in fragments)
-    assert any("ansiyellow" in style and "bold" in style for style, *_ in fragments)
+    assert "".join(text for style, text, *_ in fragments if "class:stress" in style) == "CON"
     assert "\x1b" not in visible_text
     assert "CON" in visible_text
+
+
+def test_stress_syllables_use_dotted_classes_to_keep_the_pinned_hue():
+    fragments = tui._stress_fragments(
+        "\x1b[1;7;33mPEARL\x1b[0m\x1b[1;33mPROM\x1b[0m"
+        "\x1b[4;38;5;184mstone\x1b[0m\x1b[2;38;5;184mreduced\x1b[0m",
+        no_color=False,
+    )
+    theme = tui.TerminalTheme.from_environment({"COLORTERM": "truecolor"})
+
+    assert fragments == [
+        ("class:stress.nuclear", "PEARL"),
+        ("class:stress.prominent", "PROM"),
+        ("class:stress.secondary", "stone"),
+        ("class:stress.reduced", "reduced"),
+    ]
+    assert theme.styles["stress"] == "fg:#ffcc00"
+    assert theme.styles["stress.nuclear"] == "reverse"
+    assert theme.styles["stress.prominent"] == "bold"
+    assert theme.styles["stress.secondary"] == "underline"
+    assert theme.styles["stress.reduced"] == "dim"
+
+    rendered = Style.from_dict(theme.styles).get_attrs_for_style_str("class:stress.nuclear")
+    assert rendered.color == "ffcc00"
+    assert rendered.reverse is True
+
+
+def test_stress_preview_preserves_reverse_video_highlighter_spans():
+    fragments = candidate_preview_fragments(
+        {"headword": "pearlstone", "pos": "noun", "definition": "a pearl-like stone", "examples": [], "synonyms": [], "stress": "pearl\x1b[7mstone\x1b[0m", "label": "neutral", "polarity": "neutral", "relevance": 90},
+        no_color=False,
+    )
+
+    assert "".join(text for style, text, *_ in fragments if "reverse" in style) == "stone"
+
+
+def test_stress_preview_renders_a_nuclear_syllable_with_reverse_video():
+    fragments = candidate_preview_fragments(
+        {"headword": "pearlstone", "pos": "noun", "definition": "a pearl-like stone", "examples": [], "synonyms": [], "stress": "\x1b[1;7mPEARL\x1b[0m\x1b[4mstone\x1b[0m", "label": "neutral", "polarity": "neutral", "relevance": 90},
+        no_color=True,
+    )
+
+    assert "".join(text for style, text, *_ in fragments if "reverse" in style) == "PEARL"
+    assert "".join(text for style, text, *_ in fragments if "underline" in style) == "stone"
+
+
+def test_stress_preview_preserves_reverse_video_when_no_color_is_set():
+    fragments = candidate_preview_fragments(
+        {"headword": "nuclear", "pos": "noun", "definition": "atomic", "examples": [], "synonyms": [], "stress": "\x1b[7mnuclear\x1b[0m", "label": "neutral", "polarity": "neutral", "relevance": 90},
+        no_color=True,
+    )
+
+    assert "".join(text for style, text, *_ in fragments if "reverse" in style) == "nuclear"
+
+
+def test_terminal_theme_uses_terminal_ansi_roles_and_gates_truecolor():
+    theme = tui.TerminalTheme.from_environment({"COLORTERM": "truecolor", "COLORFGBG": "15;0"})
+
+    assert theme.color_depth is ColorDepth.DEPTH_24_BIT
+    assert theme.colorfgbg == "15;0"
+    assert theme.styles["result.headword"] == "ansigreen bold"
+    assert theme.styles["result.pos"] == "dim"
+    assert theme.styles["border"] == "bold"
+    assert theme.styles["section.title"] == "bold"
+    assert theme.styles["result.sentiment.positive"] == "ansigreen"
+    assert theme.styles["result.sentiment.negative"] == "ansired"
+    assert theme.styles["result.confidence"] == "ansimagenta"
+    assert theme.styles["result.selected"] == "reverse dim"
+
+    custom_accent = tui.TerminalTheme.from_environment({"REVDICT_ACCENT": "magenta"})
+    assert custom_accent.styles["result.headword"] == "ansimagenta bold"
+
+    disabled = tui.TerminalTheme.from_environment({"COLORTERM": "24bit"}, truecolor_requested=False)
+    assert disabled.color_depth is ColorDepth.DEPTH_8_BIT
+
+
+def test_no_color_removes_ui_colours_and_stress_keeps_its_prominence_attribute():
+    theme = tui.TerminalTheme.from_environment({"NO_COLOR": "1", "COLORTERM": "truecolor"}, truecolor_requested=True)
+    fragments = candidate_preview_fragments(
+        {"headword": "console", "pos": "noun", "definition": "comfort", "examples": [], "synonyms": [], "stress": "\x1b[1;33mCON\x1b[0msole", "label": "joy", "polarity": "positive", "relevance": 90},
+        no_color=True,
+    )
+
+    assert theme.color_depth is ColorDepth.DEPTH_1_BIT
+    assert all("ansi" not in style and "#" not in style for style in theme.styles.values())
+    assert "".join(text for style, text, *_ in fragments if style == "class:stress.prominent") == "CON"
 
 
 def test_preview_wrapper_moves_a_whole_word_to_the_next_line():
@@ -246,6 +337,21 @@ def test_preview_wrapper_moves_a_whole_word_to_the_next_line():
         "woven cotton",
         "fabric",
     ]
+
+
+def test_proportional_scrollbar_uses_a_themeable_thumb_without_arrow_chrome():
+    margin = tui.ProportionalScrollbarMargin()
+    fragments = margin.create_margin(
+        SimpleNamespace(content_height=100, window_height=10, displayed_lines=range(10), vertical_scroll=45),
+        width=1,
+        height=10,
+    )
+
+    glyphs = "".join(text for _style, text, *_ in fragments)
+    assert glyphs.count("█") == 1
+    assert glyphs.count("░") == 9
+    assert "^" not in glyphs and "v" not in glyphs
+    assert any(style == "class:scrollbar.thumb" and text == "█" for style, text, *_ in fragments)
 
 
 def test_result_renderer_wraps_before_a_definition_word_and_marks_selection():
@@ -260,6 +366,35 @@ def test_result_renderer_wraps_before_a_definition_word_and_marks_selection():
     assert "disappointment" in rendered_words
     assert all("class:result.selected" in style for style, _ in lines[0])
     assert any("class:result.headword" in style for style, _ in lines[0])
+
+
+def test_result_renderer_uses_fixed_columns_and_hanging_definition_indents():
+    rows = [
+        {"headword": "cat", "pos": "noun", "definition": "a small domesticated carnivorous mammal"},
+        {"headword": "extraordinarilylongword", "pos": "adjective", "definition": "longer than usual"},
+    ]
+    lines, line_rows = _wrap_result_fragments(rows, selected_index=0, width=60)
+    rendered = ["".join(text for _style, text in line) for line in lines]
+    definition_column = tui.RESULT_MARKER_WIDTH + tui.RESULT_HEADWORD_COL_WIDTH + tui.RESULT_POS_COL_WIDTH
+
+    assert rendered[0][definition_column:].startswith("a small")
+    assert rendered[1].startswith(" " * definition_column)
+    assert rendered[2][definition_column:].startswith("longer than usual")
+    assert line_rows == [0, 0, 1]
+    assert "…" in rendered[2 - 0] or "…" in "".join(rendered)
+
+
+def test_selected_result_paints_every_wrapped_physical_line_to_the_panel_width():
+    lines, _ = _wrap_result_fragments(
+        [{"headword": "consolation", "pos": "noun", "definition": "comfort during disappointment"}],
+        selected_index=0,
+        width=28,
+    )
+
+    assert len(lines) > 1
+    for line in lines:
+        assert len("".join(text for _style, text in line)) == 28
+        assert all("class:result.selected" in style for style, _text in line)
 
 
 def test_results_control_exposes_the_selected_result_as_its_cursor():
@@ -308,6 +443,10 @@ def test_repeated_result_navigation_moves_the_rendered_results_viewport():
 def test_generated_help_lists_every_filter_and_the_preview_key():
     help_text = build_help_text()
 
+    assert "## Query syntax" in help_text
+    assert "## Filters" in help_text
+    assert "## Keyboard" in help_text
+    assert "**[F3]**" in help_text
     assert "F3" in help_text
     assert "F4" in help_text
     assert "F5" in help_text
@@ -315,6 +454,14 @@ def test_generated_help_lists_every_filter_and_the_preview_key():
     assert "Sort" in help_text
     assert "Sounds like" in help_text
     assert "Idioms and slang" in help_text
+
+
+def test_generated_help_markdown_emphasizes_sections_examples_and_keys():
+    fragments = markdown_fragments(build_help_text(), width=100)
+
+    assert any("underline" in style and "Query syntax" in text for style, text, *_ in fragments)
+    assert any("bold" in style and "[F3]" in text for style, text, *_ in fragments)
+    assert "\x1b" not in "".join(text for _style, text, *_ in fragments)
 
 
 def test_progress_line_reports_percent_phase_count_and_live_detail_in_one_line():
@@ -350,7 +497,22 @@ def test_bottom_function_buttons_invoke_the_same_actions_as_f_keys():
         click(MouseEvent(position=Point(x=0, y=0), event_type=MouseEventType.MOUSE_UP, button=MouseButton.LEFT, modifiers=frozenset()))
 
         assert ui._show_help is True
-        assert all(key in labels for key in ("F1", "F2", "F3", "F4", "F5"))
+        assert all(f"[{key}]" in labels for key in ("F1", "F2", "F3", "F4", "F5"))
+        assert ui.theme.styles["button.key"] == "bold"
+        assert ui.theme.styles["button.label"] == ""
+    finally:
+        ui.close()
+
+
+def test_tui_uses_hairline_sections_instead_of_box_frames():
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    try:
+        assert all(
+            isinstance(section, tui.HairlineSection)
+            for section in (ui.query_section, ui.results_section, ui.preview_section, ui.controls_section)
+        )
+        assert ui.results_section.title == "Results"
+        assert ui.preview_section.title == "Preview"
     finally:
         ui.close()
 
@@ -444,6 +606,18 @@ def test_chat_settings_are_editable_and_close_back_to_the_main_tui(monkeypatch):
         assert ui._show_chat_settings is False
         assert ui._show_chat is False
         assert ui.application.layout.current_window == ui.query.window
+    finally:
+        ui.close()
+
+
+def test_chat_header_reuses_the_semantic_headword_and_pos_styles():
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    ui._rows = [{"headword": "tailor", "pos": "noun", "definition": "a person who makes and alters garments", "stress": None, "synonyms": [], "examples": [], "label": "neutral", "polarity": "neutral", "relevance": 100}]
+    try:
+        ui._render_selection()
+
+        assert ("class:result.headword", "tailor") in ui.chat_header.text
+        assert ("class:result.pos", " (noun)") in ui.chat_header.text
     finally:
         ui.close()
 
