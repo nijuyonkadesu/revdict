@@ -250,6 +250,15 @@ def test_stress_preview_preserves_reverse_video_highlighter_spans():
     assert "".join(text for style, text, *_ in fragments if "reverse" in style) == "stone"
 
 
+def test_stress_preview_preserves_reverse_video_when_no_color_is_set():
+    fragments = candidate_preview_fragments(
+        {"headword": "nuclear", "pos": "noun", "definition": "atomic", "examples": [], "synonyms": [], "stress": "\x1b[7mnuclear\x1b[0m", "label": "neutral", "polarity": "neutral", "relevance": 90},
+        no_color=True,
+    )
+
+    assert "".join(text for style, text, *_ in fragments if "reverse" in style) == "nuclear"
+
+
 def test_terminal_theme_uses_terminal_ansi_roles_and_gates_truecolor():
     theme = tui.TerminalTheme.from_environment({"COLORTERM": "truecolor", "COLORFGBG": "15;0"})
 

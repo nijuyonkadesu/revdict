@@ -49,8 +49,8 @@ def test_mark_calls_engine_and_render_and_returns_a_captured_ansi_string(monkeyp
     assert "HAPpy" in result  # the captured ANSI string contains the plain text
 
 
-def test_mark_honors_no_color_even_for_the_stress_marker(monkeypatch):
-    """NO_COLOR opts out of the otherwise fixed stress accent too."""
+def test_mark_honors_no_color_while_preserving_stress_attributes(monkeypatch):
+    """NO_COLOR removes pigment but preserves non-colour stress semantics."""
     from rich.text import Text
 
     class FakeEngine:
@@ -65,7 +65,25 @@ def test_mark_honors_no_color_even_for_the_stress_marker(monkeypatch):
     monkeypatch.setattr(stress, "_engine", FakeEngine())
     monkeypatch.setattr(stress, "_render", FakeRender())
 
-    assert stress.mark("tailor", "noun") == "TAI"
+    assert stress.mark("tailor", "noun") == "\x1b[1mTAI\x1b[0m"
+
+
+def test_mark_preserves_reverse_video_when_no_color_is_set(monkeypatch):
+    from rich.text import Text
+
+    class FakeEngine:
+        def resolve_word_by_pos(self, word, pos):
+            return "fake-word-result"
+
+    class FakeRender:
+        def render_word(self, result):
+            return Text("stone", style="reverse yellow")
+
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setattr(stress, "_engine", FakeEngine())
+    monkeypatch.setattr(stress, "_render", FakeRender())
+
+    assert stress.mark("pearlstone", "noun") == "\x1b[7mstone\x1b[0m"
 
 
 def test_mark_returns_none_when_engine_raises(monkeypatch):

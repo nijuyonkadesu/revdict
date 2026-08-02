@@ -1,5 +1,6 @@
 # src/revdict/models/stress.py
 import os
+import re
 
 try:
     import stressmark.engine as _engine
@@ -7,6 +8,31 @@ try:
 except ImportError:
     _engine = None
     _render = None
+
+
+_SGR = re.compile(r"\x1b\[([0-9;]*)m")
+
+
+def _strip_ansi_colours(value: str) -> str:
+    """Remove SGR pigment while retaining bold, underline, and reverse spans."""
+    def replace(match: re.Match[str]) -> str:
+        codes = [int(code) for code in match.group(1).split(";") if code] or [0]
+        preserved: list[int] = []
+        index = 0
+        while index < len(codes):
+            code = codes[index]
+            if code in {38, 48, 58} and index + 1 < len(codes):
+                mode = codes[index + 1]
+                index += 3 if mode == 5 else 5 if mode == 2 else 2
+                continue
+            if code in {39, 49, 59} or 30 <= code <= 37 or 40 <= code <= 47 or 90 <= code <= 97 or 100 <= code <= 107:
+                index += 1
+                continue
+            preserved.append(code)
+            index += 1
+        return f"\x1b[{';'.join(str(code) for code in preserved) or '0'}m"
+
+    return _SGR.sub(replace, value)
 
 
 def is_available() -> bool:
@@ -37,11 +63,12 @@ def mark(word: str, pos: str) -> str | None:
         console = Console(
             file=buffer,
             force_terminal=True,
-            no_color=no_color,
+            no_color=False,
             width=200,
-            color_system=None if no_color else ("truecolor" if truecolor else "256"),
+            color_system="truecolor" if truecolor else "256",
         )
         console.print(text, end="")
-        return buffer.getvalue()
+        rendered = buffer.getvalue()
+        return _strip_ansi_colours(rendered) if no_color else rendered
     except Exception:
         return None
