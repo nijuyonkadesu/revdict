@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import re
 import threading
 import time
@@ -147,6 +146,16 @@ def candidate_preview_fragments(candidate: dict):
     return fragments
 
 
+def format_progress_line(states: dict[str, str], details: dict[str, str]) -> str:
+    """Summarize real daemon events without a timer-driven redraw loop."""
+    finished = sum(states.get(stage.id) in {"completed", "skipped"} for stage in STAGES)
+    active = next((stage for stage in STAGES if states.get(stage.id) == "active"), None)
+    current = active or STAGES[min(finished, len(STAGES) - 1)]
+    detail = details.get(current.id)
+    line = f"Searching {finished * 100 // len(STAGES)}% · {STAGES.index(current) + 1}/{len(STAGES)} · {current.label}"
+    return f"{line} — {detail}" if detail else line
+
+
 def _wrap_result_fragments(rows: list[dict], selected_index: int, width: int):
     """Wrap result rows by tokens, preserving styles and never splitting a word."""
     all_lines: list[list[tuple[str, str]]] = []
@@ -289,8 +298,7 @@ class NativeTui:
         self._selected_index = 0
         self._controls = SearchControls()
         self._stage_states = {stage.id: "pending" for stage in STAGES}
-        self._spinning = False
-        self._spinner_index = 0
+        self._stage_details: dict[str, str] = {}
         self.query = TextArea(prompt="> ", multiline=False, height=1, style="class:query", focus_on_click=True)
         self.sort_field = TrackingRadioList(SORT_CHOICES, default=None, select_on_focus=True, on_change=self._schedule_search)
         self.category_field = TrackingRadioList(CATEGORY_CHOICES, default=None, select_on_focus=True, on_change=self._schedule_search)
@@ -350,32 +358,10 @@ class NativeTui:
             item.buffer.on_text_changed += lambda _buffer: self._schedule_search()
 
     def _progress_fragments(self):
-        symbols = {"pending": "·", "active": "▶", "completed": "✓", "skipped": "–", "failed": "!"}
-        entries = []
-        for stage in STAGES:
-            state = self._stage_states[stage.id]
-            symbol = self._spinner_frame() if state == "active" else symbols[state]
-            entries.append(("bold" if state == "active" else "", f"{symbol} {stage.label}"))
-        midpoint = len(entries) // 2
-        result = []
-        for left, right in zip(entries[:midpoint], entries[midpoint:], strict=True):
-            result.extend([left, ("", "    "), right, ("", "\n")])
-        return result[:-1]
-
-    def _spinner_frame(self) -> str:
-        return "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[self._spinner_index % 10]
+        return [("bold", format_progress_line(self._stage_states, self._stage_details))]
 
     def run(self) -> None:
-        def start_spinner() -> None:
-            self.application.create_background_task(self._spin())
-        self.application.run(pre_run=start_spinner)
-
-    async def _spin(self) -> None:
-        while self.application.is_running:
-            if self._spinning:
-                self._spinner_index += 1
-                self.application.invalidate()
-            await asyncio.sleep(0.12)
+        self.application.run()
 
     def close(self) -> None:
         self._controller.close()
@@ -397,13 +383,13 @@ class NativeTui:
     def _schedule_search(self) -> None:
         query = self.query.text.strip()
         if not query:
-            self._controller.clear(); self._rows = []; self._selected_index = 0; self.preview_control.text = ""; self._spinning = False
-            self._stage_states = {stage.id: "pending" for stage in STAGES}; self.status.text = "F1 help · F2 filters · F3 preview · Ctrl-R sort · Enter copy"; self.application.invalidate(); return
+            self._controller.clear(); self._rows = []; self._selected_index = 0; self.preview_control.text = ""
+            self._stage_states = {stage.id: "pending" for stage in STAGES}; self._stage_details = {}; self.status.text = "F1 help · F2 filters · F3 preview · Ctrl-R sort · Enter copy"; self.application.invalidate(); return
         try:
             controls = self._read_controls(); controls.validate()
         except ValidationError as error:
             self.status.text = f"Invalid filter: {error}"; self.application.invalidate(); return
-        self._controls = controls; self._set_active_filters(); self._stage_states = {stage.id: "pending" for stage in STAGES}; self._spinning = True
+        self._controls = controls; self._set_active_filters(); self._stage_states = {stage.id: "pending" for stage in STAGES}; self._stage_details = {}
         self.status.text = "Searching…"; self._controller.request(query, controls); self.application.invalidate()
 
     def _set_active_filters(self) -> None:
@@ -415,14 +401,16 @@ class NativeTui:
 
     def _receive_progress(self, event: dict) -> None:
         self._stage_states[event["id"]] = event["state"]
+        if detail := event.get("detail"):
+            self._stage_details[event["id"]] = detail
         self.application.invalidate()
 
     def _receive_result(self, result: dict) -> None:
-        self._spinning = False; self._rows = self._result_rows(result); self._selected_index = 0
+        self._rows = self._result_rows(result); self._selected_index = 0
         self.status.text = f"{len(self._rows)} result{'s' if len(self._rows) != 1 else ''}"; self._render_selection(); self.application.invalidate()
 
     def _receive_error(self, error: Exception) -> None:
-        self._spinning = False; self.status.text = f"Search error: {error}"; self.application.invalidate()
+        self.status.text = f"Search error: {error}"; self.application.invalidate()
 
     @staticmethod
     def _result_rows(result: dict) -> list[dict]:

@@ -21,3 +21,15 @@ def test_progress_stage_catalog_is_the_ten_steps_presented_by_the_ui():
     assert [stage.id for stage in STAGES] == [
         "ready", "validate", "phonetics", "parse", "scope", "retrieve", "rerank", "filter", "enrich", "finalize"
     ]
+
+
+def test_progress_reporter_can_update_the_detail_of_a_long_running_stage():
+    events = []
+    reporter = ProgressReporter(events.append)
+
+    reporter.detail("ready", "Loading embedding index")
+
+    assert events == [{
+        "type": "stage", "id": "ready", "state": "active", "ordinal": 1,
+        "total": 10, "label": "Ready search state", "detail": "Loading embedding index",
+    }]

@@ -63,8 +63,9 @@ revdict --fzf
 
 Bare `revdict` opens the native terminal UI. Type ordinary reverse-dictionary
 queries or any form from the [query syntax](#query-syntax) table. It shows up
-to 50 results, with the list, filters, preview, and an always-visible ten-step
-search progress display on one screen. `F2` opens every supported filter:
+to 50 results, with the list, filters, preview, and an always-visible one-line
+search progress status. It shows the completed percentage, current phase, phase
+number, and live details such as the model or index currently loading. `F2` opens every supported filter:
 Sort and Category are arrow-key/mouse radio lists, while phonetic filters are
 validated text fields. `F1` is generated from those control definitions and
 the keybinding registry, so it always reflects the UI.

@@ -33,8 +33,8 @@ class ProgressReporter:
     def __init__(self, emit: Callable[[dict], None] | None = None) -> None:
         self._emit = emit
 
-    def active(self, stage_id: str) -> None:
-        self._report(stage_id, "active")
+    def active(self, stage_id: str, detail: str | None = None) -> None:
+        self._report(stage_id, "active", detail)
 
     def completed(self, stage_id: str) -> None:
         self._report(stage_id, "completed")
@@ -42,17 +42,15 @@ class ProgressReporter:
     def skipped(self, stage_id: str) -> None:
         self._report(stage_id, "skipped")
 
-    def _report(self, stage_id: str, state: str) -> None:
+    def detail(self, stage_id: str, message: str) -> None:
+        """Update a genuine sub-operation without fabricating another stage."""
+        self._report(stage_id, "active", message)
+
+    def _report(self, stage_id: str, state: str, detail: str | None = None) -> None:
         if self._emit is None:
             return
         ordinal, stage = _STAGES_BY_ID[stage_id]
-        self._emit(
-            {
-                "type": "stage",
-                "id": stage.id,
-                "state": state,
-                "ordinal": ordinal,
-                "total": len(STAGES),
-                "label": stage.label,
-            }
-        )
+        event = {"type": "stage", "id": stage.id, "state": state, "ordinal": ordinal, "total": len(STAGES), "label": stage.label}
+        if detail:
+            event["detail"] = detail
+        self._emit(event)

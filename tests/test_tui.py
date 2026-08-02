@@ -11,6 +11,7 @@ from revdict.tui import (
     _wrap_result_fragments,
     build_help_text,
     candidate_preview_fragments,
+    format_progress_line,
     format_candidate_preview,
 )
 
@@ -123,6 +124,31 @@ def test_debounced_controller_publishes_the_latest_backend_error():
         controller.close()
 
 
+def test_debounced_controller_publishes_progress_before_the_search_finishes():
+    """Progress must cross the worker/UI boundary live, not with the final result."""
+    reported = threading.Event()
+    release = threading.Event()
+
+    def execute(_query, on_progress, **_kwargs):
+        on_progress({"type": "stage", "id": "ready", "state": "active"})
+        assert release.wait(timeout=2)
+        return {"exact_match": None, "candidates": []}
+
+    controller = DebouncedSearchController(
+        execute,
+        lambda _result: None,
+        lambda error: pytest.fail(str(error)),
+        on_progress=lambda _event: reported.set(),
+        debounce_seconds=0,
+    )
+    try:
+        controller.request("happy", SearchControls())
+        assert reported.wait(timeout=2)
+    finally:
+        release.set()
+        controller.close()
+
+
 def test_debounced_controller_clear_cancels_an_unstarted_search():
     """Catches clearing the query still sending an empty daemon request."""
     calls = []
@@ -199,6 +225,15 @@ def test_generated_help_lists_every_filter_and_the_preview_key():
     assert "Sort" in help_text
     assert "Sounds like" in help_text
     assert "Idioms and slang" in help_text
+
+
+def test_progress_line_reports_percent_phase_count_and_live_detail_in_one_line():
+    states = {"ready": "completed", "validate": "active"}
+
+    line = format_progress_line(states, {"validate": "Checking selected filters"})
+
+    assert line == "Searching 10% · 2/10 · Validate query and filters — Checking selected filters"
+    assert "\n" not in line
 
 
 def test_native_tui_close_is_safe_before_the_terminal_loop_starts():

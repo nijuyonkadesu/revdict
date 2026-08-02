@@ -1,5 +1,6 @@
 import json
 import math
+from contextvars import ContextVar
 
 import numpy as np
 
@@ -18,6 +19,13 @@ from revdict.models.reranker import Reranker
 from revdict.paths import INDEX_DIR
 
 _state: dict = {}
+_load_progress: ContextVar[ProgressReporter | None] = ContextVar("revdict_load_progress", default=None)
+
+
+def _load_detail(message: str) -> None:
+    reporter = _load_progress.get()
+    if reporter is not None:
+        reporter.detail("ready", message)
 
 
 def cosine_top_k(
@@ -224,14 +232,23 @@ def _load_literary_frequency() -> dict[str, float]:
 
 def _load_state() -> dict:
     if not _state:
+        _load_detail("Loading embedding index")
         _state["embeddings"] = np.load(INDEX_DIR / "embeddings.npy")
+        _load_detail("Calculating embedding norms")
         _state["embedding_norms"] = np.linalg.norm(_state["embeddings"], axis=1) + 1e-12
+        _load_detail("Loading dictionary metadata")
         _state["metadata"] = dictionary.load_metadata(INDEX_DIR)
+        _load_detail("Loading word index")
         _state["word_index"] = dictionary.load_word_index(INDEX_DIR)
+        _load_detail("Starting embedding model")
         _state["embedder"] = Embedder()
+        _load_detail("Starting reranker")
         _state["reranker"] = Reranker()
+        _load_detail("Loading frequency data")
         _state["literary_frequency"] = _load_literary_frequency()
         _state["classifier"] = None
+    else:
+        _load_detail("Using warm search state")
     return _state
 
 
@@ -309,8 +326,12 @@ def search(
     progress: ProgressReporter | None = None,
 ) -> dict:
     progress = progress or ProgressReporter()
-    progress.active("ready")
-    state = _load_state()
+    progress.active("ready", "Preparing search state")
+    token = _load_progress.set(progress)
+    try:
+        state = _load_state()
+    finally:
+        _load_progress.reset(token)
     progress.completed("ready")
 
     # Validated eagerly, independent of whether any row survives to reach

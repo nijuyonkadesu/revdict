@@ -216,6 +216,30 @@ def test_search_candidates_and_exact_match_senses_include_a_stress_key(monkeypat
     assert tagged["senses"][0]["stress"] == "STRESS[happy/adjective]"
 
 
+def test_cold_state_loading_reports_its_actual_suboperations(monkeypatch):
+    """The long cold-start phase should explain real work as it happens."""
+    events = []
+    monkeypatch.setattr(search_mod, "_state", {})
+    monkeypatch.setattr(search_mod.np, "load", lambda _path: np.array([[1.0]], dtype="float32"))
+    monkeypatch.setattr(search_mod.dictionary, "load_metadata", lambda _path: [])
+    monkeypatch.setattr(search_mod.dictionary, "load_word_index", lambda _path: {})
+    monkeypatch.setattr(search_mod, "Embedder", lambda: object())
+    monkeypatch.setattr(search_mod, "Reranker", lambda: object())
+    monkeypatch.setattr(search_mod, "_load_literary_frequency", lambda: {})
+    from revdict.progress import ProgressReporter
+
+    token = search_mod._load_progress.set(ProgressReporter(events.append))
+    try:
+        search_mod._load_state()
+    finally:
+        search_mod._load_progress.reset(token)
+
+    assert [event["detail"] for event in events] == [
+        "Loading embedding index", "Calculating embedding norms", "Loading dictionary metadata",
+        "Loading word index", "Starting embedding model", "Starting reranker", "Loading frequency data",
+    ]
+
+
 def test_combine_score_adds_the_literary_frequency_for_a_single_token_headword():
     result = combine_score(5.424, "glad", {"glad": 5.327811529454499})
 
