@@ -28,7 +28,9 @@ def mark(word: str, pos: str) -> str | None:
         result = _engine.resolve_word_by_pos(word, pos)
         text = _render.render_word(result)
         buffer = StringIO()
-        console = Console(file=buffer, force_terminal=True, width=200, color_system="truecolor")
+        # Stress styles are semantic output, not revdict chrome.  Honour them
+        # even when the parent shell uses NO_COLOR for incidental output.
+        console = Console(file=buffer, force_terminal=True, no_color=False, width=200, color_system="truecolor")
         console.print(text, end="")
         return buffer.getvalue()
     except Exception:

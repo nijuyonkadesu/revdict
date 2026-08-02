@@ -1,14 +1,19 @@
 import threading
+import time
 
 import pytest
+from prompt_toolkit.application.current import create_app_session
 from prompt_toolkit.data_structures import Point
+from prompt_toolkit.input.defaults import create_pipe_input
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.mouse_events import MouseEvent, MouseEventType
+from prompt_toolkit.output import DummyOutput
 
 from revdict import tui
 from revdict.tui import (
     DebouncedSearchController,
     NativeTui,
+    ResultsControl,
     SearchControls,
     ValidationError,
     _wrap_result_fragments,
@@ -173,6 +178,29 @@ def test_debounced_controller_clear_cancels_an_unstarted_search():
         controller.close()
 
 
+def test_default_debounce_waits_about_two_hundred_milliseconds():
+    """Typing must not invoke the daemon before the intended 200ms pause."""
+    completed = threading.Event()
+    started_at = []
+    requested_at = []
+
+    def execute(_query, **_kwargs):
+        started_at.append(time.monotonic())
+        completed.set()
+        return {"exact_match": None, "candidates": []}
+
+    controller = DebouncedSearchController(execute, lambda _result: None, lambda error: pytest.fail(str(error)))
+    try:
+        requested_at.append(time.monotonic())
+        controller.request("happy", SearchControls())
+
+        assert not completed.wait(timeout=0.15)
+        assert completed.wait(timeout=0.25)
+        assert 0.18 <= started_at[0] - requested_at[0] < 0.28
+    finally:
+        controller.close()
+
+
 def test_candidate_preview_includes_all_available_search_details():
     """Catches the native preview dropping data already available in fzf."""
     preview = format_candidate_preview(
@@ -234,6 +262,49 @@ def test_result_renderer_wraps_before_a_definition_word_and_marks_selection():
     assert any("class:result.headword" in style for style, _ in lines[0])
 
 
+def test_results_control_exposes_the_selected_result_as_its_cursor():
+    """A selection below the viewport must make prompt-toolkit scroll it into view."""
+    rows = [
+        {"headword": "first", "pos": "noun", "definition": "one two three four five six"},
+        {"headword": "second", "pos": "noun", "definition": "visible selected result"},
+    ]
+
+    content = ResultsControl(lambda: rows, lambda: 1, lambda _step: None, lambda _index: None).create_content(width=18, height=4)
+
+    assert content.cursor_position.y > 0
+
+
+def test_repeated_result_navigation_moves_the_rendered_results_viewport():
+    """Ctrl-N must scroll the real prompt-toolkit Window, not only its preview."""
+    rows = [
+        {
+            "headword": f"word{index}", "pos": "noun",
+            "definition": "a deliberately long definition with enough words to wrap", "stress": None,
+            "synonyms": [], "examples": [], "label": "joy", "polarity": "positive", "relevance": 80,
+        }
+        for index in range(50)
+    ]
+    with create_pipe_input() as input:
+        with create_app_session(input=input, output=DummyOutput()):
+            ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+            ui._rows = rows
+            ui._render_selection()
+            runner = threading.Thread(target=ui.run)
+            runner.start()
+            try:
+                input.send_bytes(b"\x0e" * 20)  # Ctrl-N
+                deadline = time.monotonic() + 1
+                while ui._selected_index != 20 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+
+                assert ui._selected_index == 20
+                assert ui.results.vertical_scroll > 0
+            finally:
+                input.send_bytes(b"\x03")
+                runner.join(timeout=2)
+                ui.close()
+
+
 def test_generated_help_lists_every_filter_and_the_preview_key():
     help_text = build_help_text()
 
@@ -263,21 +334,26 @@ def test_escape_clears_a_nonempty_query_before_it_can_quit():
             binding.eager()
             for binding in ui.application.key_bindings.get_bindings_for_keys((Keys.Escape,))
         )
+        assert ui.application.ttimeoutlen <= 0.02
     finally:
         ui.close()
 
 
-def test_results_window_handles_mouse_wheel_events():
+def test_results_mouse_wheel_moves_selection_and_updates_the_preview():
     ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
-    scrolled = []
-    ui.results._scroll_down = lambda: scrolled.append("down")
+    ui._rows = [
+        {"headword": "first", "pos": "noun", "definition": "first definition", "stress": None, "synonyms": [], "examples": [], "label": "joy", "polarity": "positive", "relevance": 80},
+        {"headword": "second", "pos": "noun", "definition": "second definition", "stress": None, "synonyms": [], "examples": [], "label": "joy", "polarity": "positive", "relevance": 80},
+    ]
+    ui._render_selection()
     try:
-        handled = ui.results._mouse_handler(
+        handled = ui.results_control.mouse_handler(
             MouseEvent(position=Point(x=0, y=0), event_type=MouseEventType.SCROLL_DOWN, button=None, modifiers=frozenset())
         )
 
         assert handled is None
-        assert scrolled == ["down"]
+        assert ui._selected_index == 1
+        assert "second" in "".join(text for _, text, *_ in ui.preview_control.fragments)
         assert ui.application.mouse_support()
     finally:
         ui.close()

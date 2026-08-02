@@ -10,8 +10,11 @@ from dataclasses import dataclass, field, fields
 from typing import Any
 
 from prompt_toolkit.formatted_text import ANSI, to_formatted_text
+from prompt_toolkit.application.current import get_app
+from prompt_toolkit.layout import Window
 from prompt_toolkit.layout.controls import UIContent, UIControl
-from prompt_toolkit.mouse_events import MouseEvent
+from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+from prompt_toolkit.data_structures import Point
 from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.widgets import RadioList
 
@@ -244,14 +247,39 @@ def _wrap_result_fragments(rows: list[dict], selected_index: int, width: int):
 
 
 class ResultsControl(UIControl):
-    def __init__(self, rows: Callable[[], list[dict]], selected: Callable[[], int]) -> None:
+    def __init__(
+        self,
+        rows: Callable[[], list[dict]],
+        selected: Callable[[], int],
+        on_move: Callable[[int], None],
+        on_select: Callable[[int], None],
+    ) -> None:
         self._rows, self._selected = rows, selected
+        self._on_move, self._on_select = on_move, on_select
+        self._line_rows: list[int] = []
 
     def create_content(self, width: int, height: int | None) -> UIContent:
-        lines, _ = _wrap_result_fragments(self._rows(), self._selected(), width)
-        return UIContent(get_line=lambda i: lines[i], line_count=len(lines), show_cursor=False)
+        lines, line_rows = _wrap_result_fragments(self._rows(), self._selected(), width)
+        self._line_rows = line_rows
+        selected_line = next((line for line, row in enumerate(line_rows) if row == self._selected()), 0)
+        return UIContent(
+            get_line=lambda i: lines[i],
+            line_count=len(lines),
+            cursor_position=Point(x=0, y=selected_line),
+            show_cursor=False,
+        )
 
     def mouse_handler(self, mouse_event: MouseEvent):
+        if mouse_event.event_type == MouseEventType.SCROLL_DOWN:
+            self._on_move(1)
+            return None
+        if mouse_event.event_type == MouseEventType.SCROLL_UP:
+            self._on_move(-1)
+            return None
+        if mouse_event.event_type == MouseEventType.MOUSE_DOWN and mouse_event.button == MouseButton.LEFT:
+            if mouse_event.position.y < len(self._line_rows) and self._line_rows[mouse_event.position.y] >= 0:
+                self._on_select(self._line_rows[mouse_event.position.y])
+                return None
         return NotImplemented
 
 
@@ -260,13 +288,45 @@ class WordWrappedControl(UIControl):
 
     def __init__(self) -> None:
         self.fragments = []
+        self._cursor_line = 0
+
+    def reset_scroll(self) -> None:
+        self._cursor_line = 0
+
+    def set_cursor_line(self, line: int) -> None:
+        self._cursor_line = max(0, line)
 
     def create_content(self, width: int, height: int | None) -> UIContent:
         lines = word_wrap_fragments(self.fragments, width)
-        return UIContent(get_line=lambda i: lines[i], line_count=len(lines), show_cursor=False)
+        self._cursor_line = min(self._cursor_line, len(lines) - 1)
+        return UIContent(
+            get_line=lambda i: lines[i],
+            line_count=len(lines),
+            cursor_position=Point(x=0, y=self._cursor_line),
+            show_cursor=False,
+        )
 
     def mouse_handler(self, mouse_event: MouseEvent):
         return NotImplemented
+
+
+class MouseScrollableWindow(Window):
+    """A Window whose wheel handler persists a viewport change and repaints."""
+
+    def _mouse_handler(self, mouse_event: MouseEvent):
+        if mouse_event.event_type not in {MouseEventType.SCROLL_DOWN, MouseEventType.SCROLL_UP}:
+            return super()._mouse_handler(mouse_event)
+        info = self.render_info
+        if info is None:
+            return NotImplemented
+        step = 1 if mouse_event.event_type == MouseEventType.SCROLL_DOWN else -1
+        maximum = max(0, info.content_height - info.window_height)
+        self.vertical_scroll = max(0, min(maximum, self.vertical_scroll + step))
+        set_cursor_line = getattr(self.content, "set_cursor_line", None)
+        if set_cursor_line is not None:
+            set_cursor_line(self.vertical_scroll)
+        get_app().invalidate()
+        return None
 
 
 class TrackingRadioList(RadioList):
@@ -284,7 +344,7 @@ class TrackingRadioList(RadioList):
 class DebouncedSearchController:
     """One long-lived worker coalesces input without subprocess or thread churn."""
 
-    def __init__(self, execute: Callable[..., dict], on_result: Callable[[dict], None], on_error: Callable[[Exception], None], *, on_progress: Callable[[dict], None] | None = None, debounce_seconds: float = 0.3, callback_scheduler: Callable[[Callable[[], None]], None] | None = None) -> None:
+    def __init__(self, execute: Callable[..., dict], on_result: Callable[[dict], None], on_error: Callable[[Exception], None], *, on_progress: Callable[[dict], None] | None = None, debounce_seconds: float = 0.2, callback_scheduler: Callable[[Callable[[], None]], None] | None = None) -> None:
         self._execute, self._on_result, self._on_error, self._on_progress = execute, on_result, on_error, on_progress
         self._debounce_seconds = debounce_seconds
         self._schedule_callback = callback_scheduler or (lambda callback: callback())
@@ -361,7 +421,7 @@ class NativeTui:
         from prompt_toolkit.application import Application
         from prompt_toolkit.filters import Condition
         from prompt_toolkit.key_binding import KeyBindings
-        from prompt_toolkit.layout import ConditionalContainer, HSplit, Layout, VSplit, Window
+        from prompt_toolkit.layout import ConditionalContainer, HSplit, Layout, VSplit
         from prompt_toolkit.layout.dimension import Dimension
         from prompt_toolkit.layout.margins import ScrollbarMargin
         from prompt_toolkit.output.color_depth import ColorDepth
@@ -382,10 +442,15 @@ class NativeTui:
         self.rhymes_field = TextArea(prompt="Rhymes with: ", multiline=False, height=1)
         self.sounds_field = TextArea(prompt="Sounds like: ", multiline=False, height=1)
         self.meter_field = TextArea(prompt="Meter: ", multiline=False, height=1)
-        self.results_control = ResultsControl(lambda: self._rows, lambda: self._selected_index)
+        self.results_control = ResultsControl(
+            lambda: self._rows,
+            lambda: self._selected_index,
+            self._move_selection_from_mouse,
+            self._select_result_from_mouse,
+        )
         self.results = Window(content=self.results_control, wrap_lines=False, right_margins=[ScrollbarMargin(display_arrows=True)], always_hide_cursor=True)
         self.preview_control = WordWrappedControl()
-        self.preview = Window(content=self.preview_control, wrap_lines=False, right_margins=[ScrollbarMargin(display_arrows=True)], always_hide_cursor=True)
+        self.preview = MouseScrollableWindow(content=self.preview_control, wrap_lines=False, right_margins=[ScrollbarMargin(display_arrows=True)], always_hide_cursor=True)
         self.progress = Label(text=self._progress_fragments(), dont_extend_height=True, wrap_lines=False)
         self.active_filters = Label(text="sort: relevance  category: all", style="class:muted")
         self.status = Label(text="F1 help · F2 filters · F3 preview · Ctrl-R sort · Enter copy", style="class:muted")
@@ -450,12 +515,15 @@ class NativeTui:
             mouse_support=True,
             color_depth=ColorDepth.DEPTH_8_BIT,
         )
+        # A bare Escape is otherwise delayed for 500ms while prompt-toolkit
+        # waits to see whether it begins an Alt/terminal escape sequence.
+        self.application.ttimeoutlen = 0.01
         self._controller = DebouncedSearchController(
             self._search_executor,
             self._receive_result,
             self._receive_error,
             on_progress=self._receive_progress,
-            debounce_seconds=0.3,
+            debounce_seconds=0.2,
             callback_scheduler=self._schedule_on_ui_thread,
         )
         self.query.buffer.on_text_changed += lambda _buffer: self._schedule_search()
@@ -543,7 +611,18 @@ class NativeTui:
         if self._rows:
             self._selected_index = max(0, min(len(self._rows) - 1, self._selected_index + step)); self._render_selection()
 
+    def _move_selection_from_mouse(self, step: int) -> None:
+        self._move_selection(step)
+        self.application.invalidate()
+
+    def _select_result_from_mouse(self, index: int) -> None:
+        if self._rows:
+            self._selected_index = max(0, min(len(self._rows) - 1, index))
+            self._render_selection()
+            self.application.invalidate()
+
     def _render_selection(self) -> None:
+        self.preview_control.reset_scroll()
         self.preview_control.fragments = candidate_preview_fragments(self._rows[self._selected_index]) if self._rows else []
 
     def _copy_selected(self) -> None:

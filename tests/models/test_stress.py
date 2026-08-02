@@ -49,6 +49,25 @@ def test_mark_calls_engine_and_render_and_returns_a_captured_ansi_string(monkeyp
     assert "HAPpy" in result  # the captured ANSI string contains the plain text
 
 
+def test_mark_preserves_stress_colors_when_the_user_has_set_no_color(monkeypatch):
+    """NO_COLOR must not erase stressmark's semantic, user-requested colours."""
+    from rich.text import Text
+
+    class FakeEngine:
+        def resolve_word_by_pos(self, word, pos):
+            return "fake-word-result"
+
+    class FakeRender:
+        def render_word(self, result):
+            return Text("TAI", style="bold yellow")
+
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setattr(stress, "_engine", FakeEngine())
+    monkeypatch.setattr(stress, "_render", FakeRender())
+
+    assert stress.mark("tailor", "noun") == "\x1b[1;33mTAI\x1b[0m"
+
+
 def test_mark_returns_none_when_engine_raises(monkeypatch):
     class FailingEngine:
         def resolve_word_by_pos(self, word, pos):
