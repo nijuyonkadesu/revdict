@@ -6,8 +6,50 @@ import socket
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 
 from revdict.paths import DAEMON_LOG_PATH, DAEMON_PID_PATH, DAEMON_SOCKET_PATH
+from revdict.progress import ProgressReporter
+
+
+PROGRESS_PROTOCOL = "progress-v1"
+
+
+def _query_payload(
+    query: str,
+    top_n: int,
+    sort_mode: str | None = None,
+    category: str | None = None,
+    syllables: int | None = None,
+    primary_vowel: str | None = None,
+    rhymes_with: str | None = None,
+    sounds_like: str | None = None,
+    meter: str | None = None,
+) -> dict:
+    return {
+        "query": query,
+        "top_n": top_n,
+        "sort": sort_mode,
+        "category": category,
+        "syllables": syllables,
+        "primary_vowel": primary_vowel,
+        "rhymes_with": rhymes_with,
+        "sounds_like": sounds_like,
+        "meter": meter,
+    }
+
+
+def _search_kwargs(request: dict) -> dict:
+    return {
+        "top_n": request["top_n"],
+        "sort_mode": request.get("sort"),
+        "category": request.get("category"),
+        "syllables": request.get("syllables"),
+        "primary_vowel": request.get("primary_vowel"),
+        "rhymes_with": request.get("rhymes_with"),
+        "sounds_like": request.get("sounds_like"),
+        "meter": request.get("meter"),
+    }
 
 
 def _read_pid() -> int | None:
@@ -68,17 +110,10 @@ def send_query(
             sock.settimeout(timeout)
             sock.connect(str(DAEMON_SOCKET_PATH))
             request = json.dumps(
-                {
-                    "query": query,
-                    "top_n": top_n,
-                    "sort": sort_mode,
-                    "category": category,
-                    "syllables": syllables,
-                    "primary_vowel": primary_vowel,
-                    "rhymes_with": rhymes_with,
-                    "sounds_like": sounds_like,
-                    "meter": meter,
-                }
+                _query_payload(
+                    query, top_n, sort_mode, category, syllables, primary_vowel,
+                    rhymes_with, sounds_like, meter,
+                )
             )
             sock.sendall(request.encode("utf-8"))
             sock.shutdown(socket.SHUT_WR)
@@ -101,6 +136,71 @@ def send_query(
     if not isinstance(payload, dict) or "error" in payload:
         return None
     return payload
+
+
+def send_progress_query(
+    query: str,
+    top_n: int,
+    on_progress: Callable[[dict], None],
+    sort_mode: str | None = None,
+    category: str | None = None,
+    syllables: int | None = None,
+    primary_vowel: str | None = None,
+    rhymes_with: str | None = None,
+    sounds_like: str | None = None,
+    meter: str | None = None,
+    timeout: float = 30.0,
+) -> dict | None:
+    """Request the opt-in JSONL progress protocol without changing legacy clients."""
+    if not DAEMON_SOCKET_PATH.exists():
+        return None
+    payload = _query_payload(
+        query, top_n, sort_mode, category, syllables, primary_vowel,
+        rhymes_with, sounds_like, meter,
+    )
+    payload["protocol"] = PROGRESS_PROTOCOL
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+            sock.connect(str(DAEMON_SOCKET_PATH))
+            sock.sendall(json.dumps(payload).encode("utf-8"))
+            sock.shutdown(socket.SHUT_WR)
+            with sock.makefile("r", encoding="utf-8") as stream:
+                for line in stream:
+                    event = json.loads(line)
+                    if not isinstance(event, dict):
+                        return None
+                    if event.get("type") == "stage":
+                        on_progress(event)
+                    elif event.get("type") == "result":
+                        result = event.get("result")
+                        return result if isinstance(result, dict) else None
+                    elif event.get("type") == "error":
+                        return None
+                    else:
+                        return None
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return None
+
+
+def supports_progress(timeout: float = 1.0) -> bool | None:
+    """Return true/false for an answer, or None when a live daemon is busy."""
+    if not DAEMON_SOCKET_PATH.exists():
+        return None
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+            sock.connect(str(DAEMON_SOCKET_PATH))
+            sock.sendall(json.dumps({"op": "capabilities"}).encode("utf-8"))
+            sock.shutdown(socket.SHUT_WR)
+            response = b""
+            while chunk := sock.recv(65536):
+                response += chunk
+        payload = json.loads(response.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return isinstance(payload, dict) and PROGRESS_PROTOCOL in payload.get("protocols", [])
 
 
 def ensure_daemon_running(startup_timeout: float = 20.0) -> bool:
@@ -160,20 +260,25 @@ def daemon_status() -> str:
 def _handle_request(request_text: str, search_fn) -> str:
     try:
         request = json.loads(request_text)
-        result = search_fn(
-            request["query"],
-            top_n=request["top_n"],
-            sort_mode=request.get("sort"),
-            category=request.get("category"),
-            syllables=request.get("syllables"),
-            primary_vowel=request.get("primary_vowel"),
-            rhymes_with=request.get("rhymes_with"),
-            sounds_like=request.get("sounds_like"),
-            meter=request.get("meter"),
-        )
+        result = search_fn(request["query"], **_search_kwargs(request))
     except Exception as error:
         return json.dumps({"error": str(error)})
     return json.dumps(result)
+
+
+def _handle_progress_request(request_text: str, search_fn, emit: Callable[[dict], None]) -> None:
+    """Serve one opt-in streaming search; legacy requests remain single JSON."""
+    try:
+        request = json.loads(request_text)
+        result = search_fn(
+            request["query"],
+            **_search_kwargs(request),
+            progress=ProgressReporter(emit),
+        )
+    except Exception as error:
+        emit({"type": "error", "message": str(error)})
+        return
+    emit({"type": "result", "result": result})
 
 
 def run_server() -> None:
@@ -231,8 +336,17 @@ def run_server() -> None:
                     request_text = b"".join(chunks).decode("utf-8")
                     if not request_text.strip():
                         continue
-                    response_text = _handle_request(request_text, search_mod.search)
-                    conn.sendall(response_text.encode("utf-8"))
+                    request = json.loads(request_text)
+                    if request.get("op") == "capabilities":
+                        conn.sendall(json.dumps({"protocols": [PROGRESS_PROTOCOL]}).encode("utf-8"))
+                    elif request.get("protocol") == PROGRESS_PROTOCOL:
+                        def emit(event: dict) -> None:
+                            conn.sendall((json.dumps(event) + "\n").encode("utf-8"))
+
+                        _handle_progress_request(request_text, search_mod.search, emit)
+                    else:
+                        response_text = _handle_request(request_text, search_mod.search)
+                        conn.sendall(response_text.encode("utf-8"))
             except Exception as error:
                 print(f"revdict daemon: error handling a request: {error}")
     finally:

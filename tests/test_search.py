@@ -3,6 +3,7 @@ import numpy as np
 import pytest
 
 from revdict import search as search_mod
+from revdict.progress import ProgressReporter
 from revdict.search import (
     absolute_relevance,
     combine_score,
@@ -371,6 +372,20 @@ def test_search_dispatches_structural_queries_to_run_structural_and_skips_embedd
 
     assert result["exact_match"] is None
     assert [c["headword"] for c in result["candidates"]] == ["bluebird"]
+
+
+def test_structural_search_reports_all_ten_user_visible_stages(monkeypatch):
+    """Structural queries must mark semantic-only work skipped, not silently omit it."""
+    monkeypatch.setattr(search_mod, "_load_state", _fake_state)
+    events = []
+
+    search_mod.search("blue*", top_n=10, progress=ProgressReporter(events.append))
+
+    terminal = [event for event in events if event["state"] in {"completed", "skipped"}]
+    assert [event["id"] for event in terminal] == [
+        "ready", "validate", "phonetics", "parse", "scope", "retrieve", "rerank", "filter", "enrich", "finalize"
+    ]
+    assert terminal[6]["state"] == "skipped"
 
 
 def test_search_still_handles_a_plain_meaning_query_via_the_existing_path(monkeypatch):

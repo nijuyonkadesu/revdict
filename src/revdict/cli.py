@@ -14,6 +14,7 @@ from rich.text import Text
 from revdict import category
 from revdict import daemon
 from revdict import picker
+from revdict import progress as progress_module
 from revdict import sort
 from revdict import tui
 from revdict.paths import INDEX_DIR
@@ -196,6 +197,7 @@ def _local_search_fallback(
     rhymes_with: str | None = None,
     sounds_like: str | None = None,
     meter: str | None = None,
+    progress=None,
 ) -> dict:
     from revdict.query_env import configure_offline_quiet_env
 
@@ -212,6 +214,7 @@ def _local_search_fallback(
         rhymes_with=rhymes_with,
         sounds_like=sounds_like,
         meter=meter,
+        progress=progress,
     )
 
 
@@ -243,6 +246,34 @@ def _get_search_result(
         query, top_n, sort_mode=sort_mode, category=category, syllables=syllables,
         primary_vowel=primary_vowel, rhymes_with=rhymes_with, sounds_like=sounds_like, meter=meter,
     )
+
+
+def _get_search_result_with_progress(
+    query: str,
+    top_n: int,
+    on_progress,
+    sort_mode: str | None = None,
+    category: str | None = None,
+    syllables: int | None = None,
+    primary_vowel: str | None = None,
+    rhymes_with: str | None = None,
+    sounds_like: str | None = None,
+    meter: str | None = None,
+) -> dict:
+    """Native UI path: negotiate progress once and replace an old daemon safely."""
+    kwargs = {
+        "sort_mode": sort_mode, "category": category, "syllables": syllables,
+        "primary_vowel": primary_vowel, "rhymes_with": rhymes_with,
+        "sounds_like": sounds_like, "meter": meter,
+    }
+    if daemon.DAEMON_SOCKET_PATH.exists() and daemon.supports_progress() is False:
+        daemon.stop_daemon()
+    if not daemon.DAEMON_SOCKET_PATH.exists() and not daemon.ensure_daemon_running():
+        return _local_search_fallback(query, top_n, progress=progress_module.ProgressReporter(on_progress), **kwargs)
+    result = daemon.send_progress_query(query, top_n, on_progress, **kwargs)
+    if result is not None:
+        return result
+    return _local_search_fallback(query, top_n, progress=progress_module.ProgressReporter(on_progress), **kwargs)
 
 
 def _build_index(skip_confirm: bool) -> None:

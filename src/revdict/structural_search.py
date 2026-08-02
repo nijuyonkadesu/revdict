@@ -1,6 +1,7 @@
 from revdict import category as category_module
 from revdict import phonetics
 from revdict.pattern_matcher import compile_clauses
+from revdict.progress import ProgressReporter
 from revdict.query_syntax import ParsedQuery
 
 # Real acronym expansion skips small function words rather than taking
@@ -56,6 +57,7 @@ def run_structural(
     rhyme_key: str | None = None,
     sounds_like_phonemes: list[str] | None = None,
     meter: str | None = None,
+    progress: ProgressReporter | None = None,
 ) -> dict:
     # Callers are responsible for validating `category` against
     # category.CATEGORIES before calling this function; search() does that
@@ -72,7 +74,11 @@ def run_structural(
     metadata = state["metadata"]
     literary_frequency = state["literary_frequency"]
 
+    progress = progress or ProgressReporter()
+    progress.active("scope")
     headwords = matching_headwords(parsed, word_index)
+    progress.completed("scope")
+    progress.active("retrieve")
     if category and category != "all":
         headwords = [
             word
@@ -96,12 +102,18 @@ def run_structural(
             and phonetics.matches_meter(metadata[word_index[word][0]], meter)
         ]
     ranked = _score_and_sort(headwords, literary_frequency)[:top_n]
+    progress.completed("retrieve")
+    progress.skipped("rerank")
+    progress.active("filter")
+    progress.completed("filter")
     relevances = relative_relevance([score for _, score in ranked])
 
+    progress.active("enrich")
     candidates = [
         build_candidate(metadata[word_index[headword][0]], relevance, state)
         for (headword, _), relevance in zip(ranked, relevances)
     ]
+    progress.completed("enrich")
 
     return {"exact_match": None, "candidates": candidates}
 

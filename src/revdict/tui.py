@@ -1,57 +1,70 @@
-"""State and scheduling primitives for revdict's native terminal UI.
-
-The prompt-toolkit rendering layer intentionally sits on top of these small,
-terminal-independent objects so search correctness is covered without a TTY.
-"""
+"""The native, daemon-backed terminal interface for revdict."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import asyncio
+import re
 import threading
+import time
 from collections.abc import Callable
+from dataclasses import dataclass, field, fields
 from typing import Any
 
+from prompt_toolkit.formatted_text import ANSI, to_formatted_text
+from prompt_toolkit.layout.controls import FormattedTextControl, UIContent, UIControl
+from prompt_toolkit.mouse_events import MouseEvent
+from prompt_toolkit.utils import get_cwidth
+from prompt_toolkit.widgets import RadioList
+
 from revdict.category import CATEGORIES
+from revdict.progress import STAGES
 from revdict.sort import SORT_MODES
 
 
 ARPABET_VOWELS = frozenset(
     {"AA", "AE", "AH", "AO", "AW", "AY", "EH", "ER", "EY", "IH", "IY", "OW", "OY", "UH", "UW"}
 )
-LIVE_TUI_TOP_N = 30
+LIVE_TUI_TOP_N = 50
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 class ValidationError(ValueError):
     """A control value cannot be submitted to the search backend."""
 
 
-def format_candidate_preview(candidate: dict) -> str:
-    """Render the complete candidate payload shown in the native preview."""
-    lines = [f"{candidate['headword']} ({candidate['pos']})", "", candidate["definition"]]
-    synonyms = candidate.get("synonyms") or []
-    if synonyms:
-        lines.extend(["", "Synonyms: " + ", ".join(synonyms)])
-    lines.append(f"Emotion: {candidate['label']} · {candidate['polarity']}")
-    lines.append(f"Match confidence: {candidate['relevance']}%")
-    if candidate.get("stress"):
-        lines.append("Stress: " + candidate["stress"])
-    examples = candidate.get("examples") or []
-    if examples:
-        lines.extend(["", 'Example: "' + examples[0] + '"'])
-    return "\n".join(lines)
+@dataclass(frozen=True)
+class ControlSpec:
+    label: str
+    help_text: str
+    kind: str = "text"
+    choices: tuple[tuple[str | None, str], ...] = ()
+
+
+SORT_CHOICES = tuple(
+    zip(
+        (None,) + SORT_MODES[1:],
+        ("Relevance", "A–Z", "Z–A", "Shortest", "Longest", "Most common", "Least common", "Most formal", "Oldest", "Most modern", "Most lyrical"),
+        strict=True,
+    )
+)
+CATEGORY_CHOICES = (
+    (None, "All words"), ("noun", "Nouns"), ("adjective", "Adjectives"),
+    ("verb", "Verbs"), ("adverb", "Adverbs"), ("idiom_slang", "Idioms and slang"),
+    ("old", "Historic and archaic"),
+)
 
 
 @dataclass
 class SearchControls:
-    """The non-text query constraints selected in the terminal UI."""
+    """The TUI's single source of truth for each supported filter."""
 
-    sort_mode: str | None = None
-    category: str | None = None
-    syllables: int | None = None
-    primary_vowel: str | None = None
-    rhymes_with: str | None = None
-    sounds_like: str | None = None
-    meter: str | None = None
+    sort_mode: str | None = field(default=None, metadata={"spec": ControlSpec("Sort", "How candidates are ordered.", "radio", SORT_CHOICES)})
+    category: str | None = field(default=None, metadata={"spec": ControlSpec("Category", "Limit candidates by part of speech or register.", "radio", CATEGORY_CHOICES)})
+    syllables: int | None = field(default=None, metadata={"spec": ControlSpec("Syllables", "Whole number, zero or greater.")})
+    primary_vowel: str | None = field(default=None, metadata={"spec": ControlSpec("Primary vowel", "ARPAbet vowel: " + ", ".join(sorted(ARPABET_VOWELS)))})
+    rhymes_with: str | None = field(default=None, metadata={"spec": ControlSpec("Rhymes with", "A word whose final rhyme should match.")})
+    sounds_like: str | None = field(default=None, metadata={"spec": ControlSpec("Sounds like", "A word whose pronunciation should match.")})
+    meter: str | None = field(default=None, metadata={"spec": ControlSpec("Meter", "Use / for stressed and x for unstressed syllables.")})
 
     def validate(self) -> None:
         if self.sort_mode is not None and self.sort_mode not in SORT_MODES:
@@ -71,309 +84,298 @@ class SearchControls:
 
     def as_search_kwargs(self) -> dict[str, Any]:
         self.validate()
-        return {
-            "sort_mode": self.sort_mode,
-            "category": self.category,
-            "syllables": self.syllables,
-            "primary_vowel": self.primary_vowel,
-            "rhymes_with": self.rhymes_with,
-            "sounds_like": self.sounds_like,
-            "meter": self.meter,
-        }
+        return {item.name: getattr(self, item.name) for item in fields(self)}
+
+
+@dataclass(frozen=True)
+class UiAction:
+    key: str
+    description: str
+
+
+ACTIONS = (
+    UiAction("F1", "Toggle generated help"), UiAction("F2", "Open or close filters"),
+    UiAction("F3", "Toggle preview"), UiAction("Ctrl-R", "Cycle sort order"),
+    UiAction("Ctrl-N / Ctrl-P", "Select next / previous result"), UiAction("Enter", "Copy selected headword"),
+    UiAction("Esc", "Clear query, then quit"), UiAction("Ctrl-C", "Quit"),
+)
+QUERY_HELP = (
+    ("blue* / *bird / bl????rd", "prefix, suffix, and wildcard patterns"),
+    ("//letters", "anagram"), ("-abcd / +abcd", "exclude letters / allowed letters"),
+    ("pattern:meaning / :meaning", "combined or explicit meaning search"),
+    ("**word** / expand:nasa", "phrase contains / initials expansion"),
+)
+
+
+def build_help_text() -> str:
+    lines = ["Query syntax:"]
+    lines.extend(f"  {query:<29} {description}" for query, description in QUERY_HELP)
+    lines.extend(["", "Filters:"])
+    for item in fields(SearchControls):
+        spec: ControlSpec = item.metadata["spec"]
+        choices = " (" + ", ".join(label for _, label in spec.choices) + ")" if spec.choices else ""
+        lines.append(f"  {spec.label}: {spec.help_text}{choices}")
+    lines.extend(["", "Keys:"])
+    lines.extend(f"  {action.key:<15} {action.description}" for action in ACTIONS)
+    return "\n".join(lines)
+
+
+def _strip_ansi(value: str) -> str:
+    return _ANSI_ESCAPE.sub("", value)
+
+
+def format_candidate_preview(candidate: dict) -> str:
+    """Return a plain-text version for tests, copy paths, and non-ANSI fallbacks."""
+    lines = [f"{candidate['headword']} ({candidate['pos']})", "", candidate["definition"]]
+    synonyms = candidate.get("synonyms") or []
+    if synonyms:
+        lines.extend(["", "Synonyms: " + ", ".join(synonyms)])
+    lines.extend([f"Emotion: {candidate['label']} · {candidate['polarity']}", f"Match confidence: {candidate['relevance']}%"])
+    if candidate.get("stress"):
+        lines.append("Stress: " + _strip_ansi(candidate["stress"]).rstrip())
+    examples = candidate.get("examples") or []
+    if examples:
+        lines.extend(["", 'Example: "' + examples[0] + '"'])
+    return "\n".join(lines)
+
+
+def candidate_preview_fragments(candidate: dict):
+    text = format_candidate_preview({**candidate, "stress": None})
+    fragments = [("", text)]
+    if candidate.get("stress"):
+        fragments.extend([("", "\nStress: "), *to_formatted_text(ANSI(candidate["stress"].rstrip()))])
+    return fragments
+
+
+def _wrap_result_fragments(rows: list[dict], selected_index: int, width: int):
+    """Wrap result rows by tokens, preserving styles and never splitting a word."""
+    all_lines: list[list[tuple[str, str]]] = []
+    line_rows: list[int] = []
+    width = max(1, width)
+    for index, row in enumerate(rows):
+        selected = index == selected_index
+        selected_style = "class:result.selected" if selected else ""
+        header = [(selected_style, "❯ " if selected else "  "), (f"{selected_style} class:result.headword", row["headword"]), (selected_style, f"  ({row['pos']})  ")]
+        tokens = header + [(selected_style, word + (" " if number < len(row["definition"].split()) - 1 else "")) for number, word in enumerate(row["definition"].split())]
+        line: list[tuple[str, str]] = []
+        used = 0
+        for style, token in tokens:
+            token_width = get_cwidth(token)
+            if line and used + token_width > width and token.strip():
+                all_lines.append(line)
+                line_rows.append(index)
+                line = [(selected_style, "  ")]
+                used = 2
+                token = token.lstrip()
+                token_width = get_cwidth(token)
+            line.append((style, token))
+            used += token_width
+        all_lines.append(line or [(selected_style, "")])
+        line_rows.append(index)
+    return all_lines or [[("", "Type a meaning or word to search.")]], line_rows or [-1]
+
+
+class ResultsControl(UIControl):
+    def __init__(self, rows: Callable[[], list[dict]], selected: Callable[[], int]) -> None:
+        self._rows, self._selected = rows, selected
+
+    def create_content(self, width: int, height: int | None) -> UIContent:
+        lines, _ = _wrap_result_fragments(self._rows(), self._selected(), width)
+        return UIContent(get_line=lambda i: lines[i], line_count=len(lines), show_cursor=False)
+
+    def mouse_handler(self, mouse_event: MouseEvent):
+        return NotImplemented
+
+
+class TrackingRadioList(RadioList):
+    def __init__(self, *args, on_change: Callable[[], None], **kwargs) -> None:
+        self._on_change = on_change
+        super().__init__(*args, **kwargs)
+
+    def _handle_enter(self) -> None:
+        before = self.current_value
+        super()._handle_enter()
+        if self.current_value != before:
+            self._on_change()
 
 
 class DebouncedSearchController:
-    """Run at most one backend search and coalesce obsolete UI input.
+    """One long-lived worker coalesces input without subprocess or thread churn."""
 
-    A running daemon request is deliberately not cancelled: the daemon's
-    protocol has no cancellation operation. Instead, changes made while it
-    runs collapse into one latest request, and only the current generation is
-    allowed to update the view.
-    """
-
-    def __init__(
-        self,
-        execute: Callable[..., dict],
-        on_result: Callable[[dict], None],
-        on_error: Callable[[Exception], None],
-        *,
-        debounce_seconds: float = 0.1,
-        callback_scheduler: Callable[[Callable[[], None]], None] | None = None,
-    ) -> None:
-        self._execute = execute
-        self._on_result = on_result
-        self._on_error = on_error
+    def __init__(self, execute: Callable[..., dict], on_result: Callable[[dict], None], on_error: Callable[[Exception], None], *, on_progress: Callable[[dict], None] | None = None, debounce_seconds: float = 0.1, callback_scheduler: Callable[[Callable[[], None]], None] | None = None) -> None:
+        self._execute, self._on_result, self._on_error, self._on_progress = execute, on_result, on_error, on_progress
         self._debounce_seconds = debounce_seconds
         self._schedule_callback = callback_scheduler or (lambda callback: callback())
-        self._lock = threading.Lock()
-        self._timer: threading.Timer | None = None
-        self._pending: tuple[int, str, SearchControls] | None = None
+        self._condition = threading.Condition()
+        self._pending: tuple[int, str, SearchControls, float] | None = None
         self._generation = 0
-        self._running = False
         self._closed = False
+        self._worker = threading.Thread(target=self._work, name="revdict-search", daemon=True)
+        self._worker.start()
 
     def request(self, query: str, controls: SearchControls) -> None:
-        """Debounce a new UI state, replacing an older unstarted state."""
-        with self._lock:
+        with self._condition:
             if self._closed:
                 return
             self._generation += 1
-            generation = self._generation
-            self._pending = (generation, query, controls)
-            if self._timer is not None:
-                self._timer.cancel()
-            self._timer = threading.Timer(self._debounce_seconds, self._launch_latest)
-            self._timer.daemon = True
-            self._timer.start()
-
-    def close(self) -> None:
-        """Ignore pending and in-flight responses after the UI closes."""
-        with self._lock:
-            self._closed = True
-            self._clear_pending_locked()
+            self._pending = (self._generation, query, controls, time.monotonic() + self._debounce_seconds)
+            self._condition.notify()
 
     def clear(self) -> None:
-        """Cancel an unstarted search and ignore any older in-flight response."""
-        with self._lock:
+        with self._condition:
             if not self._closed:
-                self._clear_pending_locked()
+                self._generation += 1
+                self._pending = None
+                self._condition.notify()
 
-    def _clear_pending_locked(self) -> None:
-        self._generation += 1
-        self._pending = None
-        if self._timer is not None:
-            self._timer.cancel()
-            self._timer = None
-
-    def _launch_latest(self) -> None:
-        with self._lock:
-            self._timer = None
-            if self._closed or self._running or self._pending is None:
-                return
-            generation, query, controls = self._pending
+    def close(self) -> None:
+        with self._condition:
+            self._closed = True
             self._pending = None
-            self._running = True
+            self._condition.notify()
+        self._worker.join(timeout=0.2)
 
-        thread = threading.Thread(
-            target=self._run,
-            args=(generation, query, controls),
-            name="revdict-search",
-            daemon=True,
-        )
-        thread.start()
+    def _work(self) -> None:
+        while True:
+            with self._condition:
+                while not self._closed and self._pending is None:
+                    self._condition.wait()
+                if self._closed:
+                    return
+                generation, query, controls, due = self._pending
+                delay = due - time.monotonic()
+                if delay > 0:
+                    self._condition.wait(delay)
+                    continue
+                self._pending = None
+            try:
+                result = self._execute(query, on_progress=lambda event: self._publish_progress(generation, event), **controls.as_search_kwargs())
+            except Exception as error:
+                self._schedule_callback(lambda error=error: self._publish_error(generation, error))
+            else:
+                self._schedule_callback(lambda: self._publish_result(generation, result))
 
-    def _run(self, generation: int, query: str, controls: SearchControls) -> None:
-        try:
-            result = self._execute(query, **controls.as_search_kwargs())
-        except Exception as error:  # the CLI turns backend exceptions into user feedback too
-            callback: Callable[[], None] = (
-                lambda error=error: self._publish_error(generation, error)
-            )
-        else:
-            callback = lambda: self._publish_result(generation, result)
-        finally:
-            with self._lock:
-                self._running = False
-                should_launch_pending = not self._closed and self._pending is not None
-
-        self._schedule_callback(callback)
-        if should_launch_pending:
-            self._launch_latest()
+    def _current(self, generation: int) -> bool:
+        with self._condition:
+            return not self._closed and generation == self._generation
 
     def _publish_result(self, generation: int, result: dict) -> None:
-        with self._lock:
-            current = not self._closed and generation == self._generation
-        if current:
+        if self._current(generation):
             self._on_result(result)
 
     def _publish_error(self, generation: int, error: Exception) -> None:
-        with self._lock:
-            current = not self._closed and generation == self._generation
-        if current:
+        if self._current(generation):
             self._on_error(error)
+
+    def _publish_progress(self, generation: int, event: dict) -> None:
+        if self._on_progress is not None:
+            self._schedule_callback(lambda: self._current(generation) and self._on_progress(event))
 
 
 class NativeTui:
-    """A prompt-toolkit interface over the existing daemon-backed search API."""
+    """A colour-neutral prompt-toolkit interface over the daemon-backed API."""
 
     def __init__(self, search_executor: Callable[..., dict]) -> None:
         from prompt_toolkit.application import Application
-        from prompt_toolkit.completion import WordCompleter
         from prompt_toolkit.filters import Condition
         from prompt_toolkit.key_binding import KeyBindings
-        from prompt_toolkit.layout import ConditionalContainer, HSplit, Layout, VSplit
+        from prompt_toolkit.layout import ConditionalContainer, HSplit, Layout, VSplit, Window
+        from prompt_toolkit.layout.margins import ScrollbarMargin
         from prompt_toolkit.styles import Style
         from prompt_toolkit.widgets import Frame, Label, TextArea
 
-        self._search_executor = search_executor
-        self._show_controls = False
-        self._show_help = False
-        self._show_preview = True
+        self._search_executor, self._show_controls, self._show_help, self._show_preview = search_executor, False, False, True
         self._rows: list[dict] = []
         self._selected_index = 0
         self._controls = SearchControls()
-
-        self.query = TextArea(
-            prompt="> ", multiline=False, height=1, style="class:query", focus_on_click=True
-        )
-        self.sort_field = TextArea(
-            text="", prompt="Sort: ", multiline=False, height=1,
-            completer=WordCompleter(list(SORT_MODES), ignore_case=True),
-        )
-        self.category_field = TextArea(
-            text="", prompt="Category: ", multiline=False, height=1,
-            completer=WordCompleter(list(CATEGORIES), ignore_case=True),
-        )
+        self._stage_states = {stage.id: "pending" for stage in STAGES}
+        self._spinning = False
+        self._spinner_index = 0
+        self.query = TextArea(prompt="> ", multiline=False, height=1, style="class:query", focus_on_click=True)
+        self.sort_field = TrackingRadioList(SORT_CHOICES, default=None, select_on_focus=True, on_change=self._schedule_search)
+        self.category_field = TrackingRadioList(CATEGORY_CHOICES, default=None, select_on_focus=True, on_change=self._schedule_search)
         self.syllables_field = TextArea(prompt="Syllables: ", multiline=False, height=1)
-        self.vowel_field = TextArea(
-            prompt="Primary vowel: ", multiline=False, height=1,
-            completer=WordCompleter(sorted(ARPABET_VOWELS), ignore_case=True),
-        )
+        self.vowel_field = TextArea(prompt="Primary vowel: ", multiline=False, height=1)
         self.rhymes_field = TextArea(prompt="Rhymes with: ", multiline=False, height=1)
         self.sounds_field = TextArea(prompt="Sounds like: ", multiline=False, height=1)
         self.meter_field = TextArea(prompt="Meter: ", multiline=False, height=1)
-        self.results = TextArea(text="Type a meaning or word to search.", read_only=True, scrollbar=True)
-        self.preview = TextArea(text="", read_only=True, scrollbar=True)
+        self.results_control = ResultsControl(lambda: self._rows, lambda: self._selected_index)
+        self.results = Window(content=self.results_control, wrap_lines=False, right_margins=[ScrollbarMargin(display_arrows=True)], always_hide_cursor=True)
+        self.preview_control = FormattedTextControl("")
+        self.preview = Window(content=self.preview_control, wrap_lines=True, right_margins=[ScrollbarMargin(display_arrows=True)], always_hide_cursor=True)
+        self.progress_control = FormattedTextControl(self._progress_fragments)
+        self.progress = Window(content=self.progress_control, wrap_lines=False, always_hide_cursor=True)
         self.active_filters = Label(text="sort: relevance  category: all")
         self.status = Label(text="F1 help · F2 filters · F3 preview · Ctrl-R sort · Enter copy")
-        self.help = Label(
-            text=(
-                "Query syntax: blue*  *bird  bl????rd  //anagram  -abcd  +abcd  "
-                "bl*:snow  :meaning  **word**  expand:nasa\n"
-                "F2 opens filters; Tab moves controls; Ctrl-N/P selects a result; "
-                "Esc clears then quits; Ctrl-C quits."
-            )
-        )
-
-        controls = Frame(
-            HSplit(
-                [
-                    self.sort_field,
-                    self.category_field,
-                    self.syllables_field,
-                    self.vowel_field,
-                    self.rhymes_field,
-                    self.sounds_field,
-                    self.meter_field,
-                ],
-                padding=0,
-            ),
-            title="Search controls — values apply as you type",
-        )
-        controls_container = ConditionalContainer(
-            content=controls,
-            filter=Condition(lambda: self._show_controls),
-        )
-        help_container = ConditionalContainer(
-            content=Frame(self.help, title="Query syntax and keys"),
-            filter=Condition(lambda: self._show_help),
-        )
-        preview_container = ConditionalContainer(
-            content=Frame(self.preview, title="Preview"),
-            filter=Condition(lambda: self._show_preview),
-        )
-        root = HSplit(
-            [
-                Frame(self.query, title="revdict"),
-                self.active_filters,
-                VSplit([Frame(self.results, title="Results"), preview_container], padding=1),
-                controls_container,
-                help_container,
-                self.status,
-            ],
-            padding=1,
-        )
-
+        controls = Frame(HSplit([self.sort_field, self.category_field, self.syllables_field, self.vowel_field, self.rhymes_field, self.sounds_field, self.meter_field], padding=0), title="Search controls — arrows choose Sort and Category")
+        root = HSplit([
+            Frame(self.query, title="revdict"), self.active_filters,
+            Frame(self.progress, title="Search progress"),
+            VSplit([Frame(self.results, title="Results"), ConditionalContainer(Frame(self.preview, title="Preview"), Condition(lambda: self._show_preview))], padding=1),
+            ConditionalContainer(controls, Condition(lambda: self._show_controls)),
+            ConditionalContainer(Frame(Label(text=build_help_text()), title="Help"), Condition(lambda: self._show_help)),
+            self.status,
+        ], padding=1)
         bindings = KeyBindings()
-
         @bindings.add("f1")
-        def _toggle_help(event) -> None:
-            self._show_help = not self._show_help
-            event.app.invalidate()
-
+        def toggle_help(event): self._show_help = not self._show_help; event.app.invalidate()
         @bindings.add("f2")
-        def _toggle_controls(event) -> None:
+        def toggle_controls(event):
             self._show_controls = not self._show_controls
-            if self._show_controls:
-                event.app.layout.focus(self.sort_field)
-            else:
-                event.app.layout.focus(self.query)
+            event.app.layout.focus(self.sort_field if self._show_controls else self.query)
             event.app.invalidate()
-
         @bindings.add("f3")
-        def _toggle_preview(event) -> None:
-            self._show_preview = not self._show_preview
-            event.app.invalidate()
-
+        def toggle_preview(event): self._show_preview = not self._show_preview; event.app.invalidate()
         @bindings.add("c-r")
-        def _cycle_sort(event) -> None:
-            current = self._controls.sort_mode or "relevance"
-            next_index = (SORT_MODES.index(current) + 1) % len(SORT_MODES)
-            self.sort_field.text = SORT_MODES[next_index]
-            event.app.invalidate()
-
+        def cycle_sort(event):
+            values = [value for value, _ in SORT_CHOICES]; current = self.sort_field.current_value
+            self.sort_field.current_value = values[(values.index(current) + 1) % len(values)]
+            self._schedule_search(); event.app.invalidate()
         @bindings.add("c-n")
-        def _select_next(event) -> None:
-            self._move_selection(1)
-            event.app.invalidate()
-
+        def next_result(event): self._move_selection(1); event.app.invalidate()
         @bindings.add("c-p")
-        def _select_previous(event) -> None:
-            self._move_selection(-1)
-            event.app.invalidate()
-
+        def previous_result(event): self._move_selection(-1); event.app.invalidate()
         @bindings.add("enter", filter=Condition(lambda: self.application.layout.current_window == self.query.window))
-        def _copy_selection(event) -> None:
-            self._copy_selected()
-            event.app.invalidate()
-
+        def copy_result(event): self._copy_selected(); event.app.invalidate()
         @bindings.add("escape")
-        def _clear_or_exit(event) -> None:
-            if self.query.text:
-                self.query.text = ""
-            else:
-                self.close()
-
+        def clear_or_exit(event):
+            if self.query.text: self.query.text = ""
+            else: self.close()
         @bindings.add("c-c")
-        def _quit(event) -> None:
-            self.close()
-
-        self.application = Application(
-            layout=Layout(root, focused_element=self.query),
-            key_bindings=bindings,
-            style=Style.from_dict(
-                {
-                    "query": "bold",
-                    "frame.border": "fg:ansiblue",
-                    "label": "fg:ansibrightblack",
-                }
-            ),
-            full_screen=True,
-        )
-        self._controller = DebouncedSearchController(
-            self._search_executor,
-            self._receive_result,
-            self._receive_error,
-            callback_scheduler=self._schedule_on_ui_thread,
-        )
+        def quit_ui(event): self.close()
+        self.application = Application(layout=Layout(root, focused_element=self.query), key_bindings=bindings, style=Style.from_dict({"query": "bold", "result.headword": "bold", "result.selected": "reverse"}), full_screen=True, mouse_support=True)
+        self._controller = DebouncedSearchController(self._search_executor, self._receive_result, self._receive_error, on_progress=self._receive_progress, callback_scheduler=self._schedule_on_ui_thread)
         self.query.buffer.on_text_changed += lambda _buffer: self._schedule_search()
-        for field in self._control_fields:
-            field.buffer.on_text_changed += lambda _buffer: self._schedule_search()
+        for item in (self.syllables_field, self.vowel_field, self.rhymes_field, self.sounds_field, self.meter_field):
+            item.buffer.on_text_changed += lambda _buffer: self._schedule_search()
 
-    @property
-    def _control_fields(self) -> tuple[Any, ...]:
-        return (
-            self.sort_field,
-            self.category_field,
-            self.syllables_field,
-            self.vowel_field,
-            self.rhymes_field,
-            self.sounds_field,
-            self.meter_field,
-        )
+    def _progress_fragments(self):
+        symbols = {"pending": "·", "active": "▶", "completed": "✓", "skipped": "–", "failed": "!"}
+        entries = []
+        for stage in STAGES:
+            state = self._stage_states[stage.id]
+            symbol = self._spinner_frame() if state == "active" else symbols[state]
+            entries.append(("bold" if state == "active" else "", f"{symbol} {stage.label}"))
+        midpoint = len(entries) // 2
+        result = []
+        for left, right in zip(entries[:midpoint], entries[midpoint:], strict=True):
+            result.extend([left, ("", "    "), right, ("", "\n")])
+        return result[:-1]
+
+    def _spinner_frame(self) -> str:
+        return "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[self._spinner_index % 10]
 
     def run(self) -> None:
-        self.application.run()
+        def start_spinner() -> None:
+            self.application.create_background_task(self._spin())
+        self.application.run(pre_run=start_spinner)
+
+    async def _spin(self) -> None:
+        while self.application.is_running:
+            if self._spinning:
+                self._spinner_index += 1
+                self.application.invalidate()
+            await asyncio.sleep(0.12)
 
     def close(self) -> None:
         self._controller.close()
@@ -386,128 +388,65 @@ class NativeTui:
             loop.call_soon_threadsafe(callback)
 
     def _read_controls(self) -> SearchControls:
-        syllable_text = self.syllables_field.text.strip()
-        if syllable_text:
-            try:
-                syllables = int(syllable_text)
-            except ValueError as error:
-                raise ValidationError("Syllables must be a whole number.") from error
-        else:
-            syllables = None
-        return SearchControls(
-            sort_mode=self.sort_field.text.strip().lower() or None,
-            category=self.category_field.text.strip().lower() or None,
-            syllables=syllables,
-            primary_vowel=self.vowel_field.text.strip().upper() or None,
-            rhymes_with=self.rhymes_field.text.strip() or None,
-            sounds_like=self.sounds_field.text.strip() or None,
-            meter=self.meter_field.text.strip() or None,
-        )
+        syllables = None
+        if text := self.syllables_field.text.strip():
+            try: syllables = int(text)
+            except ValueError as error: raise ValidationError("Syllables must be a whole number.") from error
+        return SearchControls(sort_mode=self.sort_field.current_value, category=self.category_field.current_value, syllables=syllables, primary_vowel=self.vowel_field.text.strip().upper() or None, rhymes_with=self.rhymes_field.text.strip() or None, sounds_like=self.sounds_field.text.strip() or None, meter=self.meter_field.text.strip() or None)
 
     def _schedule_search(self) -> None:
         query = self.query.text.strip()
         if not query:
-            self._controller.clear()
-            self._rows = []
-            self._selected_index = 0
-            self.results.text = "Type a meaning or word to search."
-            self.preview.text = ""
-            self.status.text = "F1 help · F2 filters · F3 preview · Ctrl-R sort · Enter copy"
-            self.application.invalidate()
-            return
+            self._controller.clear(); self._rows = []; self._selected_index = 0; self.preview_control.text = ""; self._spinning = False
+            self._stage_states = {stage.id: "pending" for stage in STAGES}; self.status.text = "F1 help · F2 filters · F3 preview · Ctrl-R sort · Enter copy"; self.application.invalidate(); return
         try:
-            controls = self._read_controls()
-            controls.validate()
+            controls = self._read_controls(); controls.validate()
         except ValidationError as error:
-            self.status.text = f"Invalid filter: {error}"
-            self.application.invalidate()
-            return
-        self._controls = controls
-        self._set_active_filters()
-        self.status.text = "Searching…"
-        self._controller.request(query, controls)
-        self.application.invalidate()
+            self.status.text = f"Invalid filter: {error}"; self.application.invalidate(); return
+        self._controls = controls; self._set_active_filters(); self._stage_states = {stage.id: "pending" for stage in STAGES}; self._spinning = True
+        self.status.text = "Searching…"; self._controller.request(query, controls); self.application.invalidate()
 
     def _set_active_filters(self) -> None:
-        active = [
-            f"sort: {self._controls.sort_mode or 'relevance'}",
-            f"category: {self._controls.category or 'all'}",
-        ]
-        if self._controls.syllables is not None:
-            active.append(f"syllables: {self._controls.syllables}")
-        if self._controls.primary_vowel:
-            active.append(f"vowel: {self._controls.primary_vowel}")
-        if self._controls.rhymes_with:
-            active.append(f"rhymes: {self._controls.rhymes_with}")
-        if self._controls.sounds_like:
-            active.append(f"sounds: {self._controls.sounds_like}")
-        if self._controls.meter:
-            active.append(f"meter: {self._controls.meter}")
+        active = [f"sort: {self._controls.sort_mode or 'relevance'}", f"category: {self._controls.category or 'all'}"]
+        for item in fields(SearchControls):
+            value = getattr(self._controls, item.name)
+            if value is not None and item.name not in {"sort_mode", "category"}: active.append(f"{item.name.replace('_', ' ')}: {value}")
         self.active_filters.text = "  ".join(active)
 
-    def _receive_result(self, result: dict) -> None:
-        self._rows = self._result_rows(result)
-        self._selected_index = 0
-        self.status.text = f"{len(self._rows)} result{'s' if len(self._rows) != 1 else ''}"
-        self._render_selection()
+    def _receive_progress(self, event: dict) -> None:
+        self._stage_states[event["id"]] = event["state"]
         self.application.invalidate()
 
+    def _receive_result(self, result: dict) -> None:
+        self._spinning = False; self._rows = self._result_rows(result); self._selected_index = 0
+        self.status.text = f"{len(self._rows)} result{'s' if len(self._rows) != 1 else ''}"; self._render_selection(); self.application.invalidate()
+
     def _receive_error(self, error: Exception) -> None:
-        self.status.text = f"Search error: {error}"
-        self.application.invalidate()
+        self._spinning = False; self.status.text = f"Search error: {error}"; self.application.invalidate()
 
     @staticmethod
     def _result_rows(result: dict) -> list[dict]:
-        rows: list[dict] = []
+        rows = []
         exact_match = result.get("exact_match")
         if exact_match and exact_match.get("senses"):
             sense = exact_match["senses"][0]
-            rows.append(
-                {
-                    "headword": exact_match["headword"],
-                    "pos": sense["pos"],
-                    "definition": sense["definition"],
-                    "stress": sense.get("stress"),
-                    "label": sense["label"],
-                    "polarity": sense["polarity"],
-                    "synonyms": sense.get("synonyms") or [],
-                    "examples": sense.get("examples") or [],
-                    "relevance": 100,
-                }
-            )
+            rows.append({"headword": exact_match["headword"], "pos": sense["pos"], "definition": sense["definition"], "stress": sense.get("stress"), "label": sense["label"], "polarity": sense["polarity"], "synonyms": sense.get("synonyms") or [], "examples": sense.get("examples") or [], "relevance": 100})
         rows.extend(result.get("candidates") or [])
         return rows
 
     def _move_selection(self, step: int) -> None:
-        if not self._rows:
-            return
-        self._selected_index = max(0, min(len(self._rows) - 1, self._selected_index + step))
-        self._render_selection()
+        if self._rows:
+            self._selected_index = max(0, min(len(self._rows) - 1, self._selected_index + step)); self._render_selection()
 
     def _render_selection(self) -> None:
-        if not self._rows:
-            self.results.text = "No results."
-            self.preview.text = ""
-            return
-        display_lines = []
-        for index, row in enumerate(self._rows):
-            marker = "❯" if index == self._selected_index else " "
-            display_lines.append(f"{marker} {row['headword']}  ({row['pos']})  {row['definition']}")
-        self.results.text = "\n".join(display_lines)
-        self.preview.text = format_candidate_preview(self._rows[self._selected_index])
+        self.preview_control.text = candidate_preview_fragments(self._rows[self._selected_index]) if self._rows else ""
 
     def _copy_selected(self) -> None:
-        if not self._rows:
-            return
-        from revdict.cli import _run_copy_selection
-
-        headword = self._rows[self._selected_index]["headword"]
-        _run_copy_selection(headword)
-        self.status.text = f"Copied: {headword}"
+        if self._rows:
+            from revdict.cli import _run_copy_selection
+            headword = self._rows[self._selected_index]["headword"]; _run_copy_selection(headword); self.status.text = f"Copied: {headword}"
 
 
 def run() -> None:
-    """Launch the default interactive UI using the established CLI backend."""
-    from revdict.cli import _get_search_result
-
-    NativeTui(lambda query, **kwargs: _get_search_result(query, LIVE_TUI_TOP_N, **kwargs)).run()
+    from revdict.cli import _get_search_result_with_progress
+    NativeTui(lambda query, on_progress=lambda _event: None, **kwargs: _get_search_result_with_progress(query, LIVE_TUI_TOP_N, on_progress, **kwargs)).run()

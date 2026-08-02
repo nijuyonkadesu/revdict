@@ -8,6 +8,9 @@ from revdict.tui import (
     NativeTui,
     SearchControls,
     ValidationError,
+    _wrap_result_fragments,
+    build_help_text,
+    candidate_preview_fragments,
     format_candidate_preview,
 )
 
@@ -165,6 +168,39 @@ def test_candidate_preview_includes_all_available_search_details():
     assert 'Example: "a joyful noise"' in preview
 
 
+def test_stress_preview_parses_ansi_instead_of_rendering_escape_characters():
+    """Regression for the literal ^[[38;5… text shown by the old TextArea."""
+    fragments = candidate_preview_fragments(
+        {"headword": "console", "pos": "noun", "definition": "comfort", "examples": [], "synonyms": [], "stress": "\x1b[1;33mCON\x1b[0msole", "label": "joy", "polarity": "positive", "relevance": 90}
+    )
+
+    assert "\x1b" not in "".join(text for _, text, *_ in fragments)
+    assert "CON" in "".join(text for _, text, *_ in fragments)
+
+
+def test_result_renderer_wraps_before_a_definition_word_and_marks_selection():
+    """A narrow result pane must preserve words while retaining visible selection."""
+    lines, _ = _wrap_result_fragments(
+        [{"headword": "consolation", "pos": "noun", "definition": "comfort during disappointment"}],
+        selected_index=0,
+        width=28,
+    )
+
+    rendered_words = [text.strip() for line in lines for _, text in line if text.strip()]
+    assert "disappointment" in rendered_words
+    assert all("class:result.selected" in style for style, _ in lines[0])
+    assert any("class:result.headword" in style for style, _ in lines[0])
+
+
+def test_generated_help_lists_every_filter_and_the_preview_key():
+    help_text = build_help_text()
+
+    assert "F3" in help_text
+    assert "Sort" in help_text
+    assert "Sounds like" in help_text
+    assert "Idioms and slang" in help_text
+
+
 def test_native_tui_close_is_safe_before_the_terminal_loop_starts():
     """Catches cleanup raising when startup fails before Application.run()."""
     ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
@@ -185,12 +221,12 @@ def test_run_adapts_the_cli_backend_to_the_native_ui_search_contract(monkeypatch
 
     monkeypatch.setattr(tui, "NativeTui", FakeTui)
 
-    def fake_search(query, top_n, **kwargs):
+    def fake_search(query, top_n, on_progress, **kwargs):
         received_calls.append((query, top_n, kwargs))
         return {"exact_match": None, "candidates": []}
 
-    monkeypatch.setattr("revdict.cli._get_search_result", fake_search)
+    monkeypatch.setattr("revdict.cli._get_search_result_with_progress", fake_search)
 
     tui.run()
 
-    assert received_calls == [("happy", 30, {"sort_mode": "alpha"})]
+    assert received_calls == [("happy", 50, {"sort_mode": "alpha"})]

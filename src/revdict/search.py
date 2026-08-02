@@ -9,6 +9,7 @@ from revdict import phonetics
 from revdict import query_syntax
 from revdict import sort
 from revdict import structural_search
+from revdict.progress import ProgressReporter
 from revdict.models import phonetics as phonetics_models
 from revdict.models import stress
 from revdict.models.embedder import Embedder
@@ -305,21 +306,28 @@ def search(
     rhymes_with: str | None = None,
     sounds_like: str | None = None,
     meter: str | None = None,
+    progress: ProgressReporter | None = None,
 ) -> dict:
+    progress = progress or ProgressReporter()
+    progress.active("ready")
     state = _load_state()
+    progress.completed("ready")
 
     # Validated eagerly, independent of whether any row survives to reach
     # filter_by_category below -- an unrecognized category must always
     # raise, even when the candidate pool happens to be empty (e.g. the
     # only row is excluded as the exact match), so this can't rely on
     # matches_category being reached by the per-row filter.
+    progress.active("validate")
     if category and category not in category_module.CATEGORIES:
         raise ValueError(f"Unknown category: {category!r}")
+    progress.completed("validate")
 
     # Resolved eagerly too, for the same reason as the category guard above
     # -- --rhymes-with/--sounds-like's target word must resolve (or raise a
     # clear error) regardless of parsed.mode or how the candidate pool ends
     # up shaped, not only when a row happens to reach filter_by_phonetics.
+    progress.active("phonetics")
     rhyme_key = None
     if rhymes_with:
         rhyme_key = resolve_phonetic_target(rhymes_with, "rhymes-with")["rhyme_key"]
@@ -327,8 +335,11 @@ def search(
     sounds_like_phonemes = None
     if sounds_like:
         sounds_like_phonemes = resolve_phonetic_target(sounds_like, "sounds-like")["phonemes"]
+    progress.completed("phonetics")
 
+    progress.active("parse")
     parsed = query_syntax.parse_query(query)
+    progress.completed("parse")
     if parsed.mode in ("structural", "expand", "phrase_contains"):
         result = structural_search.run_structural(
             parsed,
@@ -340,12 +351,16 @@ def search(
             rhyme_key=rhyme_key,
             sounds_like_phonemes=sounds_like_phonemes,
             meter=meter,
+            progress=progress,
         )
         result["candidates"] = sort.apply_sort(
             result["candidates"], sort_mode, state["literary_frequency"]
         )
+        progress.active("finalize")
+        progress.completed("finalize")
         return result
 
+    progress.active("scope")
     metadata = state["metadata"]
     # The retrieval pool must stay bigger than top_n even after dedup and
     # exact-match exclusion shrink it, so a larger -n still has enough real
@@ -359,11 +374,13 @@ def search(
         suppress_exact_match = True
 
     meaning_query = parsed.meaning_text if parsed.meaning_text is not None else query
+    progress.completed("scope")
 
     # query_vec is only computed on the branches that actually need cosine
     # retrieval -- when the structural filter has already narrowed the pool
     # to <= retrieval_pool_size rows, there's nothing to retrieve by
     # embedding similarity, so encoding the query would be pure waste.
+    progress.active("retrieve")
     if restrict_row_indices is not None and len(restrict_row_indices) <= retrieval_pool_size:
         retrieved = [(index, 0.0) for index in restrict_row_indices]
     elif restrict_row_indices is not None:
@@ -377,13 +394,20 @@ def search(
         retrieved = cosine_top_k(
             query_vec, state["embeddings"], k=retrieval_pool_size, matrix_norms=state["embedding_norms"]
         )
+    progress.completed("retrieve")
 
     definitions = [metadata[index]["definition"] for index, _ in retrieved]
     # A structural filter that matches zero headwords (e.g. an anagram with
     # no real solutions) reaches here with an empty `retrieved`/`definitions`
     # -- skip the reranker call entirely rather than relying on
     # CrossEncoder.predict's undocumented behavior on an empty batch.
-    rerank_scores = state["reranker"].score(meaning_query, definitions) if definitions else []
+    progress.active("rerank")
+    if definitions:
+        rerank_scores = state["reranker"].score(meaning_query, definitions)
+        progress.completed("rerank")
+    else:
+        rerank_scores = []
+        progress.skipped("rerank")
     literary_frequency = state["literary_frequency"]
     scored = []
     for i in range(len(retrieved)):
@@ -392,6 +416,7 @@ def search(
         adjusted = combine_score(rerank_scores[i], headword, literary_frequency)
         scored.append((row_index, adjusted))
 
+    progress.active("filter")
     exact_match_raw = None
     if not suppress_exact_match:
         exact_match_raw = dictionary.lookup_exact(meaning_query.strip(), state["word_index"], metadata)
@@ -406,12 +431,14 @@ def search(
     deduped = filter_by_phonetics(
         deduped, metadata, syllables, primary_vowel, rhyme_key, sounds_like_phonemes, meter
     )[:top_n]
+    progress.completed("filter")
     # absolute_relevance (not relative_relevance) drives the displayed
     # confidence: it reflects genuine absolute match quality, so a
     # low-confidence/gibberish query reads as visibly low across the board
     # instead of always showing a 0-100 spread regardless of match quality.
     relevances = absolute_relevance([score for _, score in deduped])
 
+    progress.active("enrich")
     candidates = [
         build_candidate(metadata[row_index], relevance, state)
         for (row_index, _), relevance in zip(deduped, relevances)
@@ -421,4 +448,8 @@ def search(
     exact_match = tag_exact_match_senses(
         exact_match_raw, classifier_factory=lambda: get_classifier(state)
     )
-    return {"exact_match": exact_match, "candidates": candidates}
+    progress.completed("enrich")
+    progress.active("finalize")
+    result = {"exact_match": exact_match, "candidates": candidates}
+    progress.completed("finalize")
+    return result

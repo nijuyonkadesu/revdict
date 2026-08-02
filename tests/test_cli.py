@@ -108,6 +108,38 @@ def test_main_routes_daemon_start_to_run_server(monkeypatch):
     assert called["ran"] is True
 
 
+def test_progress_ui_restarts_a_legacy_daemon_once_before_querying(monkeypatch, tmp_path):
+    """The native UI must replace, rather than multiply, an old daemon process."""
+    socket_path = tmp_path / "daemon.sock"
+    socket_path.write_text("legacy")
+    monkeypatch.setattr(cli.daemon, "DAEMON_SOCKET_PATH", socket_path)
+    calls = []
+    monkeypatch.setattr(cli.daemon, "supports_progress", lambda: False)
+
+    def stop():
+        calls.append("stop")
+        socket_path.unlink()
+        return True
+
+    def ensure():
+        calls.append("start")
+        socket_path.write_text("current")
+        return True
+
+    monkeypatch.setattr(cli.daemon, "stop_daemon", stop)
+    monkeypatch.setattr(cli.daemon, "ensure_daemon_running", ensure)
+    monkeypatch.setattr(
+        cli.daemon,
+        "send_progress_query",
+        lambda query, top_n, on_progress, **kwargs: {"exact_match": None, "candidates": [{"headword": query}]},
+    )
+
+    result = cli._get_search_result_with_progress("happy", 50, lambda _event: None)
+
+    assert calls == ["stop", "start"]
+    assert result["candidates"] == [{"headword": "happy"}]
+
+
 def test_main_routes_daemon_stop_and_reports_when_nothing_was_running(monkeypatch, capsys):
     monkeypatch.setattr(cli, "_daemon_stop", lambda: False)
 

@@ -44,10 +44,56 @@ def test_send_query_round_trips_a_real_request_over_a_unix_socket(tmp_path, monk
     assert result == response_payload
 
 
+def test_send_progress_query_receives_stage_events_before_its_result(tmp_path, monkeypatch):
+    """The native UI needs live stage data, while result payloads stay unchanged."""
+    socket_path = tmp_path / "daemon.sock"
+    monkeypatch.setattr(daemon, "DAEMON_SOCKET_PATH", socket_path)
+    ready_event = threading.Event()
+    received = {}
+
+    def streaming_server():
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(socket_path))
+        server.listen(1)
+        ready_event.set()
+        conn, _ = server.accept()
+        with conn:
+            request = b""
+            while chunk := conn.recv(65536):
+                request += chunk
+            received.update(json.loads(request.decode("utf-8")))
+            conn.sendall(
+                b'{"type":"stage","id":"ready","state":"active","ordinal":1,"total":10,"label":"Ready search state"}\n'
+                b'{"type":"result","result":{"exact_match":null,"candidates":[]}}\n'
+            )
+        server.close()
+
+    thread = threading.Thread(target=streaming_server)
+    thread.start()
+    assert ready_event.wait(timeout=2)
+    events = []
+
+    result = daemon.send_progress_query("happy", 50, events.append, timeout=2.0)
+
+    thread.join(timeout=2)
+    assert received["protocol"] == "progress-v1"
+    assert events == [{"type": "stage", "id": "ready", "state": "active", "ordinal": 1, "total": 10, "label": "Ready search state"}]
+    assert result == {"exact_match": None, "candidates": []}
+
+
 def test_send_query_returns_none_when_socket_file_does_not_exist(tmp_path, monkeypatch):
     monkeypatch.setattr(daemon, "DAEMON_SOCKET_PATH", tmp_path / "does-not-exist.sock")
 
     assert daemon.send_query("happy", 10, timeout=0.5) is None
+
+
+def test_progress_capability_is_unknown_when_a_live_socket_does_not_answer(tmp_path, monkeypatch):
+    """A busy current daemon must not be mistaken for legacy and killed."""
+    socket_path = tmp_path / "daemon.sock"
+    socket_path.write_text("placeholder")
+    monkeypatch.setattr(daemon, "DAEMON_SOCKET_PATH", socket_path)
+
+    assert daemon.supports_progress(timeout=0.01) is None
 
 
 def test_send_query_returns_none_when_server_reports_an_error(tmp_path, monkeypatch):
@@ -133,6 +179,29 @@ def test_handle_request_returns_error_payload_on_malformed_json():
 
     payload = json.loads(response_text)
     assert "error" in payload
+
+
+def test_handle_progress_request_forwards_search_events_and_finishes_with_result():
+    """A streaming daemon response must preserve search's actual stage ordering."""
+    events = []
+
+    def fake_search(query, top_n, sort_mode, category, progress, **_kwargs):
+        assert (query, top_n, sort_mode, category) == ("happy", 50, None, None)
+        progress.active("ready")
+        progress.completed("ready")
+        return {"exact_match": None, "candidates": [{"headword": "joyful"}]}
+
+    daemon._handle_progress_request(
+        json.dumps({"query": "happy", "top_n": 50, "protocol": "progress-v1"}),
+        fake_search,
+        events.append,
+    )
+
+    assert events[-1] == {
+        "type": "result",
+        "result": {"exact_match": None, "candidates": [{"headword": "joyful"}]},
+    }
+    assert [event["state"] for event in events[:-1]] == ["active", "completed"]
 
 
 def test_socket_is_reachable_returns_false_when_socket_file_does_not_exist(tmp_path, monkeypatch):

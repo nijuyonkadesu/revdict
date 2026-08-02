@@ -62,15 +62,23 @@ revdict --fzf
 ### Native live UI
 
 Bare `revdict` opens the native terminal UI. Type ordinary reverse-dictionary
-queries or any form from the [query syntax](#query-syntax) table. `F2` opens
-the filter form for every sort mode, category, and phonetic filter; changes
-search automatically after a short debounce. The result list and preview stay
-visible while filters are edited.
+queries or any form from the [query syntax](#query-syntax) table. It shows up
+to 50 results, with the list, filters, preview, and an always-visible ten-step
+search progress display on one screen. `F2` opens every supported filter:
+Sort and Category are arrow-key/mouse radio lists, while phonetic filters are
+validated text fields. `F1` is generated from those control definitions and
+the keybinding registry, so it always reflects the UI.
+
+The UI intentionally uses terminal-default colours and terminal attributes
+(bold and reverse-video selection), so it follows your terminal theme. Stress
+marks retain their own syllable palette. Results and previews have usable
+scrollbars: mouse-wheel scrolling works in either pane, and words wrap only
+at word boundaries.
 
 | Key | Action |
 |---|---|
-| `F1` | Toggle query-syntax and keybinding help |
-| `F2` | Open/close search controls (`Tab` moves between fields) |
+| `F1` | Toggle generated query, filter, and keybinding help |
+| `F2` | Open/close search controls (`↑` / `↓` choose Sort and Category) |
 | `F3` | Toggle the preview pane |
 | `Ctrl-R` | Cycle sort order |
 | `Ctrl-N` / `Ctrl-P` | Select next/previous result |
@@ -83,7 +91,10 @@ fzf session for users who prefer it; one-shot interactive queries continue to
 use fzf when it is installed.
 
 The first query when no daemon is running starts a background daemon that keeps the index
-and models warm in memory, so subsequent queries are fast:
+and models warm in memory, so subsequent queries are fast. The native UI uses
+the daemon's progress protocol; if it finds an older daemon, it restarts it
+once automatically before replaying the current query. This keeps exactly one
+daemon running while enabling truthful progress details:
 
 ```bash
 revdict daemon status   # is it running?
