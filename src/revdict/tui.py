@@ -83,7 +83,8 @@ class TerminalTheme:
                 "query": "bold", "muted": "dim", "border": "bold", "section.title": "bold",
                 "result.headword": "bold", "result.pos": "dim", "result.selected": "reverse dim",
                 "result.sentiment.positive": "", "result.sentiment.negative": "", "result.confidence": "",
-                "stress": "bold", "stress.no_color": "bold",
+                "stress": "", "stress.nuclear": "reverse", "stress.prominent": "bold",
+                "stress.secondary": "underline", "stress.reduced": "dim",
                 "scrollbar.thumb": "", "scrollbar.track": "dim",
                 "button.key": "bold", "button.label": "", "button.label.focused": "bold",
             }
@@ -91,7 +92,8 @@ class TerminalTheme:
             "query": "bold", "muted": "dim", "border": "bold", "section.title": "bold",
             "result.headword": f"ansi{self.accent} bold", "result.pos": "dim", "result.selected": "reverse dim",
             "result.sentiment.positive": "ansigreen", "result.sentiment.negative": "ansired", "result.confidence": "ansimagenta",
-            "stress": "#ffcc00 bold", "stress.no_color": "bold",
+            "stress": "fg:#ffcc00", "stress.nuclear": "reverse", "stress.prominent": "bold",
+            "stress.secondary": "underline", "stress.reduced": "dim",
             "scrollbar.thumb": "", "scrollbar.track": "dim",
             "button.key": "bold", "button.label": "", "button.label.focused": "ansimagenta bold",
         }
@@ -310,21 +312,47 @@ def format_candidate_preview(candidate: dict) -> str:
 
 
 def _stress_fragments(value: str, *, no_color: bool) -> list[tuple[str, str]]:
-    """Keep stress attributes while pinning the stress-marker hue itself."""
+    """Map every stress span to a dotted class rooted at ``stress``.
+
+    FormattedText fragments are independent. ``class:stress.nuclear`` lets
+    prompt_toolkit expand both the pinned gold base and the reverse-video
+    modifier for the same fragment; combining ``class:stress`` with a bare
+    ``reverse`` token does not reliably retain that inheritance.
+    """
     fragments: list[tuple[str, str]] = []
+
+    def append(style: str, text: str) -> None:
+        if not text:
+            return
+        if fragments and fragments[-1][0] == style:
+            previous_style, previous_text = fragments[-1]
+            fragments[-1] = (previous_style, previous_text + text)
+        else:
+            fragments.append((style, text))
+
     for style, text, *_ in to_formatted_text(ANSI(value.rstrip())):
-        attributes = " ".join(attribute for attribute in ("bold", "italic", "underline", "reverse", "dim") if attribute in style)
+        attributes = tuple(attribute for attribute in ("bold", "italic", "underline", "reverse", "dim") if attribute in style)
         is_stress_marker = "ansiyellow" in style or "#d7d700" in style
         if is_stress_marker:
-            mapped_style = "class:stress.no_color" if no_color else "class:stress"
-            attributes = " ".join(attribute for attribute in attributes.split() if attribute != "bold")
+            prominence = next(
+                (
+                    name
+                    for attribute, name in (
+                        ("reverse", "nuclear"),
+                        ("underline", "secondary"),
+                        ("dim", "reduced"),
+                        ("bold", "prominent"),
+                    )
+                    if attribute in attributes
+                ),
+                None,
+            )
+            mapped_style = f"class:stress.{prominence}" if prominence else "class:stress"
         elif "#" in style or "ansi" in style:
-            mapped_style = "class:muted"
+            mapped_style = " ".join(("class:muted", *attributes))
         else:
-            mapped_style = attributes
-        if mapped_style and attributes and mapped_style != attributes:
-            mapped_style = f"{mapped_style} {attributes}"
-        fragments.append((mapped_style, text))
+            mapped_style = " ".join(attributes)
+        append(mapped_style, text)
     return fragments
 
 

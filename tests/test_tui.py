@@ -10,6 +10,7 @@ from prompt_toolkit.keys import Keys
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from prompt_toolkit.output import DummyOutput
 from prompt_toolkit.output.color_depth import ColorDepth
+from prompt_toolkit.styles import Style
 
 from revdict import tui
 from revdict.tui import (
@@ -241,6 +242,31 @@ def test_stress_preview_parses_ansi_instead_of_rendering_escape_characters():
     assert "CON" in visible_text
 
 
+def test_stress_syllables_use_dotted_classes_to_keep_the_pinned_hue():
+    fragments = tui._stress_fragments(
+        "\x1b[1;7;33mPEARL\x1b[0m\x1b[1;33mPROM\x1b[0m"
+        "\x1b[4;38;5;184mstone\x1b[0m\x1b[2;38;5;184mreduced\x1b[0m",
+        no_color=False,
+    )
+    theme = tui.TerminalTheme.from_environment({"COLORTERM": "truecolor"})
+
+    assert fragments == [
+        ("class:stress.nuclear", "PEARL"),
+        ("class:stress.prominent", "PROM"),
+        ("class:stress.secondary", "stone"),
+        ("class:stress.reduced", "reduced"),
+    ]
+    assert theme.styles["stress"] == "fg:#ffcc00"
+    assert theme.styles["stress.nuclear"] == "reverse"
+    assert theme.styles["stress.prominent"] == "bold"
+    assert theme.styles["stress.secondary"] == "underline"
+    assert theme.styles["stress.reduced"] == "dim"
+
+    rendered = Style.from_dict(theme.styles).get_attrs_for_style_str("class:stress.nuclear")
+    assert rendered.color == "ffcc00"
+    assert rendered.reverse is True
+
+
 def test_stress_preview_preserves_reverse_video_highlighter_spans():
     fragments = candidate_preview_fragments(
         {"headword": "pearlstone", "pos": "noun", "definition": "a pearl-like stone", "examples": [], "synonyms": [], "stress": "pearl\x1b[7mstone\x1b[0m", "label": "neutral", "polarity": "neutral", "relevance": 90},
@@ -290,7 +316,7 @@ def test_terminal_theme_uses_terminal_ansi_roles_and_gates_truecolor():
     assert disabled.color_depth is ColorDepth.DEPTH_8_BIT
 
 
-def test_no_color_removes_ui_colours_and_stress_falls_back_to_bold():
+def test_no_color_removes_ui_colours_and_stress_keeps_its_prominence_attribute():
     theme = tui.TerminalTheme.from_environment({"NO_COLOR": "1", "COLORTERM": "truecolor"}, truecolor_requested=True)
     fragments = candidate_preview_fragments(
         {"headword": "console", "pos": "noun", "definition": "comfort", "examples": [], "synonyms": [], "stress": "\x1b[1;33mCON\x1b[0msole", "label": "joy", "polarity": "positive", "relevance": 90},
@@ -299,7 +325,7 @@ def test_no_color_removes_ui_colours_and_stress_falls_back_to_bold():
 
     assert theme.color_depth is ColorDepth.DEPTH_1_BIT
     assert all("ansi" not in style and "#" not in style for style in theme.styles.values())
-    assert "".join(text for style, text, *_ in fragments if style == "class:stress.no_color") == "CON"
+    assert "".join(text for style, text, *_ in fragments if style == "class:stress.prominent") == "CON"
 
 
 def test_preview_wrapper_moves_a_whole_word_to_the_next_line():
