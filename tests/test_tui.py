@@ -1,6 +1,9 @@
 import threading
 
 import pytest
+from prompt_toolkit.data_structures import Point
+from prompt_toolkit.keys import Keys
+from prompt_toolkit.mouse_events import MouseEvent, MouseEventType
 
 from revdict import tui
 from revdict.tui import (
@@ -200,8 +203,10 @@ def test_stress_preview_parses_ansi_instead_of_rendering_escape_characters():
         {"headword": "console", "pos": "noun", "definition": "comfort", "examples": [], "synonyms": [], "stress": "\x1b[1;33mCON\x1b[0msole", "label": "joy", "polarity": "positive", "relevance": 90}
     )
 
-    assert "\x1b" not in "".join(text for _, text, *_ in fragments)
-    assert "CON" in "".join(text for _, text, *_ in fragments)
+    visible_text = "".join(text for style, text, *_ in fragments if style != "[ZeroWidthEscape]")
+    assert ("[ZeroWidthEscape]", "\x1b[1;33m") in fragments
+    assert "\x1b" not in visible_text
+    assert "CON" in visible_text
 
 
 def test_result_renderer_wraps_before_a_definition_word_and_marks_selection():
@@ -234,6 +239,37 @@ def test_progress_line_reports_percent_phase_count_and_live_detail_in_one_line()
 
     assert line == "Searching 10% · 2/10 · Validate query and filters — Checking selected filters"
     assert "\n" not in line
+
+
+def test_escape_clears_a_nonempty_query_before_it_can_quit():
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    ui.query.text = "tailor"
+    try:
+        ui._clear_or_exit()
+
+        assert ui.query.text == ""
+        assert any(
+            binding.eager()
+            for binding in ui.application.key_bindings.get_bindings_for_keys((Keys.Escape,))
+        )
+    finally:
+        ui.close()
+
+
+def test_results_window_handles_mouse_wheel_events():
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    scrolled = []
+    ui.results._scroll_down = lambda: scrolled.append("down")
+    try:
+        handled = ui.results._mouse_handler(
+            MouseEvent(position=Point(x=0, y=0), event_type=MouseEventType.SCROLL_DOWN, button=None, modifiers=frozenset())
+        )
+
+        assert handled is None
+        assert scrolled == ["down"]
+        assert ui.application.mouse_support()
+    finally:
+        ui.close()
 
 
 def test_native_tui_close_is_safe_before_the_terminal_loop_starts():

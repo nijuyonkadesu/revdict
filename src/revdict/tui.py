@@ -9,7 +9,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, fields
 from typing import Any
 
-from prompt_toolkit.formatted_text import ANSI, to_formatted_text
 from prompt_toolkit.layout.controls import FormattedTextControl, UIContent, UIControl
 from prompt_toolkit.mouse_events import MouseEvent
 from prompt_toolkit.utils import get_cwidth
@@ -142,7 +141,22 @@ def candidate_preview_fragments(candidate: dict):
     text = format_candidate_preview({**candidate, "stress": None})
     fragments = [("", text)]
     if candidate.get("stress"):
-        fragments.extend([("", "\nStress: "), *to_formatted_text(ANSI(candidate["stress"].rstrip()))])
+        fragments.append(("", "\nStress: "))
+        fragments.extend(_stress_ansi_fragments(candidate["stress"].rstrip()))
+    return fragments
+
+
+def _stress_ansi_fragments(value: str):
+    """Pass stressmark's SGR bytes through unchanged, independent of UI colour depth."""
+    fragments = []
+    position = 0
+    for match in _ANSI_ESCAPE.finditer(value):
+        if match.start() > position:
+            fragments.append(("", value[position:match.start()]))
+        fragments.append(("[ZeroWidthEscape]", match.group()))
+        position = match.end()
+    if position < len(value):
+        fragments.append(("", value[position:]))
     return fragments
 
 
@@ -164,7 +178,11 @@ def _wrap_result_fragments(rows: list[dict], selected_index: int, width: int):
     for index, row in enumerate(rows):
         selected = index == selected_index
         selected_style = "class:result.selected" if selected else ""
-        header = [(selected_style, "❯ " if selected else "  "), (f"{selected_style} class:result.headword", row["headword"]), (selected_style, f"  ({row['pos']})  ")]
+        header = [
+            (selected_style, "❯ " if selected else "  "),
+            (f"{selected_style} class:result.headword", row["headword"]),
+            (f"{selected_style} class:result.pos", f"  ({row['pos']})  "),
+        ]
         tokens = header + [(selected_style, word + (" " if number < len(row["definition"].split()) - 1 else "")) for number, word in enumerate(row["definition"].split())]
         line: list[tuple[str, str]] = []
         used = 0
@@ -289,6 +307,7 @@ class NativeTui:
         from prompt_toolkit.filters import Condition
         from prompt_toolkit.key_binding import KeyBindings
         from prompt_toolkit.layout import ConditionalContainer, HSplit, Layout, VSplit, Window
+        from prompt_toolkit.layout.dimension import Dimension
         from prompt_toolkit.layout.margins import ScrollbarMargin
         from prompt_toolkit.styles import Style
         from prompt_toolkit.widgets import Frame, Label, TextArea
@@ -311,18 +330,27 @@ class NativeTui:
         self.results = Window(content=self.results_control, wrap_lines=False, right_margins=[ScrollbarMargin(display_arrows=True)], always_hide_cursor=True)
         self.preview_control = FormattedTextControl("")
         self.preview = Window(content=self.preview_control, wrap_lines=True, right_margins=[ScrollbarMargin(display_arrows=True)], always_hide_cursor=True)
-        self.progress_control = FormattedTextControl(self._progress_fragments)
-        self.progress = Window(content=self.progress_control, wrap_lines=False, always_hide_cursor=True)
-        self.active_filters = Label(text="sort: relevance  category: all")
-        self.status = Label(text="F1 help · F2 filters · F3 preview · Ctrl-R sort · Enter copy")
+        self.progress = Label(text=self._progress_fragments(), dont_extend_height=True, wrap_lines=False)
+        self.active_filters = Label(text="sort: relevance  category: all", style="class:muted")
+        self.status = Label(text="F1 help · F2 filters · F3 preview · Ctrl-R sort · Enter copy", style="class:muted")
         controls = Frame(HSplit([self.sort_field, self.category_field, self.syllables_field, self.vowel_field, self.rhymes_field, self.sounds_field, self.meter_field], padding=0), title="Search controls — arrows choose Sort and Category")
+        results_frame = Frame(self.results, title="Results", width=Dimension(weight=3))
+        preview_frame = Frame(self.preview, title="Preview", width=Dimension(weight=2))
+        panes = VSplit(
+            [
+                results_frame,
+                ConditionalContainer(preview_frame, Condition(lambda: self._show_preview)),
+            ],
+            padding=1,
+            height=Dimension(weight=1),
+        )
         root = HSplit([
             Frame(self.query, title="revdict"), self.active_filters,
-            Frame(self.progress, title="Search progress"),
-            VSplit([Frame(self.results, title="Results"), ConditionalContainer(Frame(self.preview, title="Preview"), Condition(lambda: self._show_preview))], padding=1),
+            panes,
             ConditionalContainer(controls, Condition(lambda: self._show_controls)),
             ConditionalContainer(Frame(Label(text=build_help_text()), title="Help"), Condition(lambda: self._show_help)),
             self.status,
+            self.progress,
         ], padding=1)
         bindings = KeyBindings()
         @bindings.add("f1")
@@ -345,13 +373,26 @@ class NativeTui:
         def previous_result(event): self._move_selection(-1); event.app.invalidate()
         @bindings.add("enter", filter=Condition(lambda: self.application.layout.current_window == self.query.window))
         def copy_result(event): self._copy_selected(); event.app.invalidate()
-        @bindings.add("escape")
+        @bindings.add("escape", eager=True)
         def clear_or_exit(event):
-            if self.query.text: self.query.text = ""
-            else: self.close()
+            self._clear_or_exit()
         @bindings.add("c-c")
         def quit_ui(event): self.close()
-        self.application = Application(layout=Layout(root, focused_element=self.query), key_bindings=bindings, style=Style.from_dict({"query": "bold", "result.headword": "bold", "result.selected": "reverse"}), full_screen=True, mouse_support=True)
+        self.application = Application(
+            layout=Layout(root, focused_element=self.query),
+            key_bindings=bindings,
+            style=Style.from_dict(
+                {
+                    "query": "bold",
+                    "muted": "dim",
+                    "result.headword": "bold",
+                    "result.pos": "underline",
+                    "result.selected": "reverse",
+                }
+            ),
+            full_screen=True,
+            mouse_support=True,
+        )
         self._controller = DebouncedSearchController(self._search_executor, self._receive_result, self._receive_error, on_progress=self._receive_progress, callback_scheduler=self._schedule_on_ui_thread)
         self.query.buffer.on_text_changed += lambda _buffer: self._schedule_search()
         for item in (self.syllables_field, self.vowel_field, self.rhymes_field, self.sounds_field, self.meter_field):
@@ -360,6 +401,11 @@ class NativeTui:
     def _progress_fragments(self):
         return [("bold", format_progress_line(self._stage_states, self._stage_details))]
 
+    def _reset_progress(self) -> None:
+        self._stage_states = {stage.id: "pending" for stage in STAGES}
+        self._stage_details = {}
+        self.progress.text = self._progress_fragments()
+
     def run(self) -> None:
         self.application.run()
 
@@ -367,6 +413,12 @@ class NativeTui:
         self._controller.close()
         if self.application.future is not None:
             self.application.exit()
+
+    def _clear_or_exit(self) -> None:
+        if self.query.text:
+            self.query.text = ""
+        else:
+            self.close()
 
     def _schedule_on_ui_thread(self, callback: Callable[[], None]) -> None:
         loop = self.application.loop
@@ -384,12 +436,12 @@ class NativeTui:
         query = self.query.text.strip()
         if not query:
             self._controller.clear(); self._rows = []; self._selected_index = 0; self.preview_control.text = ""
-            self._stage_states = {stage.id: "pending" for stage in STAGES}; self._stage_details = {}; self.status.text = "F1 help · F2 filters · F3 preview · Ctrl-R sort · Enter copy"; self.application.invalidate(); return
+            self._reset_progress(); self.status.text = "F1 help · F2 filters · F3 preview · Ctrl-R sort · Enter copy"; self.application.invalidate(); return
         try:
             controls = self._read_controls(); controls.validate()
         except ValidationError as error:
             self.status.text = f"Invalid filter: {error}"; self.application.invalidate(); return
-        self._controls = controls; self._set_active_filters(); self._stage_states = {stage.id: "pending" for stage in STAGES}; self._stage_details = {}
+        self._controls = controls; self._set_active_filters(); self._reset_progress()
         self.status.text = "Searching…"; self._controller.request(query, controls); self.application.invalidate()
 
     def _set_active_filters(self) -> None:
@@ -403,6 +455,7 @@ class NativeTui:
         self._stage_states[event["id"]] = event["state"]
         if detail := event.get("detail"):
             self._stage_details[event["id"]] = detail
+        self.progress.text = self._progress_fragments()
         self.application.invalidate()
 
     def _receive_result(self, result: dict) -> None:
