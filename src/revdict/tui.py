@@ -9,7 +9,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, fields
 from typing import Any
 
-from prompt_toolkit.layout.controls import FormattedTextControl, UIContent, UIControl
+from prompt_toolkit.formatted_text import ANSI, to_formatted_text
+from prompt_toolkit.layout.controls import UIContent, UIControl
 from prompt_toolkit.mouse_events import MouseEvent
 from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.widgets import RadioList
@@ -141,23 +142,63 @@ def candidate_preview_fragments(candidate: dict):
     text = format_candidate_preview({**candidate, "stress": None})
     fragments = [("", text)]
     if candidate.get("stress"):
-        fragments.append(("", "\nStress: "))
-        fragments.extend(_stress_ansi_fragments(candidate["stress"].rstrip()))
+        fragments.extend([("", "\nStress: "), *to_formatted_text(ANSI(candidate["stress"].rstrip()))])
     return fragments
 
 
-def _stress_ansi_fragments(value: str):
-    """Pass stressmark's SGR bytes through unchanged, independent of UI colour depth."""
-    fragments = []
-    position = 0
-    for match in _ANSI_ESCAPE.finditer(value):
-        if match.start() > position:
-            fragments.append(("", value[position:match.start()]))
-        fragments.append(("[ZeroWidthEscape]", match.group()))
-        position = match.end()
-    if position < len(value):
-        fragments.append(("", value[position:]))
-    return fragments
+def word_wrap_fragments(fragments, width: int):
+    """Wrap formatted text at words while retaining every fragment's style."""
+    width = max(1, width)
+    lines: list[list[tuple[str, str]]] = []
+    line: list[tuple[str, str]] = []
+    word: list[tuple[str, str]] = []
+    used = 0
+    word_width = 0
+    pending_space = False
+
+    def append_fragment(target, style: str, text: str) -> None:
+        if target and target[-1][0] == style:
+            target[-1] = (style, target[-1][1] + text)
+        else:
+            target.append((style, text))
+
+    def flush_word() -> None:
+        nonlocal line, word, used, word_width, pending_space
+        if not word:
+            return
+        separator = 1 if pending_space and line else 0
+        if line and used + separator + word_width > width:
+            lines.append(line)
+            line = []
+            used = 0
+            separator = 0
+        if separator:
+            append_fragment(line, "", " ")
+            used += 1
+        line.extend(word)
+        used += word_width
+        word = []
+        word_width = 0
+        pending_space = False
+
+    for style, text, *_ in fragments:
+        for character in text:
+            if character == "\n":
+                flush_word()
+                lines.append(line)
+                line = []
+                used = 0
+                pending_space = False
+            elif character.isspace():
+                flush_word()
+                pending_space = bool(line)
+            else:
+                append_fragment(word, style, character)
+                word_width += get_cwidth(character)
+    flush_word()
+    if line or not lines:
+        lines.append(line)
+    return lines
 
 
 def format_progress_line(states: dict[str, str], details: dict[str, str]) -> str:
@@ -214,6 +255,20 @@ class ResultsControl(UIControl):
         return NotImplemented
 
 
+class WordWrappedControl(UIControl):
+    """A scrollable formatted-text control that never breaks words mid-token."""
+
+    def __init__(self) -> None:
+        self.fragments = []
+
+    def create_content(self, width: int, height: int | None) -> UIContent:
+        lines = word_wrap_fragments(self.fragments, width)
+        return UIContent(get_line=lambda i: lines[i], line_count=len(lines), show_cursor=False)
+
+    def mouse_handler(self, mouse_event: MouseEvent):
+        return NotImplemented
+
+
 class TrackingRadioList(RadioList):
     def __init__(self, *args, on_change: Callable[[], None], **kwargs) -> None:
         self._on_change = on_change
@@ -229,7 +284,7 @@ class TrackingRadioList(RadioList):
 class DebouncedSearchController:
     """One long-lived worker coalesces input without subprocess or thread churn."""
 
-    def __init__(self, execute: Callable[..., dict], on_result: Callable[[dict], None], on_error: Callable[[Exception], None], *, on_progress: Callable[[dict], None] | None = None, debounce_seconds: float = 0.1, callback_scheduler: Callable[[Callable[[], None]], None] | None = None) -> None:
+    def __init__(self, execute: Callable[..., dict], on_result: Callable[[dict], None], on_error: Callable[[Exception], None], *, on_progress: Callable[[dict], None] | None = None, debounce_seconds: float = 0.3, callback_scheduler: Callable[[Callable[[], None]], None] | None = None) -> None:
         self._execute, self._on_result, self._on_error, self._on_progress = execute, on_result, on_error, on_progress
         self._debounce_seconds = debounce_seconds
         self._schedule_callback = callback_scheduler or (lambda callback: callback())
@@ -309,6 +364,7 @@ class NativeTui:
         from prompt_toolkit.layout import ConditionalContainer, HSplit, Layout, VSplit, Window
         from prompt_toolkit.layout.dimension import Dimension
         from prompt_toolkit.layout.margins import ScrollbarMargin
+        from prompt_toolkit.output.color_depth import ColorDepth
         from prompt_toolkit.styles import Style
         from prompt_toolkit.widgets import Frame, Label, TextArea
 
@@ -328,8 +384,8 @@ class NativeTui:
         self.meter_field = TextArea(prompt="Meter: ", multiline=False, height=1)
         self.results_control = ResultsControl(lambda: self._rows, lambda: self._selected_index)
         self.results = Window(content=self.results_control, wrap_lines=False, right_margins=[ScrollbarMargin(display_arrows=True)], always_hide_cursor=True)
-        self.preview_control = FormattedTextControl("")
-        self.preview = Window(content=self.preview_control, wrap_lines=True, right_margins=[ScrollbarMargin(display_arrows=True)], always_hide_cursor=True)
+        self.preview_control = WordWrappedControl()
+        self.preview = Window(content=self.preview_control, wrap_lines=False, right_margins=[ScrollbarMargin(display_arrows=True)], always_hide_cursor=True)
         self.progress = Label(text=self._progress_fragments(), dont_extend_height=True, wrap_lines=False)
         self.active_filters = Label(text="sort: relevance  category: all", style="class:muted")
         self.status = Label(text="F1 help · F2 filters · F3 preview · Ctrl-R sort · Enter copy", style="class:muted")
@@ -386,14 +442,22 @@ class NativeTui:
                     "query": "bold",
                     "muted": "dim",
                     "result.headword": "bold",
-                    "result.pos": "underline",
+                    "result.pos": "dim",
                     "result.selected": "reverse",
                 }
             ),
             full_screen=True,
             mouse_support=True,
+            color_depth=ColorDepth.DEPTH_8_BIT,
         )
-        self._controller = DebouncedSearchController(self._search_executor, self._receive_result, self._receive_error, on_progress=self._receive_progress, callback_scheduler=self._schedule_on_ui_thread)
+        self._controller = DebouncedSearchController(
+            self._search_executor,
+            self._receive_result,
+            self._receive_error,
+            on_progress=self._receive_progress,
+            debounce_seconds=0.3,
+            callback_scheduler=self._schedule_on_ui_thread,
+        )
         self.query.buffer.on_text_changed += lambda _buffer: self._schedule_search()
         for item in (self.syllables_field, self.vowel_field, self.rhymes_field, self.sounds_field, self.meter_field):
             item.buffer.on_text_changed += lambda _buffer: self._schedule_search()
@@ -435,7 +499,7 @@ class NativeTui:
     def _schedule_search(self) -> None:
         query = self.query.text.strip()
         if not query:
-            self._controller.clear(); self._rows = []; self._selected_index = 0; self.preview_control.text = ""
+            self._controller.clear(); self._rows = []; self._selected_index = 0; self.preview_control.fragments = []
             self._reset_progress(); self.status.text = "F1 help · F2 filters · F3 preview · Ctrl-R sort · Enter copy"; self.application.invalidate(); return
         try:
             controls = self._read_controls(); controls.validate()
@@ -480,7 +544,7 @@ class NativeTui:
             self._selected_index = max(0, min(len(self._rows) - 1, self._selected_index + step)); self._render_selection()
 
     def _render_selection(self) -> None:
-        self.preview_control.text = candidate_preview_fragments(self._rows[self._selected_index]) if self._rows else ""
+        self.preview_control.fragments = candidate_preview_fragments(self._rows[self._selected_index]) if self._rows else []
 
     def _copy_selected(self) -> None:
         if self._rows:

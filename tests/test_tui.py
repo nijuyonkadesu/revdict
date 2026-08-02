@@ -15,6 +15,7 @@ from revdict.tui import (
     build_help_text,
     candidate_preview_fragments,
     format_progress_line,
+    word_wrap_fragments,
     format_candidate_preview,
 )
 
@@ -203,10 +204,20 @@ def test_stress_preview_parses_ansi_instead_of_rendering_escape_characters():
         {"headword": "console", "pos": "noun", "definition": "comfort", "examples": [], "synonyms": [], "stress": "\x1b[1;33mCON\x1b[0msole", "label": "joy", "polarity": "positive", "relevance": 90}
     )
 
-    visible_text = "".join(text for style, text, *_ in fragments if style != "[ZeroWidthEscape]")
-    assert ("[ZeroWidthEscape]", "\x1b[1;33m") in fragments
+    visible_text = "".join(text for _, text, *_ in fragments)
+    assert any("ansiyellow" in style and "bold" in style for style, *_ in fragments)
     assert "\x1b" not in visible_text
     assert "CON" in visible_text
+
+
+def test_preview_wrapper_moves_a_whole_word_to_the_next_line():
+    lines = word_wrap_fragments([("", "a fine closely woven cotton fabric")], width=15)
+
+    assert ["".join(text for _, text in line) for line in lines] == [
+        "a fine closely",
+        "woven cotton",
+        "fabric",
+    ]
 
 
 def test_result_renderer_wraps_before_a_definition_word_and_marks_selection():
