@@ -355,6 +355,32 @@ def test_bottom_function_buttons_invoke_the_same_actions_as_f_keys():
         ui.close()
 
 
+def test_idle_status_is_hidden_and_function_buttons_are_a_single_compact_row():
+    """Catches the footer duplicating shortcuts or consuming a second row."""
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    try:
+        assert ui.status.text == ""
+        assert ui.status_container.filter() is False
+        assert len(ui.function_key_bar.children) == len(ui.function_key_buttons)
+        assert [child.content for child in ui.function_key_bar.children] == [button.control for button in ui.function_key_buttons]
+        assert all(button.left_symbol == button.right_symbol == "" for button in ui.function_key_buttons)
+
+        ui.status.text = "Searching…"
+        assert ui.status_container.filter() is True
+    finally:
+        ui.close()
+
+
+def test_results_and_preview_stack_on_narrow_terminals():
+    """Catches mobile layouts compressing two reading panes side by side."""
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    try:
+        assert ui._panes_for_width(80) is ui.stacked_panes
+        assert ui._panes_for_width(120) is ui.side_by_side_panes
+    finally:
+        ui.close()
+
+
 def test_escape_clears_a_nonempty_query_before_it_can_quit():
     ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
     ui.query.text = "tailor"

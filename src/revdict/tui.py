@@ -32,6 +32,7 @@ ARPABET_VOWELS = frozenset(
     {"AA", "AE", "AH", "AO", "AW", "AY", "EH", "ER", "EY", "IH", "IY", "OW", "OY", "UH", "UW"}
 )
 LIVE_TUI_TOP_N = 50
+COMPACT_PANE_MAX_COLUMNS = 99
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
@@ -524,7 +525,7 @@ class NativeTui:
         from prompt_toolkit.application import Application
         from prompt_toolkit.filters import Condition
         from prompt_toolkit.key_binding import KeyBindings
-        from prompt_toolkit.layout import ConditionalContainer, HSplit, Layout, VSplit
+        from prompt_toolkit.layout import ConditionalContainer, DynamicContainer, HSplit, Layout, VSplit
         from prompt_toolkit.layout.dimension import Dimension
         from prompt_toolkit.layout.margins import ScrollbarMargin
         from prompt_toolkit.output.color_depth import ColorDepth
@@ -603,28 +604,40 @@ class NativeTui:
             Button(
                 f"{action.key} {action.button_label}",
                 handler=lambda key=action.key: self._invoke_function_key(key),
-                width=12,
+                width=get_cwidth(f"{action.key} {action.button_label}"),
+                left_symbol="",
+                right_symbol="",
             )
             for action in ACTIONS
             if action.key.startswith("F")
         )
-        self.function_key_bar = HSplit([
-            VSplit(self.function_key_buttons[:3], padding=1, height=1),
-            VSplit(self.function_key_buttons[3:], padding=1, height=1),
-        ], padding=0)
+        self.function_key_bar = VSplit(self.function_key_buttons, padding=1, height=1)
         self.active_filters = Label(text="sort: relevance  category: all", style="class:muted")
-        self.status = Label(text="F1 help · F2 filters · F3 preview · F4 chat · Ctrl-R sort · Enter copy", style="class:muted")
+        self.status = Label(text="", style="class:muted")
+        self.status_container = ConditionalContainer(self.status, Condition(lambda: bool(self.status.text)))
         controls = Frame(HSplit([self.sort_field, self.category_field, self.syllables_field, self.vowel_field, self.rhymes_field, self.sounds_field, self.meter_field], padding=0), title="Search controls — arrows choose Sort and Category")
-        results_frame = Frame(self.results, title="Results", width=Dimension(weight=3))
-        preview_frame = Frame(self.preview, title="Preview", width=Dimension(weight=2))
-        panes = VSplit(
+        wide_results_frame = Frame(self.results, title="Results", width=Dimension(weight=3))
+        wide_preview_frame = Frame(self.preview, title="Preview", width=Dimension(weight=2))
+        self.side_by_side_panes = VSplit(
             [
-                results_frame,
-                ConditionalContainer(preview_frame, Condition(lambda: self._show_preview)),
+                wide_results_frame,
+                ConditionalContainer(wide_preview_frame, Condition(lambda: self._show_preview)),
             ],
             padding=1,
             height=Dimension(weight=1),
         )
+        self.stacked_panes = HSplit(
+            [
+                Frame(self.results, title="Results", height=Dimension(weight=3)),
+                ConditionalContainer(
+                    Frame(self.preview, title="Preview", height=Dimension(weight=2)),
+                    Condition(lambda: self._show_preview),
+                ),
+            ],
+            padding=1,
+            height=Dimension(weight=1),
+        )
+        panes = DynamicContainer(self._panes_for_current_terminal_width)
         self.chat_known_models_container = ConditionalContainer(
             self.chat_known_models,
             Condition(lambda: self._chat_settings.active_provider == "gemini"),
@@ -656,7 +669,7 @@ class NativeTui:
             ConditionalContainer(chat_panel, Condition(lambda: self._show_chat or self._show_chat_settings)),
             ConditionalContainer(controls, Condition(lambda: self._show_controls)),
             ConditionalContainer(Frame(Label(text=build_help_text()), title="Help"), Condition(lambda: self._show_help)),
-            self.status,
+            self.status_container,
             self.progress,
             ConditionalContainer(self.chat_progress, Condition(lambda: self._chat_spinner_active)),
             self.function_key_bar,
@@ -817,7 +830,7 @@ class NativeTui:
         query = self.query.text.strip()
         if not query:
             self._controller.clear(); self._rows = []; self._selected_index = 0; self.preview_control.fragments = []
-            self._hide_progress(); self.status.text = "F1 help · F2 filters · F3 preview · F4 chat · Ctrl-R sort · Enter copy"; self.application.invalidate(); return
+            self._hide_progress(); self.status.text = ""; self.application.invalidate(); return
         try:
             controls = self._read_controls(); controls.validate()
         except ValidationError as error:
@@ -845,6 +858,15 @@ class NativeTui:
 
     def _receive_error(self, error: Exception) -> None:
         self.status.text = f"Search error: {error}"; self.application.invalidate()
+
+    def _panes_for_width(self, columns: int):
+        return self.stacked_panes if columns <= COMPACT_PANE_MAX_COLUMNS else self.side_by_side_panes
+
+    def _panes_for_current_terminal_width(self):
+        application = getattr(self, "application", None)
+        if application is None:
+            return self.side_by_side_panes
+        return self._panes_for_width(application.output.get_size().columns)
 
     @staticmethod
     def _result_rows(result: dict) -> list[dict]:
