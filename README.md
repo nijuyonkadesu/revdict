@@ -10,7 +10,7 @@ no API keys, no per-query network calls.
 
 - Python 3.11+
 - [`uv`](https://docs.astral.sh/uv/) for dependency management
-- [`fzf`](https://github.com/junegunn/fzf) for the interactive picker (optional — falls back to a plain printed list if absent)
+- [`fzf`](https://github.com/junegunn/fzf) for the optional one-shot picker and legacy live mode
 
 ## Install
 
@@ -41,8 +41,11 @@ Re-run this any time you want to refresh the underlying data.
 ## Usage
 
 ```bash
-# Interactive picker (fzf) — arrow keys + live preview, ? to toggle preview,
-# Enter to print the selected word
+# Native live terminal UI — query syntax, sort/category controls, phonetic
+# filters, results, and preview remain on screen together
+revdict
+
+# One-shot fzf picker — Enter prints the selected word
 revdict "happy"
 revdict "feeling of intense annoyance"
 
@@ -51,7 +54,33 @@ revdict "happy" --no-interactive
 
 # Show more/fewer candidates (default 30)
 revdict "happy" --no-interactive -n 10
+
+# Optional legacy fzf live session
+revdict --fzf
 ```
+
+### Native live UI
+
+Bare `revdict` opens the native terminal UI. Type ordinary reverse-dictionary
+queries or any form from the [query syntax](#query-syntax) table. `F2` opens
+the filter form for every sort mode, category, and phonetic filter; changes
+search automatically after a short debounce. The result list and preview stay
+visible while filters are edited.
+
+| Key | Action |
+|---|---|
+| `F1` | Toggle query-syntax and keybinding help |
+| `F2` | Open/close search controls (`Tab` moves between fields) |
+| `F3` | Toggle the preview pane |
+| `Ctrl-R` | Cycle sort order |
+| `Ctrl-N` / `Ctrl-P` | Select next/previous result |
+| `Enter` | Copy the selected headword |
+| `Esc` | Clear the query; press again on an empty query to quit |
+| `Ctrl-C` | Quit immediately |
+
+The native live UI does not require fzf. `revdict --fzf` retains the earlier
+fzf session for users who prefer it; one-shot interactive queries continue to
+use fzf when it is installed.
 
 The first query when no daemon is running starts a background daemon that keeps the index
 and models warm in memory, so subsequent queries are fast:
@@ -66,13 +95,13 @@ data until you stop it — `build-index` will remind you if this applies.
 
 ## Clipboard copy on Enter
 
-In the interactive picker, pressing Enter on a highlighted candidate copies
-it to your clipboard, in addition to selecting it. Over SSH and/or inside
-tmux, this goes through the terminal's OSC 52 escape sequence — reaching the
-clipboard of the device you're physically using, not the remote host's own
-clipboard — provided your terminal emulator and tmux's `set-clipboard`
-support it. Otherwise it falls back to whichever of `wl-copy`, `xclip`,
-`xsel`, or `pbcopy` is available locally.
+In the native live UI, pressing Enter on a highlighted candidate copies it to
+your clipboard. The legacy fzf live session does the same. Over SSH and/or
+inside tmux, this goes through the terminal's OSC 52 escape sequence —
+reaching the clipboard of the device you're physically using, not the remote
+host's own clipboard — provided your terminal emulator and tmux's
+`set-clipboard` support it. Otherwise it falls back to whichever of `wl-copy`,
+`xclip`, `xsel`, or `pbcopy` is available locally.
 
 ## Optional: stress-marked pronunciation
 

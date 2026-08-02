@@ -1,5 +1,10 @@
 # Phase 6: Go TUI Implementation Plan
 
+> **Status: Superseded 2026-08-02.** The Go TUI was removed because its
+> subprocess architecture caused server-load problems. The replacement is the
+> in-process native Python UI in `src/revdict/tui.py`; this document remains
+> as historical context only.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build a standalone Go terminal UI (`revdict-tui`, installable via `go install`) exposing every Phase 1-5 feature (query syntax, sort modes, category filter, phonetic filters) through one clean, keyboard-driven interface, per the user-approved design in `docs/superpowers/specs/2026-07-21-go-tui-design.md`.

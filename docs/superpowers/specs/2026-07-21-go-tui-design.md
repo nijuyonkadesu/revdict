@@ -1,6 +1,8 @@
 # Go TUI (Phase 6) — Design
 
-**Status:** Approved by user 2026-07-21, ready for implementation planning.
+**Status:** Superseded 2026-08-02. The Go implementation was removed after
+its subprocess-per-query design caused server-load problems. The current
+direction is the in-process native Python UI in `src/revdict/tui.py`.
 
 ## Goal
 

@@ -15,6 +15,7 @@ from revdict import category
 from revdict import daemon
 from revdict import picker
 from revdict import sort
+from revdict import tui
 from revdict.paths import INDEX_DIR
 from revdict.picker import PickerError, run_picker, write_candidate_files
 
@@ -461,18 +462,25 @@ def main(argv: list[str] | None = None) -> int:
             headword = argv[1] if len(argv) > 1 else ""
             return _run_copy_selection(headword)
 
+        if argv == ["--fzf"]:
+            if not _index_exists():
+                _print_no_index_error()
+                return 1
+            if _fzf_missing():
+                console.print(
+                    "[yellow]fzf is required for `revdict --fzf`. Install it, or run "
+                    "bare `revdict` for the native terminal UI.[/yellow]"
+                )
+                return 1
+            picker.run_live_session()
+            return 0
+
         if not argv:
             if not _index_exists():
                 _print_no_index_error()
                 return 1
             if sys.stdout.isatty():
-                if _fzf_missing():
-                    console.print(
-                        "[yellow]Live mode requires fzf. Install it, or use "
-                        "revdict \"your query\" for one-shot search.[/yellow]"
-                    )
-                    return 1
-                picker.run_live_session()
+                tui.run()
                 return 0
             query = console.input("[bold]> [/bold]")
             return _run_query(query, top_n=30, interactive=False)
