@@ -46,6 +46,7 @@ class TerminalTheme:
     no_color: bool
     truecolor: bool
     colorfgbg: str | None
+    accent: str
 
     @classmethod
     def from_environment(
@@ -56,12 +57,15 @@ class TerminalTheme:
     ) -> TerminalTheme:
         environment = os.environ if environment is None else environment
         no_color = "NO_COLOR" in environment
+        accent = environment.get("REVDICT_ACCENT", "green").casefold()
+        if accent not in {"green", "yellow", "magenta"}:
+            accent = "green"
         truecolor = (
             not no_color
             and truecolor_requested is not False
             and environment.get("COLORTERM", "").casefold() in {"truecolor", "24bit"}
         )
-        return cls(no_color, truecolor, environment.get("COLORFGBG"))
+        return cls(no_color, truecolor, environment.get("COLORFGBG"), accent)
 
     @property
     def color_depth(self) -> ColorDepth:
@@ -73,7 +77,7 @@ class TerminalTheme:
     def styles(self) -> dict[str, str]:
         if self.no_color:
             return {
-                "query": "bold", "muted": "dim", "border": "", "section.title": "bold",
+                "query": "bold", "muted": "dim", "border": "bold", "section.title": "bold",
                 "result.headword": "bold", "result.pos": "dim", "result.selected": "reverse dim",
                 "result.sentiment.positive": "", "result.sentiment.negative": "", "result.confidence": "",
                 "stress": "bold", "stress.no_color": "bold",
@@ -81,11 +85,11 @@ class TerminalTheme:
                 "button": "dim", "button.focused": "bold underline", "button.arrow": "", "button.text": "",
             }
         return {
-            "query": "bold", "muted": "dim", "border": "ansiblue", "section.title": "ansiblue bold",
-            "result.headword": "ansicyan bold", "result.pos": "ansiblue dim", "result.selected": "reverse dim",
+            "query": "bold", "muted": "dim", "border": "bold", "section.title": "bold",
+            "result.headword": f"ansi{self.accent} bold", "result.pos": "dim", "result.selected": "reverse dim",
             "result.sentiment.positive": "ansigreen", "result.sentiment.negative": "ansired", "result.confidence": "ansimagenta",
             "stress": "#ffcc00 bold", "stress.no_color": "bold",
-            "scrollbar.thumb": "ansiblue", "scrollbar.track": "dim",
+            "scrollbar.thumb": "", "scrollbar.track": "dim",
             "button": "dim", "button.focused": "ansimagenta bold", "button.arrow": "", "button.text": "",
         }
 
@@ -447,26 +451,37 @@ def _wrap_result_fragments(rows: list[dict], selected_index: int, width: int):
         selected = index == selected_index
         selected_style = "class:result.selected" if selected else ""
         header = [
-            (selected_style, "❯ " if selected else "  "),
-            (f"{selected_style} class:result.headword", row["headword"]),
-            (f"{selected_style} class:result.pos", f"  ({row['pos']})  "),
+            ("", "❯ " if selected else "  "),
+            ("class:result.headword", row["headword"]),
+            ("class:result.pos", f"  ({row['pos']})  "),
         ]
-        tokens = header + [(selected_style, word + (" " if number < len(row["definition"].split()) - 1 else "")) for number, word in enumerate(row["definition"].split())]
+        tokens = header + [("", word + (" " if number < len(row["definition"].split()) - 1 else "")) for number, word in enumerate(row["definition"].split())]
         line: list[tuple[str, str]] = []
         used = 0
+
+        def append_line() -> None:
+            rendered_line = line or [("", "")]
+            if selected:
+                rendered_line = [
+                    (f"{selected_style} {style}".strip(), text)
+                    for style, text in rendered_line
+                ]
+                if used < width:
+                    rendered_line.append((selected_style, " " * (width - used)))
+            all_lines.append(rendered_line)
+            line_rows.append(index)
+
         for style, token in tokens:
             token_width = get_cwidth(token)
             if line and used + token_width > width and token.strip():
-                all_lines.append(line)
-                line_rows.append(index)
-                line = [(selected_style, "  ")]
+                append_line()
+                line = [("", "  ")]
                 used = 2
                 token = token.lstrip()
                 token_width = get_cwidth(token)
             line.append((style, token))
             used += token_width
-        all_lines.append(line or [(selected_style, "")])
-        line_rows.append(index)
+        append_line()
     return all_lines or [[("", "Type a meaning or word to search.")]], line_rows or [-1]
 
 

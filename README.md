@@ -70,17 +70,20 @@ Sort and Category are arrow-key/mouse radio lists, while phonetic filters are
 validated text fields. `F1` is generated from those control definitions and
 the keybinding registry, so it always reflects the UI.
 
-The UI uses your terminal's ANSI palette rather than a bundled theme: headwords,
-parts of speech, sentiment, confidence, section rules, and the focused footer
-action receive semantic ANSI roles while all other text inherits the terminal
-foreground/background. It automatically uses 24-bit output only when
+The UI uses your terminal's ANSI palette rather than a bundled theme. Chrome
+(section rules, titles, part-of-speech tags, and scrollbars) stays in the
+terminal's default foreground, using only bold or dim attributes. Colour is
+reserved for headwords, positive/negative sentiment, match confidence, and the
+focused footer action. Headwords default to green; set `REVDICT_ACCENT` to
+`green`, `yellow`, or `magenta` to choose another terminal-palette accent. It automatically uses 24-bit output only when
 `COLORTERM` advertises `truecolor` or `24bit`; `revdict --truecolor` makes the
 same explicit request but never overrides a terminal that does not advertise
 support. `NO_COLOR` disables every colour, including stress, while preserving
 readability attributes. Stress marks otherwise retain a fixed gold accent that
-does not depend on a terminal theme's yellow slot. Results and previews have
-proportional, arrow-free scrollbars: mouse-wheel scrolling works in either pane,
-and words wrap only at word boundaries.
+does not depend on a terminal theme's yellow slot. Selection reverses only the
+terminal's own foreground/background across every wrapped result line. Results
+and previews have proportional, arrow-free scrollbars: mouse-wheel scrolling
+works in either pane, and words wrap only at word boundaries.
 
 | Key | Action |
 |---|---|

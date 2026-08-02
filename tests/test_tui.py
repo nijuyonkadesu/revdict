@@ -246,12 +246,17 @@ def test_terminal_theme_uses_terminal_ansi_roles_and_gates_truecolor():
 
     assert theme.color_depth is ColorDepth.DEPTH_24_BIT
     assert theme.colorfgbg == "15;0"
-    assert theme.styles["result.headword"] == "ansicyan bold"
-    assert theme.styles["result.pos"] == "ansiblue dim"
+    assert theme.styles["result.headword"] == "ansigreen bold"
+    assert theme.styles["result.pos"] == "dim"
+    assert theme.styles["border"] == "bold"
+    assert theme.styles["section.title"] == "bold"
     assert theme.styles["result.sentiment.positive"] == "ansigreen"
     assert theme.styles["result.sentiment.negative"] == "ansired"
     assert theme.styles["result.confidence"] == "ansimagenta"
     assert theme.styles["result.selected"] == "reverse dim"
+
+    custom_accent = tui.TerminalTheme.from_environment({"REVDICT_ACCENT": "magenta"})
+    assert custom_accent.styles["result.headword"] == "ansimagenta bold"
 
     disabled = tui.TerminalTheme.from_environment({"COLORTERM": "24bit"}, truecolor_requested=False)
     assert disabled.color_depth is ColorDepth.DEPTH_8_BIT
@@ -306,6 +311,19 @@ def test_result_renderer_wraps_before_a_definition_word_and_marks_selection():
     assert "disappointment" in rendered_words
     assert all("class:result.selected" in style for style, _ in lines[0])
     assert any("class:result.headword" in style for style, _ in lines[0])
+
+
+def test_selected_result_paints_every_wrapped_physical_line_to_the_panel_width():
+    lines, _ = _wrap_result_fragments(
+        [{"headword": "consolation", "pos": "noun", "definition": "comfort during disappointment"}],
+        selected_index=0,
+        width=28,
+    )
+
+    assert len(lines) > 1
+    for line in lines:
+        assert len("".join(text for _style, text in line)) == 28
+        assert all("class:result.selected" in style for style, _text in line)
 
 
 def test_results_control_exposes_the_selected_result_as_its_cursor():
