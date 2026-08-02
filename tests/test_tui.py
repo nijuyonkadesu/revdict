@@ -294,7 +294,7 @@ def test_repeated_result_navigation_moves_the_rendered_results_viewport():
             try:
                 input.send_bytes(b"\x0e" * 20)  # Ctrl-N
                 deadline = time.monotonic() + 1
-                while ui._selected_index != 20 and time.monotonic() < deadline:
+                while (ui._selected_index != 20 or ui.results.vertical_scroll == 0) and time.monotonic() < deadline:
                     time.sleep(0.01)
 
                 assert ui._selected_index == 20
@@ -309,6 +309,8 @@ def test_generated_help_lists_every_filter_and_the_preview_key():
     help_text = build_help_text()
 
     assert "F3" in help_text
+    assert "F4" in help_text
+    assert "F5" in help_text
     assert "Sort" in help_text
     assert "Sounds like" in help_text
     assert "Idioms and slang" in help_text
@@ -335,6 +337,21 @@ def test_escape_clears_a_nonempty_query_before_it_can_quit():
             for binding in ui.application.key_bindings.get_bindings_for_keys((Keys.Escape,))
         )
         assert ui.application.ttimeoutlen <= 0.02
+    finally:
+        ui.close()
+
+
+def test_chat_panel_prefills_a_writing_prompt_from_the_selected_result():
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    ui._rows = [{"headword": "tailor", "pos": "noun", "definition": "a person who makes and alters garments", "stress": None, "synonyms": [], "examples": [], "label": "neutral", "polarity": "neutral", "relevance": 100}]
+    ui.query.text = "make clothing fit"
+    ui._render_selection()
+    try:
+        ui._toggle_chat()
+
+        assert ui._show_chat is True
+        assert "tailor" in ui.chat_input.text
+        assert "writing and in spoken conversation" in ui.chat_input.text
     finally:
         ui.close()
 

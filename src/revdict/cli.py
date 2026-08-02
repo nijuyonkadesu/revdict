@@ -12,6 +12,7 @@ from rich.table import Table
 from rich.text import Text
 
 from revdict import category
+from revdict import chat
 from revdict import daemon
 from revdict import picker
 from revdict import progress as progress_module
@@ -57,6 +58,39 @@ def _daemon_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("action", choices=["start", "stop", "status"])
     return parser
+
+
+def _chat_config_parser() -> argparse.ArgumentParser:
+    parser = _QuietArgumentParser(
+        prog="revdict chat-config", description="Configure the native TUI writing assistant."
+    )
+    parser.add_argument("--provider", choices=chat.SUPPORTED_PROVIDERS, required=True)
+    parser.add_argument("--endpoint", help="Provider API endpoint; saved locally and editable later in F5 settings.")
+    parser.add_argument("--model", help="Chat model identifier.")
+    parser.add_argument("--api-key", help="Optional API key; saved only in the local 0600 chat settings file.")
+    parser.add_argument("--api-key-env", help="Environment variable used when no local API key is configured.")
+    parser.add_argument("--test", action="store_true", help="Test the endpoint with a models request before saving; never generates text.")
+    return parser
+
+
+def _run_chat_config(args: argparse.Namespace) -> int:
+    settings = chat.load_settings()
+    existing = settings.providers[args.provider]
+    configured = chat.ProviderSettings(
+        args.provider,
+        args.endpoint or existing.base_url,
+        args.model or existing.model,
+        args.api_key_env if args.api_key_env is not None else existing.api_key_env,
+        args.api_key if args.api_key is not None else existing.api_key,
+    )
+    models = chat.test_provider(configured) if args.test else []
+    settings.providers[args.provider] = configured
+    settings.active_provider = args.provider
+    if args.provider == "gemini" and models:
+        settings.gemini_models = models
+    chat.save_settings(settings)
+    console.print(f"Chat configuration saved for {args.provider} ({configured.model}).")
+    return 0
 
 
 _ARPABET_VOWELS = {
@@ -481,6 +515,9 @@ def main(argv: list[str] | None = None) -> int:
             console.print(_daemon_status())
             return 0
 
+        if argv and argv[0] == "chat-config":
+            return _run_chat_config(_chat_config_parser().parse_args(argv[1:]))
+
         if argv and argv[0] == "--query-only":
             query = argv[1] if len(argv) > 1 else ""
             return _run_query_only(query)
@@ -538,7 +575,7 @@ def main(argv: list[str] | None = None) -> int:
             f"{error.usage.strip()}\nrevdict: error: {error.message}", style="red", markup=False
         )
         return 1
-    except ValueError as error:
+    except (ValueError, chat.ChatRequestError) as error:
         # Surfaces search()/resolve_phonetic_target's deliberate fail-loud
         # ValueError (e.g. --rhymes-with/--sounds-like when stressmark is
         # missing) as a clean one-line message instead of an unhandled

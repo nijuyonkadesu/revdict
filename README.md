@@ -81,6 +81,9 @@ at word boundaries.
 | `F1` | Toggle generated query, filter, and keybinding help |
 | `F2` | Open/close search controls (`↑` / `↓` choose Sort and Category) |
 | `F3` | Toggle the preview pane |
+| `F4` | Toggle writing chat; Enter sends while its input has focus |
+| `F5` | Open/save the active chat provider’s local settings |
+| `F6` | Cycle a cached Gemini model |
 | `Ctrl-R` | Cycle sort order |
 | `Ctrl-N` / `Ctrl-P` | Select next/previous result |
 | `Enter` | Copy the selected headword |
@@ -90,6 +93,35 @@ at word boundaries.
 The native live UI does not require fzf. `revdict --fzf` retains the earlier
 fzf session for users who prefer it; one-shot interactive queries continue to
 use fzf when it is installed.
+
+### Writing chat
+
+`F4` opens the writing-assistant pane. It pre-fills a request using the active
+search query plus the highlighted word and definition; press `Enter` to send
+it, then continue the conversation in the same pane. `F5` opens editable
+provider settings and saves them locally. `F6` cycles a cached Gemini model.
+
+Configure a provider before first use. This stores endpoints, model choices,
+and any supplied API key in `~/.config/revdict/chat.json` with `0600`
+permissions; no credential is ever stored in the repository. `--test` makes a
+single inexpensive models request and never asks a model to generate text:
+
+```bash
+# OpenAI-compatible servers, including Ollama-compatible endpoints.
+revdict chat-config --provider ollama --endpoint http://localhost:11434 --model my-model --test
+
+# Gemini: --test also discovers and saves compatible text-chat models.
+revdict chat-config --provider gemini --api-key "$REVDICT_GEMINI_API_KEY" --model gemini-3.6-flash --test
+
+# OpenAI and Anthropic use their ordinary default endpoints; endpoints remain editable.
+revdict chat-config --provider openai --model gpt-4.1-mini --api-key "$OPENAI_API_KEY" --test
+revdict chat-config --provider anthropic --model claude-sonnet-4-5 --api-key "$ANTHROPIC_API_KEY" --test
+```
+
+An API key can instead be supplied by the provider-specific environment
+variable shown above. Ollama's key is optional (`REVDICT_OLLAMA_API_KEY`).
+The provider test only lists models, so it does not load or spam a slow local
+generation model.
 
 The first query when no daemon is running starts a background daemon that keeps the index
 and models warm in memory, so subsequent queries are fast. The native UI uses

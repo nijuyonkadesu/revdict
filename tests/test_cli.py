@@ -2,6 +2,7 @@ import json
 import sys
 
 from revdict import cli
+from revdict import chat
 from revdict.picker import PickerError
 
 
@@ -48,6 +49,26 @@ def test_main_help_flag_exits_cleanly_and_prints_usage(capsys):
     assert excinfo.value.code == 0
     captured = capsys.readouterr()
     assert "usage: revdict" in captured.out
+
+
+def test_chat_config_saves_an_editable_provider_and_tests_without_generation(monkeypatch, tmp_path, capsys):
+    path = tmp_path / "chat.json"
+    tested = []
+    monkeypatch.setattr(chat, "CHAT_SETTINGS_PATH", path)
+    monkeypatch.setattr(chat, "test_provider", lambda provider: tested.append(provider) or ["Qwen3.6:35b-a3b"])
+
+    code = cli.main([
+        "chat-config", "--provider", "ollama", "--endpoint", "http://example.test:11434",
+        "--model", "Qwen3.6:35b-a3b", "--api-key", "local-test-key", "--test",
+    ])
+
+    assert code == 0
+    settings = chat.load_settings(path)
+    assert settings.active_provider == "ollama"
+    assert settings.providers["ollama"].base_url == "http://example.test:11434"
+    assert settings.providers["ollama"].api_key == "local-test-key"
+    assert tested[0].model == "Qwen3.6:35b-a3b"
+    assert "saved" in capsys.readouterr().out.lower()
 
 
 def test_main_prints_error_and_returns_1_when_index_missing(monkeypatch, capsys):
