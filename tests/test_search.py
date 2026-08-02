@@ -398,7 +398,7 @@ def test_search_dispatches_structural_queries_to_run_structural_and_skips_embedd
     assert [c["headword"] for c in result["candidates"]] == ["bluebird"]
 
 
-def test_structural_search_reports_all_ten_user_visible_stages(monkeypatch):
+def test_structural_search_reports_all_nine_user_visible_stages(monkeypatch):
     """Structural queries must mark semantic-only work skipped, not silently omit it."""
     monkeypatch.setattr(search_mod, "_load_state", _fake_state)
     events = []
@@ -407,9 +407,8 @@ def test_structural_search_reports_all_ten_user_visible_stages(monkeypatch):
 
     terminal = [event for event in events if event["state"] in {"completed", "skipped"}]
     assert [event["id"] for event in terminal] == [
-        "ready", "validate", "phonetics", "parse", "scope", "retrieve", "rerank", "filter", "enrich", "finalize"
+        "ready", "validate", "phonetics", "parse", "scope", "retrieve", "filter", "enrich", "finalize"
     ]
-    assert terminal[6]["state"] == "skipped"
 
 
 def test_search_still_handles_a_plain_meaning_query_via_the_existing_path(monkeypatch):

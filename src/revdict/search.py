@@ -422,13 +422,10 @@ def search(
     # no real solutions) reaches here with an empty `retrieved`/`definitions`
     # -- skip the reranker call entirely rather than relying on
     # CrossEncoder.predict's undocumented behavior on an empty batch.
-    progress.active("rerank")
     if definitions:
         rerank_scores = state["reranker"].score(meaning_query, definitions)
-        progress.completed("rerank")
     else:
         rerank_scores = []
-        progress.skipped("rerank")
     literary_frequency = state["literary_frequency"]
     scored = []
     for i in range(len(retrieved)):

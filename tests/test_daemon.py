@@ -63,7 +63,7 @@ def test_send_progress_query_receives_stage_events_before_its_result(tmp_path, m
                 request += chunk
             received.update(json.loads(request.decode("utf-8")))
             conn.sendall(
-                b'{"type":"stage","id":"ready","state":"active","ordinal":1,"total":10,"label":"Ready search state"}\n'
+                b'{"type":"stage","id":"ready","state":"active","ordinal":1,"total":9,"label":"Ready"}\n'
                 b'{"type":"result","result":{"exact_match":null,"candidates":[]}}\n'
             )
         server.close()
@@ -77,7 +77,7 @@ def test_send_progress_query_receives_stage_events_before_its_result(tmp_path, m
 
     thread.join(timeout=2)
     assert received["protocol"] == "progress-v1"
-    assert events == [{"type": "stage", "id": "ready", "state": "active", "ordinal": 1, "total": 10, "label": "Ready search state"}]
+    assert events == [{"type": "stage", "id": "ready", "state": "active", "ordinal": 1, "total": 9, "label": "Ready"}]
     assert result == {"exact_match": None, "candidates": []}
 
 

@@ -13,16 +13,15 @@ class SearchStage:
 
 
 STAGES = (
-    SearchStage("ready", "Ready search state"),
-    SearchStage("validate", "Validate query and filters"),
-    SearchStage("phonetics", "Resolve phonetic targets"),
-    SearchStage("parse", "Parse query syntax"),
-    SearchStage("scope", "Determine candidate scope"),
-    SearchStage("retrieve", "Retrieve candidates"),
-    SearchStage("rerank", "Rerank definitions"),
-    SearchStage("filter", "Resolve exact match and apply filters"),
-    SearchStage("enrich", "Enrich, score, and sort results"),
-    SearchStage("finalize", "Finalize the response"),
+    SearchStage("ready", "Ready"),
+    SearchStage("validate", "Validating query & filters"),
+    SearchStage("phonetics", "Resolving phonetic targets"),
+    SearchStage("parse", "Parsing query syntax"),
+    SearchStage("scope", "Determining candidate scope"),
+    SearchStage("retrieve", "Retrieving candidates"),
+    SearchStage("filter", "Resolving exact match and applying filters"),
+    SearchStage("enrich", "Enriching, scoring and sorting results"),
+    SearchStage("finalize", "Done"),
 )
 _STAGES_BY_ID = {stage.id: (ordinal, stage) for ordinal, stage in enumerate(STAGES, start=1)}
 

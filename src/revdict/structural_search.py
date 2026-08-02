@@ -103,7 +103,6 @@ def run_structural(
         ]
     ranked = _score_and_sort(headwords, literary_frequency)[:top_n]
     progress.completed("retrieve")
-    progress.skipped("rerank")
     progress.active("filter")
     progress.completed("filter")
     relevances = relative_relevance([score for _, score in ranked])

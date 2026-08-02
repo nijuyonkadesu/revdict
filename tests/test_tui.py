@@ -322,7 +322,7 @@ def test_progress_line_reports_percent_phase_count_and_live_detail_in_one_line()
 
     line = format_progress_line(states, {"validate": "Checking selected filters"})
 
-    assert line == "Searching 10% · 2/10 · Validate query and filters — Checking selected filters"
+    assert line == "Searching 11% · 2/9 · Validating query & filters — Checking selected filters"
     assert "\n" not in line
 
 
