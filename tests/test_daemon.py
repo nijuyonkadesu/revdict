@@ -250,6 +250,21 @@ def test_run_server_bails_immediately_when_a_live_daemon_already_owns_the_socket
         server.close()
 
 
+def test_run_server_bails_before_loading_when_another_process_holds_the_start_lock(
+    tmp_path, monkeypatch
+):
+    """A socket is unavailable while an owner loads the index, so lock first."""
+    monkeypatch.setattr(daemon, "DAEMON_SOCKET_PATH", tmp_path / "daemon.sock")
+    monkeypatch.setattr(daemon, "DAEMON_PID_PATH", tmp_path / "daemon.pid")
+    monkeypatch.setattr(daemon, "DAEMON_LOCK_PATH", tmp_path / "daemon.lock")
+    monkeypatch.setattr(daemon, "_acquire_server_lock", lambda: None)
+
+    daemon.run_server()
+
+    assert not (tmp_path / "daemon.sock").exists()
+    assert not (tmp_path / "daemon.pid").exists()
+
+
 def test_is_daemon_running_true_only_with_live_pid_and_existing_socket(tmp_path, monkeypatch):
     pid_path = tmp_path / "daemon.pid"
     socket_path = tmp_path / "daemon.sock"
@@ -287,6 +302,40 @@ def test_ensure_daemon_running_returns_true_immediately_when_already_up(
         assert daemon.ensure_daemon_running(startup_timeout=1.0) is True
     finally:
         server.close()
+
+
+def test_ensure_daemon_running_waits_for_an_in_progress_start_without_spawning(
+    tmp_path, monkeypatch
+):
+    socket_path = tmp_path / "daemon.sock"
+    monkeypatch.setattr(daemon, "DAEMON_SOCKET_PATH", socket_path)
+    monkeypatch.setattr(daemon, "DAEMON_PID_PATH", tmp_path / "daemon.pid")
+    monkeypatch.setattr(daemon, "DAEMON_LOG_PATH", tmp_path / "daemon.log")
+    monkeypatch.setattr(daemon, "DAEMON_START_LOCK_PATH", tmp_path / "daemon.start.lock")
+    start_lock = daemon._acquire_lock(daemon.DAEMON_START_LOCK_PATH)
+    assert start_lock is not None
+
+    ready_event = threading.Event()
+
+    def start_socket_after_a_short_delay():
+        time.sleep(0.1)
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(socket_path))
+        server.listen(1)
+        ready_event.set()
+        connection, _ = server.accept()
+        connection.close()
+        server.close()
+
+    thread = threading.Thread(target=start_socket_after_a_short_delay, daemon=True)
+    thread.start()
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not spawn")))
+
+    try:
+        assert daemon.ensure_daemon_running(startup_timeout=1.0) is True
+        assert ready_event.is_set()
+    finally:
+        daemon._release_lock(start_lock)
 
 
 def test_ensure_daemon_running_spawns_and_waits_for_a_fresh_daemon(tmp_path, monkeypatch):

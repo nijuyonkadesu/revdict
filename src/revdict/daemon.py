@@ -7,8 +7,15 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
+import fcntl
 
-from revdict.paths import DAEMON_LOG_PATH, DAEMON_PID_PATH, DAEMON_SOCKET_PATH
+from revdict.paths import (
+    DAEMON_LOCK_PATH,
+    DAEMON_LOG_PATH,
+    DAEMON_PID_PATH,
+    DAEMON_SOCKET_PATH,
+    DAEMON_START_LOCK_PATH,
+)
 from revdict.progress import ProgressReporter
 
 
@@ -77,6 +84,44 @@ def _remove_stale_files() -> None:
             path.unlink()
         except FileNotFoundError:
             pass
+
+
+def _acquire_lock(path) -> int | None:
+    """Take a nonblocking, process-lifetime advisory lock at *path*."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(descriptor)
+        return None
+    return descriptor
+
+
+def _release_lock(descriptor: int) -> None:
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
+def _acquire_server_lock() -> int | None:
+    """Acquire the lifetime lock before an expensive daemon model load.
+
+    A UNIX socket is unavailable while the server imports its search index, so
+    it cannot by itself prevent sibling launchers from loading that index in
+    parallel. ``flock`` is released automatically if the owner dies.
+    """
+    return _acquire_lock(DAEMON_LOCK_PATH)
+
+
+def _wait_for_socket(startup_timeout: float) -> bool:
+    deadline = time.time() + startup_timeout
+    while time.time() < deadline:
+        if _socket_is_reachable():
+            return True
+        time.sleep(0.1)
+    return False
 
 
 def _socket_is_reachable() -> bool:
@@ -206,30 +251,28 @@ def supports_progress(timeout: float = 1.0) -> bool | None:
 def ensure_daemon_running(startup_timeout: float = 20.0) -> bool:
     if _socket_is_reachable():
         return True
-    _remove_stale_files()
+    # Only one client may launch a child. Other clients wait for that child to
+    # publish its socket instead of repeatedly creating losing subprocesses.
+    start_lock = _acquire_lock(DAEMON_START_LOCK_PATH)
+    if start_lock is None:
+        return _wait_for_socket(startup_timeout)
+    try:
+        if _socket_is_reachable():
+            return True
+        _remove_stale_files()
 
-    DAEMON_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(DAEMON_LOG_PATH, "a") as log_file:
-        subprocess.Popen(
-            [sys.executable, "-u", "-m", "revdict.cli", "daemon", "start"],
-            stdout=log_file,
-            stderr=log_file,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-
-    deadline = time.time() + startup_timeout
-    while time.time() < deadline:
-        if DAEMON_SOCKET_PATH.exists():
-            try:
-                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
-                    probe.settimeout(0.5)
-                    probe.connect(str(DAEMON_SOCKET_PATH))
-                return True
-            except OSError:
-                pass
-        time.sleep(0.1)
-    return False
+        DAEMON_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(DAEMON_LOG_PATH, "a") as log_file:
+            subprocess.Popen(
+                [sys.executable, "-u", "-m", "revdict.cli", "daemon", "start"],
+                stdout=log_file,
+                stderr=log_file,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        return _wait_for_socket(startup_timeout)
+    finally:
+        _release_lock(start_lock)
 
 
 def stop_daemon() -> bool:
@@ -282,72 +325,75 @@ def _handle_progress_request(request_text: str, search_fn, emit: Callable[[dict]
 
 
 def run_server() -> None:
-    # Cheap early exit before paying for the model load: if a live daemon
-    # already owns the socket, we lost the spawn race -- bail immediately
-    # rather than wastefully loading a ~2GB index we'd just discard.
-    if _socket_is_reachable():
+    # The lock is deliberately taken *before* importing the search module:
+    # that import can load a multi-gigabyte index while no socket exists yet.
+    # A socket-only race guard lets every concurrent launcher pay that cost.
+    lock_descriptor = _acquire_server_lock()
+    if lock_descriptor is None:
         return
-
-    from revdict.query_env import configure_offline_quiet_env
-
-    configure_offline_quiet_env()
-    from revdict import search as search_mod
-
-    DAEMON_SOCKET_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _remove_stale_files()
-
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        server.bind(str(DAEMON_SOCKET_PATH))
-    except OSError:
-        # Lost a narrow race against a sibling daemon that bound the path
-        # between our reachability check and this bind. If it's now live,
-        # exit gracefully (the spec's bind-race-loser behavior); otherwise
-        # this is a genuine, unexpected bind failure -- propagate it.
         if _socket_is_reachable():
-            server.close()
             return
-        raise
+        from revdict.query_env import configure_offline_quiet_env
 
-    server.listen(5)
-    DAEMON_PID_PATH.write_text(str(os.getpid()))
+        configure_offline_quiet_env()
+        from revdict import search as search_mod
 
-    def _cleanup_and_exit(signum, frame):
-        server.close()
+        DAEMON_SOCKET_PATH.parent.mkdir(parents=True, exist_ok=True)
         _remove_stale_files()
-        sys.exit(0)
 
-    signal.signal(signal.SIGTERM, _cleanup_and_exit)
-    signal.signal(signal.SIGINT, _cleanup_and_exit)
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            server.bind(str(DAEMON_SOCKET_PATH))
+        except OSError:
+            # Retain the socket check for manually started old daemons that
+            # predate the lock, or for a filesystem-level bind race.
+            if _socket_is_reachable():
+                server.close()
+                return
+            raise
 
-    print(f"revdict daemon listening on {DAEMON_SOCKET_PATH} (pid {os.getpid()})")
+        server.listen(5)
+        DAEMON_PID_PATH.write_text(str(os.getpid()))
 
-    try:
-        while True:
-            conn, _ = server.accept()
-            try:
-                with conn:
-                    chunks = []
-                    while True:
-                        chunk = conn.recv(65536)
-                        if not chunk:
-                            break
-                        chunks.append(chunk)
-                    request_text = b"".join(chunks).decode("utf-8")
-                    if not request_text.strip():
-                        continue
-                    request = json.loads(request_text)
-                    if request.get("op") == "capabilities":
-                        conn.sendall(json.dumps({"protocols": [PROGRESS_PROTOCOL]}).encode("utf-8"))
-                    elif request.get("protocol") == PROGRESS_PROTOCOL:
-                        def emit(event: dict) -> None:
-                            conn.sendall((json.dumps(event) + "\n").encode("utf-8"))
+        def _cleanup_and_exit(signum, frame):
+            server.close()
+            _remove_stale_files()
+            sys.exit(0)
 
-                        _handle_progress_request(request_text, search_mod.search, emit)
-                    else:
-                        response_text = _handle_request(request_text, search_mod.search)
-                        conn.sendall(response_text.encode("utf-8"))
-            except Exception as error:
-                print(f"revdict daemon: error handling a request: {error}")
+        signal.signal(signal.SIGTERM, _cleanup_and_exit)
+        signal.signal(signal.SIGINT, _cleanup_and_exit)
+
+        print(f"revdict daemon listening on {DAEMON_SOCKET_PATH} (pid {os.getpid()})")
+
+        try:
+            while True:
+                conn, _ = server.accept()
+                try:
+                    with conn:
+                        chunks = []
+                        while True:
+                            chunk = conn.recv(65536)
+                            if not chunk:
+                                break
+                            chunks.append(chunk)
+                        request_text = b"".join(chunks).decode("utf-8")
+                        if not request_text.strip():
+                            continue
+                        request = json.loads(request_text)
+                        if request.get("op") == "capabilities":
+                            conn.sendall(json.dumps({"protocols": [PROGRESS_PROTOCOL]}).encode("utf-8"))
+                        elif request.get("protocol") == PROGRESS_PROTOCOL:
+                            def emit(event: dict) -> None:
+                                conn.sendall((json.dumps(event) + "\n").encode("utf-8"))
+
+                            _handle_progress_request(request_text, search_mod.search, emit)
+                        else:
+                            response_text = _handle_request(request_text, search_mod.search)
+                            conn.sendall(response_text.encode("utf-8"))
+                except Exception as error:
+                    print(f"revdict daemon: error handling a request: {error}")
+        finally:
+            _remove_stale_files()
     finally:
-        _remove_stale_files()
+        _release_lock(lock_descriptor)
