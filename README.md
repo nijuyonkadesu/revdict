@@ -83,7 +83,6 @@ at word boundaries.
 | `F3` | Toggle the preview pane |
 | `F4` | Toggle writing chat; Enter sends while its input has focus |
 | `F5` | Open/save the active chat provider’s local settings |
-| `F6` | Cycle a cached Gemini model |
 | `Ctrl-R` | Cycle sort order |
 | `Ctrl-N` / `Ctrl-P` | Select next/previous result |
 | `Enter` | Copy the selected headword |
@@ -99,7 +98,7 @@ use fzf when it is installed.
 `F4` opens the writing-assistant pane. It pre-fills a request using the active
 search query plus the highlighted word and definition; press `Enter` to send
 it, then continue the conversation in the same pane. `F5` opens editable
-provider settings and saves them locally. `F6` cycles a cached Gemini model.
+provider settings and saves them locally.
 
 Configure a provider before first use. This stores endpoints, model choices,
 and any supplied API key in `~/.config/revdict/chat.json` with `0600`

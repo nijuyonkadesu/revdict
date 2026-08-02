@@ -110,11 +110,11 @@ def test_chat_controller_keeps_only_one_provider_request_in_flight():
 
     controller = chat.ChatController(execute, lambda _answer: completed.set(), lambda error: pytest.fail(str(error)))
     try:
-        assert controller.send("first") is True
+        assert controller.send(("first", "structured request")) is True
         assert started.wait(timeout=2)
-        assert controller.send("second") is False
+        assert controller.send(("second", "structured request")) is False
         release.set()
         assert completed.wait(timeout=2)
-        assert calls == ["first"]
+        assert calls == [("first", "structured request")]
     finally:
         controller.close()

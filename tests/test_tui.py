@@ -311,6 +311,7 @@ def test_generated_help_lists_every_filter_and_the_preview_key():
     assert "F3" in help_text
     assert "F4" in help_text
     assert "F5" in help_text
+    assert "F6" not in help_text
     assert "Sort" in help_text
     assert "Sounds like" in help_text
     assert "Idioms and slang" in help_text
@@ -352,6 +353,28 @@ def test_chat_panel_prefills_a_writing_prompt_from_the_selected_result():
         assert ui._show_chat is True
         assert "tailor" in ui.chat_input.text
         assert "writing and in spoken conversation" in ui.chat_input.text
+        assert ui.chat_input.buffer.cursor_position == len(ui.chat_input.text)
+        assert ui.chat_input.window.wrap_lines()
+    finally:
+        ui.close()
+
+
+def test_chat_settings_are_editable_and_close_back_to_the_main_tui(monkeypatch):
+    monkeypatch.setattr(tui.chat_module, "save_settings", lambda _settings: None)
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    try:
+        ui._toggle_chat_settings()
+
+        assert ui._show_chat_settings is True
+        assert ui.application.layout.current_window == ui.chat_endpoint_field.window
+        assert "F5 saves" in ui.chat_settings_frame.title
+        assert ui.chat_endpoint_field.buffer.cursor_position == len(ui.chat_endpoint_field.text)
+
+        ui._toggle_chat_settings()
+
+        assert ui._show_chat_settings is False
+        assert ui._show_chat is False
+        assert ui.application.layout.current_window == ui.query.window
     finally:
         ui.close()
 

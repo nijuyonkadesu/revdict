@@ -99,7 +99,7 @@ class UiAction:
 ACTIONS = (
     UiAction("F1", "Toggle generated help"), UiAction("F2", "Open or close filters"),
     UiAction("F3", "Toggle preview"), UiAction("F4", "Toggle writing chat"),
-    UiAction("F5", "Open or save chat provider settings"), UiAction("F6", "Cycle cached Gemini model"),
+    UiAction("F5", "Open or save chat provider settings"),
     UiAction("Enter (chat)", "Send chat message"), UiAction("Ctrl-R", "Cycle sort order"),
     UiAction("Ctrl-N / Ctrl-P", "Select next / previous result"), UiAction("Enter (query)", "Copy selected headword"),
     UiAction("Esc", "Clear query, then quit"), UiAction("Ctrl-C", "Quit"),
@@ -434,6 +434,7 @@ class NativeTui:
         self._search_executor, self._show_controls, self._show_help, self._show_preview = search_executor, False, False, True
         self._show_chat = False
         self._show_chat_settings = False
+        self._chat_visible_before_settings = False
         self._rows: list[dict] = []
         self._selected_index = 0
         self._controls = SearchControls()
@@ -459,7 +460,8 @@ class NativeTui:
         self.meter_field = TextArea(prompt="Meter: ", multiline=False, height=1)
         self.chat_header = Label(text="")
         self.chat_transcript = TextArea(text="", multiline=True, read_only=True, focusable=False, wrap_lines=True, scrollbar=True)
-        self.chat_input = TextArea(prompt="You: ", multiline=False, height=1, wrap_lines=False)
+        self.chat_input = TextArea(prompt="You: ", multiline=True, height=Dimension(min=1, preferred=3, max=6), wrap_lines=True)
+        self.chat_input_label = Label(text="Message · Enter sends", style="class:muted")
         self.chat_provider_field = TrackingRadioList(
             tuple((provider, provider.title()) for provider in chat_module.SUPPORTED_PROVIDERS),
             default=self._chat_settings.active_provider,
@@ -494,25 +496,32 @@ class NativeTui:
             padding=1,
             height=Dimension(weight=1),
         )
-        chat_settings = Frame(
+        self.chat_settings_frame = Frame(
             HSplit([self.chat_provider_field, self.chat_model_field, self.chat_endpoint_field, self.chat_api_key_field, self.chat_known_models], padding=0),
-            title="Chat provider settings — F5 saves locally (API key is masked)",
+            title="Chat provider settings — ↑/↓ provider · Tab fields · F5 saves locally",
         )
-        chat_panel = Frame(
+        chat_conversation = ConditionalContainer(
             HSplit([
                 self.chat_header,
                 self.chat_transcript,
-                Frame(self.chat_input, title="Message · Enter sends"),
-                ConditionalContainer(chat_settings, Condition(lambda: self._show_chat_settings)),
+                self.chat_input_label,
+                self.chat_input,
+            ], padding=1),
+            Condition(lambda: not self._show_chat_settings),
+        )
+        chat_panel = Frame(
+            HSplit([
+                chat_conversation,
+                ConditionalContainer(self.chat_settings_frame, Condition(lambda: self._show_chat_settings)),
             ], padding=1),
             title="Writing assistant",
-            height=Dimension(min=9, preferred=14, max=20),
+            height=Dimension(weight=1),
         )
         root = HSplit([
             Frame(self.query, title="revdict"), self.active_filters,
-            panes,
+            ConditionalContainer(panes, Condition(lambda: not (self._show_chat or self._show_chat_settings))),
+            ConditionalContainer(chat_panel, Condition(lambda: self._show_chat or self._show_chat_settings)),
             ConditionalContainer(controls, Condition(lambda: self._show_controls)),
-            ConditionalContainer(chat_panel, Condition(lambda: self._show_chat)),
             ConditionalContainer(Frame(Label(text=build_help_text()), title="Help"), Condition(lambda: self._show_help)),
             self.status,
             self.progress,
@@ -531,8 +540,10 @@ class NativeTui:
         def toggle_chat(event): self._toggle_chat()
         @bindings.add("f5")
         def toggle_chat_settings(event): self._toggle_chat_settings()
-        @bindings.add("f6")
-        def cycle_gemini_model(event): self._cycle_gemini_model()
+        @bindings.add("tab", filter=Condition(lambda: self._show_chat_settings))
+        def next_chat_setting(event): self._focus_chat_setting(1)
+        @bindings.add("s-tab", filter=Condition(lambda: self._show_chat_settings))
+        def previous_chat_setting(event): self._focus_chat_setting(-1)
         @bindings.add("c-r")
         def cycle_sort(event):
             values = [value for value, _ in SORT_CHOICES]; current = self.sort_field.current_value
@@ -711,6 +722,7 @@ class NativeTui:
             context = self._current_chat_context()
             if context is not None and not self._chat_history and not self.chat_input.text:
                 self.chat_input.text = chat_module.default_writing_prompt(context)
+                self.chat_input.buffer.cursor_position = len(self.chat_input.text)
             elif context is None:
                 self.status.text = "Select a result first; chat will then include its definition."
             self.application.layout.focus(self.chat_input)
@@ -736,6 +748,8 @@ class NativeTui:
             self.chat_model_field.text = provider.model
             self.chat_endpoint_field.text = provider.base_url
             self.chat_api_key_field.text = provider.api_key or ""
+            for field in (self.chat_model_field, self.chat_endpoint_field, self.chat_api_key_field):
+                field.buffer.cursor_position = len(field.text)
         finally:
             self._chat_loading_settings = False
         self._update_chat_header()
@@ -754,34 +768,28 @@ class NativeTui:
         self._chat_settings.active_provider = provider_name
 
     def _toggle_chat_settings(self) -> None:
-        if not self._show_chat:
-            self._show_chat = True
         if self._show_chat_settings:
             self._save_chat_provider_form()
             chat_module.save_settings(self._chat_settings)
             self._show_chat_settings = False
             self.status.text = "Chat provider settings saved locally."
-            self.application.layout.focus(self.chat_input)
+            if self._chat_visible_before_settings:
+                self.application.layout.focus(self.chat_input)
+            else:
+                self.application.layout.focus(self.query)
+            self._show_chat = self._chat_visible_before_settings
         else:
+            self._chat_visible_before_settings = self._show_chat
             self._show_chat_settings = True
             self._load_chat_provider_form()
-            self.application.layout.focus(self.chat_provider_field)
+            self.application.layout.focus(self.chat_endpoint_field)
         self.application.invalidate()
 
-    def _cycle_gemini_model(self) -> None:
-        if self._chat_settings.active_provider != "gemini":
-            self.status.text = "F6 cycles cached Gemini models after choosing Gemini in F5 settings."
-        elif not self._chat_settings.gemini_models:
-            self.status.text = "No cached Gemini models. Run: revdict chat-config --provider gemini --test"
-        else:
-            models = self._chat_settings.gemini_models
-            current = self._active_chat_provider()
-            model = models[(models.index(current.model) + 1) % len(models)] if current.model in models else models[0]
-            self._chat_settings.providers["gemini"] = chat_module.ProviderSettings("gemini", current.base_url, model, current.api_key_env, current.api_key)
-            chat_module.save_settings(self._chat_settings)
-            self._load_chat_provider_form()
-            self.status.text = f"Gemini model: {model}"
-        self.application.invalidate()
+    def _focus_chat_setting(self, step: int) -> None:
+        fields = (self.chat_endpoint_field, self.chat_model_field, self.chat_api_key_field, self.chat_provider_field)
+        current = self.application.layout.current_window
+        index = next((number for number, field in enumerate(fields) if field.window == current), 0)
+        self.application.layout.focus(fields[(index + step) % len(fields)])
 
     def _send_chat(self) -> None:
         context = self._current_chat_context()

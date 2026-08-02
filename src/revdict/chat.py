@@ -290,10 +290,10 @@ class ChatClient:
 class ChatController:
     """A single persistent worker; a slow provider can never be spammed in parallel."""
 
-    def __init__(self, execute: Callable[[str], str], on_result: Callable[[str], None], on_error: Callable[[Exception], None]) -> None:
+    def __init__(self, execute: Callable[[object], str], on_result: Callable[[str], None], on_error: Callable[[Exception], None]) -> None:
         self._execute, self._on_result, self._on_error = execute, on_result, on_error
         self._condition = threading.Condition()
-        self._pending: str | None = None
+        self._pending: object | None = None
         self._busy = False
         self._closed = False
         self._worker = threading.Thread(target=self._work, name="revdict-chat", daemon=True)
@@ -304,9 +304,9 @@ class ChatController:
         with self._condition:
             return self._busy
 
-    def send(self, message: str) -> bool:
+    def send(self, message: object) -> bool:
         with self._condition:
-            if self._closed or self._busy or not message.strip():
+            if self._closed or self._busy or message is None:
                 return False
             self._busy = True
             self._pending = message
