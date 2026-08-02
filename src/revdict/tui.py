@@ -119,6 +119,7 @@ class ChatSession:
     history: list[tuple[str, str]]
     transcript: str = ""
     streamed_answer: str = ""
+    draft: str = ""
 
 
 class ChatSessionRequestError(RuntimeError):
@@ -835,11 +836,20 @@ class NativeTui:
 
     def _activate_chat_session(self, context: chat_module.LexicalContext) -> ChatSessionKey:
         key = ChatSessionKey.from_context(context)
+        previous_key = self._active_chat_session_key
+        if previous_key is not None and previous_key != key:
+            self._chat_sessions[previous_key].draft = self.chat_input.text
         if key not in self._chat_sessions:
-            self._chat_sessions[key] = ChatSession(bootstrap=chat_module.lexical_bootstrap(context), history=[])
+            self._chat_sessions[key] = ChatSession(
+                bootstrap=chat_module.lexical_bootstrap(context),
+                history=[],
+                draft=chat_module.default_writing_prompt(context),
+            )
         self._active_chat_session_key = key
         self._chat_transcript_text = self._active_chat_session.transcript
         self._render_chat_transcript()
+        self.chat_input.text = self._active_chat_session.draft
+        self.chat_input.buffer.cursor_position = len(self.chat_input.text)
         return key
 
     def _sync_active_chat_transcript(self) -> None:
@@ -867,13 +877,12 @@ class NativeTui:
             context = self._current_chat_context()
             if context is not None:
                 self._activate_chat_session(context)
-            if context is not None and not self._active_chat_session.transcript and not self.chat_input.text:
-                self.chat_input.text = chat_module.default_writing_prompt(context)
-                self.chat_input.buffer.cursor_position = len(self.chat_input.text)
             elif context is None:
                 self.status.text = "Select a result first; chat will then include its definition."
             self.application.layout.focus(self.chat_input)
         else:
+            if self._active_chat_session_key is not None:
+                self._active_chat_session.draft = self.chat_input.text
             self._show_chat_settings = False
             self.application.layout.focus(self.query)
         self._update_chat_header()
@@ -959,6 +968,7 @@ class NativeTui:
             session.history.append(("user", request_message))
             self._append_chat_turn("You", message, key)
             self._begin_chat_response(key)
+            session.draft = ""
             self.chat_input.text = ""
             self.status.text = "Writing assistant is responding…"
         self.application.invalidate()

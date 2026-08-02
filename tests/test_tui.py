@@ -466,6 +466,31 @@ def test_changing_the_highlighted_result_switches_the_visible_chat_session():
         ui.close()
 
 
+def test_each_new_sense_gets_its_own_prefilled_chat_draft():
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    ui._rows = [
+        {"headword": "percale", "pos": "noun", "definition": "a fine cotton fabric", "stress": None, "synonyms": [], "examples": [], "label": "neutral", "polarity": "neutral", "relevance": 100},
+        {"headword": "reverence", "pos": "noun", "definition": "deep respect", "stress": None, "synonyms": [], "examples": [], "label": "neutral", "polarity": "neutral", "relevance": 100},
+    ]
+    try:
+        ui._toggle_chat()
+        assert "percale" in ui.chat_input.text
+        ui._toggle_chat()
+        ui._selected_index = 1
+        ui._render_selection()
+        ui._toggle_chat()
+
+        assert "reverence" in ui.chat_input.text
+        assert "percale" not in ui.chat_input.text
+        ui._toggle_chat()
+        ui._selected_index = 0
+        ui._render_selection()
+        ui._toggle_chat()
+        assert "percale" in ui.chat_input.text
+    finally:
+        ui.close()
+
+
 def test_empty_chat_input_is_not_queued_to_a_provider(monkeypatch):
     ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
     ui._rows = [{"headword": "percale", "pos": "noun", "definition": "a fine cotton fabric", "stress": None, "synonyms": [], "examples": [], "label": "neutral", "polarity": "neutral", "relevance": 100}]
