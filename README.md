@@ -82,8 +82,11 @@ support. `NO_COLOR` disables every colour, including stress, while preserving
 readability attributes. Stress marks otherwise retain a fixed gold accent that
 does not depend on a terminal theme's yellow slot. Selection reverses only the
 terminal's own foreground/background across every wrapped result line. Results
-and previews have proportional, arrow-free scrollbars: mouse-wheel scrolling
-works in either pane, and words wrap only at word boundaries.
+use fixed headword and part-of-speech columns, with definitions aligned at a
+stable hanging indent. Results and previews have proportional, arrow-free
+scrollbars: mouse-wheel scrolling works in either pane, and words wrap only at
+word boundaries. Footer actions use bracketed key codes such as `[F1] Help`, so
+they remain visibly interactive even when colours are disabled.
 
 | Key | Action |
 |---|---|

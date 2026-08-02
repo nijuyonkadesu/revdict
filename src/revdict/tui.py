@@ -21,7 +21,7 @@ from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.output.color_depth import ColorDepth
 from prompt_toolkit.utils import get_cwidth
-from prompt_toolkit.widgets import Label, RadioList
+from prompt_toolkit.widgets import Button, Label, RadioList
 from rich.console import Console
 from rich.markdown import Markdown
 
@@ -36,6 +36,9 @@ ARPABET_VOWELS = frozenset(
 )
 LIVE_TUI_TOP_N = 50
 COMPACT_PANE_MAX_COLUMNS = 99
+RESULT_MARKER_WIDTH = 2
+RESULT_HEADWORD_COL_WIDTH = 16
+RESULT_POS_COL_WIDTH = 12
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
@@ -82,7 +85,7 @@ class TerminalTheme:
                 "result.sentiment.positive": "", "result.sentiment.negative": "", "result.confidence": "",
                 "stress": "bold", "stress.no_color": "bold",
                 "scrollbar.thumb": "", "scrollbar.track": "dim",
-                "button": "dim", "button.focused": "bold underline", "button.arrow": "", "button.text": "",
+                "button.key": "bold", "button.label": "", "button.label.focused": "bold",
             }
         return {
             "query": "bold", "muted": "dim", "border": "bold", "section.title": "bold",
@@ -90,7 +93,7 @@ class TerminalTheme:
             "result.sentiment.positive": "ansigreen", "result.sentiment.negative": "ansired", "result.confidence": "ansimagenta",
             "stress": "#ffcc00 bold", "stress.no_color": "bold",
             "scrollbar.thumb": "", "scrollbar.track": "dim",
-            "button": "dim", "button.focused": "ansimagenta bold", "button.arrow": "", "button.text": "",
+            "button.key": "bold", "button.label": "", "button.label.focused": "ansimagenta bold",
         }
 
 
@@ -135,6 +138,31 @@ class HairlineSection:
 
     def __pt_container__(self):
         return self.container
+
+
+class FooterButton(Button):
+    """A clickable keybinding whose structure remains legible without colour."""
+
+    def __init__(self, key: str, label: str, handler: Callable[[], None]) -> None:
+        self.key, self.label = key, label
+        super().__init__(f"[{key}] {label}", handler=handler, width=get_cwidth(f"[{key}] {label}"), left_symbol="", right_symbol="")
+        self.window.style = ""
+
+    def _get_text_fragments(self):
+        def handler(mouse_event: MouseEvent) -> None:
+            if self.handler is not None and mouse_event.event_type == MouseEventType.MOUSE_UP:
+                self.handler()
+
+        try:
+            focused = get_app().layout.has_focus(self)
+        except AttributeError:
+            focused = False
+        label_style = "class:button.label.focused" if focused else "class:button.label"
+        padding = " " * max(0, self.width - get_cwidth(self.text))
+        return [
+            ("class:button.key", f"[{self.key}]", handler),
+            (label_style, f" {self.label}{padding}", handler),
+        ]
 
 
 class ValidationError(ValueError):
@@ -442,22 +470,57 @@ def format_progress_line(states: dict[str, str], details: dict[str, str]) -> str
     return f"{line} — {detail}" if detail else line
 
 
+def _truncate_to_width(text: str, width: int) -> str:
+    if get_cwidth(text) <= width:
+        return text
+    if width <= 1:
+        return "…"[:width]
+    kept: list[str] = []
+    used = 0
+    for character in text:
+        character_width = get_cwidth(character)
+        if used + character_width > width - 1:
+            break
+        kept.append(character)
+        used += character_width
+    return "".join(kept) + "…"
+
+
+def _pad_to_width(text: str, width: int) -> str:
+    return text + " " * max(0, width - get_cwidth(text))
+
+
+def _result_column_widths(rows: list[dict], width: int) -> tuple[int, int]:
+    """Return stable columns while preserving definition room in narrow panes."""
+    available = max(1, width - RESULT_MARKER_WIDTH)
+    longest_definition_word = max((get_cwidth(word) for row in rows for word in row["definition"].split()), default=1)
+    maximum_prefix = max(RESULT_MARKER_WIDTH + 8, width - longest_definition_word) - RESULT_MARKER_WIDTH
+    if available >= RESULT_HEADWORD_COL_WIDTH + RESULT_POS_COL_WIDTH + 12 and maximum_prefix >= RESULT_HEADWORD_COL_WIDTH + RESULT_POS_COL_WIDTH:
+        return RESULT_HEADWORD_COL_WIDTH, RESULT_POS_COL_WIDTH
+    pos_width = min(RESULT_POS_COL_WIDTH, max(4, min(available // 3, maximum_prefix - 4)))
+    headword_width = min(RESULT_HEADWORD_COL_WIDTH, max(4, maximum_prefix - pos_width))
+    return headword_width, pos_width
+
+
 def _wrap_result_fragments(rows: list[dict], selected_index: int, width: int):
-    """Wrap result rows by tokens, preserving styles and never splitting a word."""
+    """Render aligned result columns with word-safe hanging definition indents."""
     all_lines: list[list[tuple[str, str]]] = []
     line_rows: list[int] = []
     width = max(1, width)
+    headword_width, pos_width = _result_column_widths(rows, width)
+    definition_column = min(width, RESULT_MARKER_WIDTH + headword_width + pos_width)
+
     for index, row in enumerate(rows):
         selected = index == selected_index
         selected_style = "class:result.selected" if selected else ""
-        header = [
+        headword = _pad_to_width(_truncate_to_width(row["headword"], headword_width), headword_width)
+        pos = _pad_to_width(_truncate_to_width(f"({row['pos']})", pos_width), pos_width)
+        line = [
             ("", "❯ " if selected else "  "),
-            ("class:result.headword", row["headword"]),
-            ("class:result.pos", f"  ({row['pos']})  "),
+            ("class:result.headword", headword),
+            ("class:result.pos", pos),
         ]
-        tokens = header + [("", word + (" " if number < len(row["definition"].split()) - 1 else "")) for number, word in enumerate(row["definition"].split())]
-        line: list[tuple[str, str]] = []
-        used = 0
+        used = definition_column
 
         def append_line() -> None:
             rendered_line = line or [("", "")]
@@ -471,16 +534,16 @@ def _wrap_result_fragments(rows: list[dict], selected_index: int, width: int):
             all_lines.append(rendered_line)
             line_rows.append(index)
 
-        for style, token in tokens:
-            token_width = get_cwidth(token)
-            if line and used + token_width > width and token.strip():
+        for word in row["definition"].split():
+            separator = "" if used == definition_column else " "
+            token = separator + word
+            if used > definition_column and used + get_cwidth(token) > width:
                 append_line()
-                line = [("", "  ")]
-                used = 2
-                token = token.lstrip()
-                token_width = get_cwidth(token)
-            line.append((style, token))
-            used += token_width
+                line = [("", " " * definition_column)]
+                used = definition_column
+                token = word
+            line.append(("", token))
+            used += get_cwidth(token)
         append_line()
     return all_lines or [[("", "Type a meaning or word to search.")]], line_rows or [-1]
 
@@ -675,7 +738,7 @@ class NativeTui:
         from prompt_toolkit.layout import ConditionalContainer, DynamicContainer, Layout
         from prompt_toolkit.layout.dimension import Dimension
         from prompt_toolkit.styles import Style
-        from prompt_toolkit.widgets import Button, TextArea
+        from prompt_toolkit.widgets import TextArea
 
         self.theme = TerminalTheme.from_environment(truecolor_requested=truecolor)
         self._search_executor, self._show_controls, self._show_help, self._show_preview = search_executor, False, False, True
@@ -748,12 +811,10 @@ class NativeTui:
         self.progress_container = ConditionalContainer(self.progress, Condition(lambda: bool(self.progress.text)))
         self.chat_progress = Label(text="", style="class:muted", dont_extend_height=True, wrap_lines=False)
         self.function_key_buttons = tuple(
-            Button(
-                f"{action.key} {action.button_label}",
+            FooterButton(
+                action.key,
+                action.button_label,
                 handler=lambda key=action.key: self._invoke_function_key(key),
-                width=get_cwidth(f"{action.key} {action.button_label}"),
-                left_symbol="",
-                right_symbol="",
             )
             for action in ACTIONS
             if action.key.startswith("F")

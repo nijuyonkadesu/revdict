@@ -313,6 +313,22 @@ def test_result_renderer_wraps_before_a_definition_word_and_marks_selection():
     assert any("class:result.headword" in style for style, _ in lines[0])
 
 
+def test_result_renderer_uses_fixed_columns_and_hanging_definition_indents():
+    rows = [
+        {"headword": "cat", "pos": "noun", "definition": "a small domesticated carnivorous mammal"},
+        {"headword": "extraordinarilylongword", "pos": "adjective", "definition": "longer than usual"},
+    ]
+    lines, line_rows = _wrap_result_fragments(rows, selected_index=0, width=60)
+    rendered = ["".join(text for _style, text in line) for line in lines]
+    definition_column = tui.RESULT_MARKER_WIDTH + tui.RESULT_HEADWORD_COL_WIDTH + tui.RESULT_POS_COL_WIDTH
+
+    assert rendered[0][definition_column:].startswith("a small")
+    assert rendered[1].startswith(" " * definition_column)
+    assert rendered[2][definition_column:].startswith("longer than usual")
+    assert line_rows == [0, 0, 1]
+    assert "…" in rendered[2 - 0] or "…" in "".join(rendered)
+
+
 def test_selected_result_paints_every_wrapped_physical_line_to_the_panel_width():
     lines, _ = _wrap_result_fragments(
         [{"headword": "consolation", "pos": "noun", "definition": "comfort during disappointment"}],
@@ -414,7 +430,9 @@ def test_bottom_function_buttons_invoke_the_same_actions_as_f_keys():
         click(MouseEvent(position=Point(x=0, y=0), event_type=MouseEventType.MOUSE_UP, button=MouseButton.LEFT, modifiers=frozenset()))
 
         assert ui._show_help is True
-        assert all(key in labels for key in ("F1", "F2", "F3", "F4", "F5"))
+        assert all(f"[{key}]" in labels for key in ("F1", "F2", "F3", "F4", "F5"))
+        assert ui.theme.styles["button.key"] == "bold"
+        assert ui.theme.styles["button.label"] == ""
     finally:
         ui.close()
 
