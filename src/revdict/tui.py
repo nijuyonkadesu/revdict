@@ -100,6 +100,35 @@ class UiAction:
     description: str
 
 
+@dataclass(frozen=True)
+class ChatSessionKey:
+    """An exact dictionary sense, independent of the selected chat provider."""
+
+    headword: str
+    part_of_speech: str
+    definition: str
+
+    @classmethod
+    def from_context(cls, context: chat_module.LexicalContext) -> ChatSessionKey:
+        return cls(context.headword, context.part_of_speech, context.definition)
+
+
+@dataclass
+class ChatSession:
+    bootstrap: str
+    history: list[tuple[str, str]]
+    transcript: str = ""
+    streamed_answer: str = ""
+
+
+class ChatSessionRequestError(RuntimeError):
+    """Associates an asynchronous provider failure with its initiating session."""
+
+    def __init__(self, key: ChatSessionKey, error: Exception) -> None:
+        self.key = key
+        super().__init__(str(error))
+
+
 ACTIONS = (
     UiAction("F1", "Toggle generated help"), UiAction("F2", "Open or close filters"),
     UiAction("F3", "Toggle preview"), UiAction("F4", "Toggle writing chat"),
@@ -515,16 +544,16 @@ class NativeTui:
         except chat_module.ChatConfigurationError as error:
             self._chat_settings = chat_module.ChatSettings.defaults()
             self._chat_settings_error = str(error)
-        self._chat_history: list[tuple[str, str]] = []
+        self._chat_sessions: dict[ChatSessionKey, ChatSession] = {}
+        self._active_chat_session_key: ChatSessionKey | None = None
         self._chat_client = chat_module.ChatClient()
         self._chat_loading_settings = False
         self._chat_form_provider = self._chat_settings.active_provider
         self._chat_transcript_text = ""
-        self._chat_streamed_answer = ""
         self._chat_spinner_active = False
         self._chat_spinner_frame = 0
         self._chat_chunk_lock = threading.Lock()
-        self._chat_pending_chunks: list[str] = []
+        self._chat_pending_chunks: list[tuple[ChatSessionKey, str]] = []
         self._chat_chunk_flush_scheduled = False
         self.query = TextArea(prompt="> ", multiline=False, height=1, style="class:query", focus_on_click=True)
         self.sort_field = TrackingRadioList(SORT_CHOICES, default=None, select_on_focus=True, on_change=self._schedule_search)
@@ -679,7 +708,7 @@ class NativeTui:
         )
         self._chat_controller = chat_module.ChatController(
             self._execute_chat,
-            lambda answer: self._schedule_on_ui_thread(lambda: self._receive_chat_answer(answer)),
+            lambda result: self._schedule_on_ui_thread(lambda: self._receive_chat_answer(result)),
             lambda error: self._schedule_on_ui_thread(lambda: self._receive_chat_error(error)),
         )
         self._update_chat_header()
@@ -784,6 +813,10 @@ class NativeTui:
     def _render_selection(self) -> None:
         self.preview_control.reset_scroll()
         self.preview_control.fragments = candidate_preview_fragments(self._rows[self._selected_index]) if self._rows else []
+        if self._show_chat:
+            context = self._current_chat_context()
+            if context is not None:
+                self._activate_chat_session(context)
         self._update_chat_header()
 
     def _active_chat_provider(self) -> chat_module.ProviderSettings:
@@ -794,6 +827,26 @@ class NativeTui:
             return None
         row = self._rows[self._selected_index]
         return chat_module.LexicalContext(self.query.text.strip() or "(no search query)", row["headword"], row["definition"], row["pos"])
+
+    @property
+    def _active_chat_session(self) -> ChatSession:
+        assert self._active_chat_session_key is not None
+        return self._chat_sessions[self._active_chat_session_key]
+
+    def _activate_chat_session(self, context: chat_module.LexicalContext) -> ChatSessionKey:
+        key = ChatSessionKey.from_context(context)
+        if key not in self._chat_sessions:
+            self._chat_sessions[key] = ChatSession(bootstrap=chat_module.lexical_bootstrap(context), history=[])
+        self._active_chat_session_key = key
+        self._chat_transcript_text = self._active_chat_session.transcript
+        self._render_chat_transcript()
+        return key
+
+    def _sync_active_chat_transcript(self) -> None:
+        if self._active_chat_session_key is None:
+            return
+        self._chat_transcript_text = self._active_chat_session.transcript
+        self._render_chat_transcript()
 
     def _update_chat_header(self) -> None:
         provider = self._active_chat_provider()
@@ -812,7 +865,9 @@ class NativeTui:
         self._show_chat = not self._show_chat
         if self._show_chat:
             context = self._current_chat_context()
-            if context is not None and not self._chat_history and not self.chat_input.text:
+            if context is not None:
+                self._activate_chat_session(context)
+            if context is not None and not self._active_chat_session.transcript and not self.chat_input.text:
                 self.chat_input.text = chat_module.default_writing_prompt(context)
                 self.chat_input.buffer.cursor_position = len(self.chat_input.text)
             elif context is None:
@@ -888,57 +943,87 @@ class NativeTui:
         message = self.chat_input.text.strip()
         if context is None:
             self.status.text = "Select a result before sending a chat message."
+        elif not message:
+            self.status.text = "Write a message before sending it."
         elif self._chat_controller.busy:
             self.status.text = "Chat is still responding; wait before sending another message."
-        elif self._chat_controller.send((self._active_chat_provider(), context, list(self._chat_history), message)):
-            self._chat_history.append(("user", message))
-            self._append_chat_turn("You", message)
-            self._begin_chat_response()
+        else:
+            key = self._activate_chat_session(context)
+            session = self._active_chat_session
+            request_message = message if session.history else f"{session.bootstrap}\n\nUser request:\n{message}"
+            request = (key, self._active_chat_provider(), list(session.history), request_message)
+            if not self._chat_controller.send(request):
+                self.status.text = "Write a message before sending it."
+                self.application.invalidate()
+                return
+            session.history.append(("user", request_message))
+            self._append_chat_turn("You", message, key)
+            self._begin_chat_response(key)
             self.chat_input.text = ""
             self.status.text = "Writing assistant is responding…"
-        else:
-            self.status.text = "Write a message before sending it."
         self.application.invalidate()
 
-    def _execute_chat(self, request: tuple[chat_module.ProviderSettings, chat_module.LexicalContext, list[tuple[str, str]], str]) -> str:
-        provider, context, history, message = request
-        return self._chat_client.stream(provider, context, history, message, self._queue_chat_chunk)
+    def _execute_chat(self, request: tuple[ChatSessionKey, chat_module.ProviderSettings, list[tuple[str, str]], str]) -> tuple[ChatSessionKey, str]:
+        key, provider, history, message = request
+        try:
+            answer = self._chat_client.stream(provider, history, message, lambda chunk: self._queue_chat_chunk(key, chunk))
+        except Exception as error:
+            raise ChatSessionRequestError(key, error) from error
+        return key, answer
 
-    def _receive_chat_answer(self, answer: str) -> None:
+    def _receive_chat_answer(self, result: tuple[ChatSessionKey, str]) -> None:
+        key, answer = result
         self._flush_chat_chunks()
-        self._chat_history.append(("assistant", answer))
-        if self._chat_streamed_answer:
-            self._chat_transcript_text += "\n\n"
-            self._render_chat_transcript()
+        session = self._chat_sessions[key]
+        session.history.append(("assistant", answer))
+        if session.streamed_answer:
+            session.transcript += "\n\n"
         else:
-            self._append_chat_turn("Assistant", answer)
+            session.transcript += f"{answer}\n\n"
+        if key == self._active_chat_session_key:
+            self._sync_active_chat_transcript()
         self._stop_chat_spinner()
         self.status.text = "Chat response received."
         self.application.invalidate()
 
     def _receive_chat_error(self, error: Exception) -> None:
+        key = error.key if isinstance(error, ChatSessionRequestError) else self._active_chat_session_key
+        if key is None:
+            self.status.text = "Chat request failed."
+            self._stop_chat_spinner()
+            self.application.invalidate()
+            return
         self._flush_chat_chunks()
-        if self._chat_streamed_answer:
-            self._chat_transcript_text += f"\n\n**Chat error:** {error}\n\n"
-            self._render_chat_transcript()
+        session = self._chat_sessions[key]
+        if session.streamed_answer:
+            session.transcript += f"\n\n**Chat error:** {error}\n\n"
         else:
-            self._append_chat_turn("Chat error", str(error))
+            session.transcript += f"**Chat error:** {error}\n\n"
+        if key == self._active_chat_session_key:
+            self._sync_active_chat_transcript()
         self._stop_chat_spinner()
         self.status.text = "Chat request failed."
         self.application.invalidate()
 
-    def _append_chat_turn(self, speaker: str, text: str) -> None:
-        self._chat_transcript_text += f"**{speaker}:**\n{text}\n\n"
-        self._render_chat_transcript()
+    def _append_chat_turn(self, speaker: str, text: str, key: ChatSessionKey | None = None) -> None:
+        key = self._active_chat_session_key if key is None else key
+        if key is None:
+            return
+        session = self._chat_sessions[key]
+        session.transcript += f"**{speaker}:**\n{text}\n\n"
+        if key == self._active_chat_session_key:
+            self._sync_active_chat_transcript()
 
     def _render_chat_transcript(self) -> None:
         self.chat_transcript_control.markdown = self._chat_transcript_text
         self.chat_transcript_control.set_cursor_line(1_000_000)
 
-    def _begin_chat_response(self) -> None:
-        self._chat_streamed_answer = ""
-        self._chat_transcript_text += "**Assistant:**\n"
-        self._render_chat_transcript()
+    def _begin_chat_response(self, key: ChatSessionKey) -> None:
+        session = self._chat_sessions[key]
+        session.streamed_answer = ""
+        session.transcript += "**Assistant:**\n"
+        if key == self._active_chat_session_key:
+            self._sync_active_chat_transcript()
         self._chat_spinner_active = True
         self._chat_spinner_frame = 0
         self.chat_progress.text = "⠋ Writing assistant · streaming"
@@ -957,12 +1042,12 @@ class NativeTui:
         self._chat_spinner_active = False
         self.chat_progress.text = ""
 
-    def _queue_chat_chunk(self, chunk: str) -> None:
+    def _queue_chat_chunk(self, key: ChatSessionKey, chunk: str) -> None:
         """Coalesce network chunks to at most one terminal redraw every 33 ms."""
         if not chunk:
             return
         with self._chat_chunk_lock:
-            self._chat_pending_chunks.append(chunk)
+            self._chat_pending_chunks.append((key, chunk))
             if self._chat_chunk_flush_scheduled:
                 return
             self._chat_chunk_flush_scheduled = True
@@ -981,9 +1066,16 @@ class NativeTui:
             self._chat_chunk_flush_scheduled = False
         if not chunks:
             return
-        self._chat_streamed_answer += "".join(chunks)
-        self._chat_transcript_text += "".join(chunks)
-        self._render_chat_transcript()
+        by_session: dict[ChatSessionKey, list[str]] = {}
+        for key, chunk in chunks:
+            by_session.setdefault(key, []).append(chunk)
+        for key, session_chunks in by_session.items():
+            session = self._chat_sessions[key]
+            text = "".join(session_chunks)
+            session.streamed_answer += text
+            session.transcript += text
+        if self._active_chat_session_key in by_session:
+            self._sync_active_chat_transcript()
         self.application.invalidate()
 
     def _copy_selected(self) -> None:

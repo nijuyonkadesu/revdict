@@ -156,16 +156,23 @@ def test_provider(
     raise ChatConfigurationError(f"Unsupported chat provider: {provider.provider}")
 
 
-def lexical_instruction(context: LexicalContext) -> str:
+def writing_instruction() -> str:
     return (
-        "You are revdict's concise writing assistant. Use the current lexical context accurately. "
+        "You are revdict's concise writing assistant. "
         "When explaining use, distinguish formal writing from natural spoken English; include register, collocations, "
         "two short writing examples, two short spoken examples, and a likely misuse when useful.\n\n"
-        f"Search query: {context.query}\n"
-        f"Highlighted word: {context.headword} ({context.part_of_speech})\n"
-        f"Definition: {context.definition}\n\n"
         "Writing: use the word deliberately and match its register.\n"
         "Speech: prefer natural phrasing and say when a simpler alternative sounds more conversational."
+    )
+
+
+def lexical_bootstrap(context: LexicalContext) -> str:
+    """The hidden first history entry that gives a session its selected sense."""
+    return (
+        "Use this lexical context accurately for the rest of this conversation.\n\n"
+        f"Search query: {context.query}\n"
+        f"Highlighted word: {context.headword} ({context.part_of_speech})\n"
+        f"Definition: {context.definition}"
     )
 
 
@@ -251,7 +258,6 @@ class ChatClient:
     def complete(
         self,
         provider: ProviderSettings,
-        context: LexicalContext,
         history: list[tuple[str, str]],
         message: str,
     ) -> str:
@@ -259,17 +265,16 @@ class ChatClient:
             raise ChatConfigurationError(f"Choose a model for {provider.provider} before sending a message.")
         api_key = self._api_key(provider)
         if provider.provider in {"openai", "ollama"}:
-            return self._openai_compatible(provider, context, history, message, api_key)
+            return self._openai_compatible(provider, history, message, api_key)
         if provider.provider == "anthropic":
-            return self._anthropic(provider, context, history, message, api_key)
+            return self._anthropic(provider, history, message, api_key)
         if provider.provider == "gemini":
-            return self._gemini(provider, context, history, message, api_key)
+            return self._gemini(provider, history, message, api_key)
         raise ChatConfigurationError(f"Unsupported chat provider: {provider.provider}")
 
     def stream(
         self,
         provider: ProviderSettings,
-        context: LexicalContext,
         history: list[tuple[str, str]],
         message: str,
         on_chunk: Callable[[str], None],
@@ -279,11 +284,11 @@ class ChatClient:
             raise ChatConfigurationError(f"Choose a model for {provider.provider} before sending a message.")
         api_key = self._api_key(provider)
         if provider.provider in {"openai", "ollama"}:
-            return self._stream_openai_compatible(provider, context, history, message, api_key, on_chunk)
+            return self._stream_openai_compatible(provider, history, message, api_key, on_chunk)
         if provider.provider == "anthropic":
-            return self._stream_anthropic(provider, context, history, message, api_key, on_chunk)
+            return self._stream_anthropic(provider, history, message, api_key, on_chunk)
         if provider.provider == "gemini":
-            return self._stream_gemini(provider, context, history, message, api_key, on_chunk)
+            return self._stream_gemini(provider, history, message, api_key, on_chunk)
         raise ChatConfigurationError(f"Unsupported chat provider: {provider.provider}")
 
     def _api_key(self, provider: ProviderSettings) -> str | None:
@@ -324,7 +329,6 @@ class ChatClient:
     def _stream_openai_compatible(
         self,
         provider: ProviderSettings,
-        context: LexicalContext,
         history: list[tuple[str, str]],
         message: str,
         api_key: str | None,
@@ -336,7 +340,7 @@ class ChatClient:
         payload = {
             "model": provider.model,
             "stream": True,
-            "messages": [{"role": "system", "content": lexical_instruction(context)}]
+            "messages": [{"role": "system", "content": writing_instruction()}]
             + [{"role": role, "content": text} for role, text in history]
             + [{"role": "user", "content": message}],
         }
@@ -353,7 +357,6 @@ class ChatClient:
     def _stream_anthropic(
         self,
         provider: ProviderSettings,
-        context: LexicalContext,
         history: list[tuple[str, str]],
         message: str,
         api_key: str | None,
@@ -364,7 +367,7 @@ class ChatClient:
             "model": provider.model,
             "max_tokens": 900,
             "stream": True,
-            "system": lexical_instruction(context),
+            "system": writing_instruction(),
             "messages": [{"role": role, "content": text} for role, text in history] + [{"role": "user", "content": message}],
         }
 
@@ -385,7 +388,6 @@ class ChatClient:
     def _stream_gemini(
         self,
         provider: ProviderSettings,
-        context: LexicalContext,
         history: list[tuple[str, str]],
         message: str,
         api_key: str | None,
@@ -397,7 +399,7 @@ class ChatClient:
             for role, text in history
         ]
         contents.append({"role": "user", "parts": [{"text": message}]})
-        payload = {"systemInstruction": {"parts": [{"text": lexical_instruction(context)}]}, "contents": contents}
+        payload = {"systemInstruction": {"parts": [{"text": writing_instruction()}]}, "contents": contents}
 
         def extract_text(event: dict) -> str:
             try:
@@ -408,7 +410,7 @@ class ChatClient:
         url = provider.base_url.rstrip("/") + f"/models/{provider.model}:streamGenerateContent?alt=sse"
         return self._stream_response(url, {"x-goog-api-key": api_key}, payload, extract_text, on_chunk, cumulative=True)
 
-    def _openai_compatible(self, provider: ProviderSettings, context: LexicalContext, history: list[tuple[str, str]], message: str, api_key: str | None) -> str:
+    def _openai_compatible(self, provider: ProviderSettings, history: list[tuple[str, str]], message: str, api_key: str | None) -> str:
         base_url = provider.base_url.rstrip("/")
         if not base_url.endswith("/v1"):
             base_url += "/v1"
@@ -416,7 +418,7 @@ class ChatClient:
         payload = {
             "model": provider.model,
             "stream": False,
-            "messages": [{"role": "system", "content": lexical_instruction(context)}]
+            "messages": [{"role": "system", "content": writing_instruction()}]
             + [{"role": role, "content": text} for role, text in history]
             + [{"role": "user", "content": message}],
         }
@@ -426,12 +428,12 @@ class ChatClient:
         except (IndexError, KeyError, TypeError, AttributeError) as error:
             raise ChatRequestError("Provider did not return a chat response.") from error
 
-    def _anthropic(self, provider: ProviderSettings, context: LexicalContext, history: list[tuple[str, str]], message: str, api_key: str | None) -> str:
+    def _anthropic(self, provider: ProviderSettings, history: list[tuple[str, str]], message: str, api_key: str | None) -> str:
         assert api_key is not None
         payload = {
             "model": provider.model,
             "max_tokens": 900,
-            "system": lexical_instruction(context),
+            "system": writing_instruction(),
             "messages": [{"role": role, "content": text} for role, text in history] + [{"role": "user", "content": message}],
         }
         response = self._transport(
@@ -444,14 +446,14 @@ class ChatClient:
         except (IndexError, KeyError, TypeError, AttributeError) as error:
             raise ChatRequestError("Provider did not return a chat response.") from error
 
-    def _gemini(self, provider: ProviderSettings, context: LexicalContext, history: list[tuple[str, str]], message: str, api_key: str | None) -> str:
+    def _gemini(self, provider: ProviderSettings, history: list[tuple[str, str]], message: str, api_key: str | None) -> str:
         assert api_key is not None
         contents = [
             {"role": "model" if role == "assistant" else "user", "parts": [{"text": text}]}
             for role, text in history
         ]
         contents.append({"role": "user", "parts": [{"text": message}]})
-        payload = {"systemInstruction": {"parts": [{"text": lexical_instruction(context)}]}, "contents": contents}
+        payload = {"systemInstruction": {"parts": [{"text": writing_instruction()}]}, "contents": contents}
         response = self._transport(
             provider.base_url.rstrip("/") + f"/models/{provider.model}:generateContent",
             {"x-goog-api-key": api_key},
@@ -466,7 +468,7 @@ class ChatClient:
 class ChatController:
     """A single persistent worker; a slow provider can never be spammed in parallel."""
 
-    def __init__(self, execute: Callable[[object], str], on_result: Callable[[str], None], on_error: Callable[[Exception], None]) -> None:
+    def __init__(self, execute: Callable[[object], object], on_result: Callable[[object], None], on_error: Callable[[Exception], None]) -> None:
         self._execute, self._on_result, self._on_error = execute, on_result, on_error
         self._condition = threading.Condition()
         self._pending: object | None = None

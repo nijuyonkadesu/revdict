@@ -14,10 +14,10 @@ def test_openai_compatible_chat_includes_lexical_context_and_omits_empty_auth():
         return {"choices": [{"message": {"content": "Use tailor for deliberate adaptation."}}]}
 
     client = chat.ChatClient(transport=transport, environment={})
+    context = chat.LexicalContext("make clothing fit", "tailor", "a person who makes or alters garments", "noun")
     response = client.complete(
         chat.ProviderSettings("ollama", "http://example.test:11434", "Qwen3.6:35b-a3b", None),
-        chat.LexicalContext("make clothing fit", "tailor", "a person who makes or alters garments", "noun"),
-        [("user", "What register is it?")],
+        [("user", chat.lexical_bootstrap(context) + "\n\nUser request:\nWhat register is it?")],
         "How can I use this word in writing and speech?",
     )
 
@@ -26,7 +26,8 @@ def test_openai_compatible_chat_includes_lexical_context_and_omits_empty_auth():
     assert url == "http://example.test:11434/v1/chat/completions"
     assert "Authorization" not in headers
     assert payload["model"] == "Qwen3.6:35b-a3b"
-    assert "Highlighted word: tailor (noun)" in payload["messages"][0]["content"]
+    assert "Definition:" not in payload["messages"][0]["content"]
+    assert "Definition: a person who makes or alters garments" in payload["messages"][1]["content"]
     assert "Writing:" in payload["messages"][0]["content"]
     assert payload["messages"][-1] == {"role": "user", "content": "How can I use this word in writing and speech?"}
 
@@ -39,10 +40,10 @@ def test_gemini_chat_uses_generate_content_shape_and_parses_text():
         return {"candidates": [{"content": {"parts": [{"text": "A concise answer."}]}}]}
 
     client = chat.ChatClient(transport=transport, environment={"REVDICT_GEMINI_API_KEY": "test-key"})
+    context = chat.LexicalContext("closely woven pillow fabric", "percale", "a fine cotton fabric", "noun")
     response = client.complete(
         chat.ProviderSettings("gemini", "https://generativelanguage.googleapis.com/v1beta", "gemini-3.6-flash", "REVDICT_GEMINI_API_KEY"),
-        chat.LexicalContext("closely woven pillow fabric", "percale", "a fine cotton fabric", "noun"),
-        [("assistant", "Earlier reply")],
+        [("user", chat.lexical_bootstrap(context) + "\n\nUser request:\nGive an initial example."), ("assistant", "Earlier reply")],
         "Give me spoken examples.",
     )
 
@@ -50,8 +51,8 @@ def test_gemini_chat_uses_generate_content_shape_and_parses_text():
     url, headers, payload = calls[0]
     assert url.endswith("/models/gemini-3.6-flash:generateContent")
     assert headers["x-goog-api-key"] == "test-key"
-    assert payload["contents"][0] == {"role": "model", "parts": [{"text": "Earlier reply"}]}
-    assert "Search query: closely woven pillow fabric" in payload["systemInstruction"]["parts"][0]["text"]
+    assert payload["contents"][1] == {"role": "model", "parts": [{"text": "Earlier reply"}]}
+    assert "Search query: closely woven pillow fabric" in payload["contents"][0]["parts"][0]["text"]
 
 
 def test_openai_compatible_chat_streams_each_sse_delta_with_full_context():
@@ -67,10 +68,10 @@ def test_openai_compatible_chat_streams_each_sse_delta_with_full_context():
         ]
 
     client = chat.ChatClient(stream_transport=stream_transport, environment={})
+    context = chat.LexicalContext("make clothing fit", "tailor", "a person who makes or alters garments", "noun")
     response = client.stream(
         chat.ProviderSettings("ollama", "http://example.test:11434", "Qwen3.6:35b-a3b", None),
-        chat.LexicalContext("make clothing fit", "tailor", "a person who makes or alters garments", "noun"),
-        [],
+        [("user", chat.lexical_bootstrap(context) + "\n\nUser request:\nGive an initial example.")],
         "How should I use it?",
         chunks.append,
     )
@@ -80,7 +81,29 @@ def test_openai_compatible_chat_streams_each_sse_delta_with_full_context():
     url, _headers, payload = calls[0]
     assert url == "http://example.test:11434/v1/chat/completions"
     assert payload["stream"] is True
-    assert "Definition: a person who makes or alters garments" in payload["messages"][0]["content"]
+    assert "Definition: a person who makes or alters garments" in payload["messages"][1]["content"]
+
+
+def test_stream_replays_the_first_turn_context_without_repeating_definition_in_system_prompt():
+    calls = []
+
+    def stream_transport(_url, _headers, payload):
+        calls.append(payload)
+        return [b'data: {"choices": [{"delta": {"content": "Answer"}}]}\n', b"data: [DONE]\n"]
+
+    context = chat.LexicalContext("closely woven fabric", "percale", "a fine closely woven cotton fabric", "noun")
+    history = [("user", chat.lexical_bootstrap(context) + "\n\nUser request:\nHow formal is it?"), ("assistant", "It is neutral.")]
+    response = chat.ChatClient(stream_transport=stream_transport, environment={}).stream(
+        chat.ProviderSettings("ollama", "http://example.test", "model", None),
+        history,
+        "Give another example.",
+        lambda _chunk: None,
+    )
+
+    assert response == "Answer"
+    assert "Definition:" not in calls[0]["messages"][0]["content"]
+    assert "Definition: a fine closely woven cotton fabric" in calls[0]["messages"][1]["content"]
+    assert calls[0]["messages"][-1] == {"role": "user", "content": "Give another example."}
 
 
 def test_gemini_chat_streams_server_sent_events():
@@ -95,10 +118,10 @@ def test_gemini_chat_streams_server_sent_events():
         ]
 
     client = chat.ChatClient(stream_transport=stream_transport, environment={"REVDICT_GEMINI_API_KEY": "test-key"})
+    context = chat.LexicalContext("closely woven pillow fabric", "percale", "a fine cotton fabric", "noun")
     response = client.stream(
         chat.ProviderSettings("gemini", "https://generativelanguage.googleapis.com/v1beta", "gemini-3.6-flash", "REVDICT_GEMINI_API_KEY"),
-        chat.LexicalContext("closely woven pillow fabric", "percale", "a fine cotton fabric", "noun"),
-        [],
+        [("user", chat.lexical_bootstrap(context) + "\n\nUser request:\nGive an initial example.")],
         "Give spoken examples.",
         chunks.append,
     )
@@ -108,7 +131,7 @@ def test_gemini_chat_streams_server_sent_events():
     url, headers, payload = calls[0]
     assert url.endswith("/models/gemini-3.6-flash:streamGenerateContent?alt=sse")
     assert headers["x-goog-api-key"] == "test-key"
-    assert "Definition: a fine cotton fabric" in payload["systemInstruction"]["parts"][0]["text"]
+    assert "Definition: a fine cotton fabric" in payload["contents"][0]["parts"][0]["text"]
 
 
 def test_anthropic_chat_streams_content_block_deltas():
@@ -121,10 +144,10 @@ def test_anthropic_chat_streams_content_block_deltas():
         ]
 
     client = chat.ChatClient(stream_transport=stream_transport, environment={"ANTHROPIC_API_KEY": "test-key"})
+    context = chat.LexicalContext("make clothing fit", "tailor", "a person who makes garments", "noun")
     response = client.stream(
         chat.ProviderSettings("anthropic", "https://api.anthropic.com/v1", "claude-sonnet-4-5", "ANTHROPIC_API_KEY"),
-        chat.LexicalContext("make clothing fit", "tailor", "a person who makes garments", "noun"),
-        [],
+        [("user", chat.lexical_bootstrap(context) + "\n\nUser request:\nGive an initial example.")],
         "Give an example.",
         chunks.append,
     )
@@ -139,7 +162,7 @@ def test_required_key_is_reported_without_attempting_a_request():
     with pytest.raises(chat.ChatConfigurationError, match="OPENAI_API_KEY"):
         client.complete(
             chat.ProviderSettings("openai", "https://api.openai.com/v1", "gpt-4.1-mini", "OPENAI_API_KEY"),
-            chat.LexicalContext("happy", "joyful", "feeling great happiness", "adjective"), [], "Help me use this word."
+            [], "Help me use this word."
         )
 
 

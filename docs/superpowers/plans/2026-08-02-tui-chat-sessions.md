@@ -4,7 +4,7 @@
 
 **Goal:** Keep one provider-neutral, in-memory chat conversation for each exact selected dictionary sense during a revdict TUI run.
 
-**Architecture:** `ChatSession` owns hidden provider history and a visible Markdown transcript for a `ChatSessionKey` composed of headword, part of speech, and definition. The initial history entry contains the full lexical context. Later turns replay that entry and conversation history, so the definition is not injected repeatedly. Sessions are shared across providers and disappear when the TUI exits.
+**Architecture:** `ChatSession` owns provider history and a visible Markdown transcript for a `ChatSessionKey` composed of headword, part of speech, and definition. Its bootstrap context is prepended to the first real user turn; later turns replay that first turn and conversation history, so the definition is not injected repeatedly. Sessions are shared across providers and disappear when the TUI exits.
 
 **Tech Stack:** Python 3.11+, prompt-toolkit, Rich, pytest.
 
@@ -69,7 +69,7 @@ Commit: `git add src/revdict/chat.py tests/test_chat.py && git commit -m "fix: s
 - Test: `tests/test_tui.py`
 
 **Interfaces:**
-- Produces: `ChatSessionKey.from_context(context)`, `ChatSession.history`, and `ChatSession.transcript`.
+- Produces: `ChatSessionKey.from_context(context)`, `ChatSession.bootstrap`, `ChatSession.history`, and `ChatSession.transcript`.
 - Consumes: `chat_module.lexical_bootstrap(context)`.
 
 - [ ] **Step 1: Write the failing test**
@@ -106,7 +106,7 @@ class ChatSession:
     transcript: str = ""
 ```
 
-On opening F4, activate the selected sense’s session, creating a hidden bootstrap history only when absent. Restore that session’s transcript and use its history for sends.
+On opening F4, activate the selected sense’s session, creating a bootstrap string only when absent. Prepend it to the first real user message, restore that session’s transcript, and use its history for later sends.
 
 - [ ] **Step 4: Run the TUI tests and commit**
 

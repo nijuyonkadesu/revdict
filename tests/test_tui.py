@@ -405,20 +405,77 @@ def test_markdown_fragments_render_emphasis_without_painting_chat_colours():
 
 def test_chat_renders_streamed_chunks_before_the_final_reply_arrives():
     ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    context = tui.chat_module.LexicalContext("fabric", "percale", "a fine cotton fabric", "noun")
     try:
-        ui._begin_chat_response()
-        ui._queue_chat_chunk("**Natural**")
+        key = ui._activate_chat_session(context)
+        ui._begin_chat_response(key)
+        ui._queue_chat_chunk(key, "**Natural**")
         ui._flush_chat_chunks()
 
         assert ui._chat_spinner_active is True
-        assert ui._chat_streamed_answer == "**Natural**"
+        assert ui._active_chat_session.streamed_answer == "**Natural**"
         assert ui.chat_transcript_control.markdown.endswith("**Natural**")
 
-        ui._receive_chat_answer("**Natural**")
+        ui._receive_chat_answer((key, "**Natural**"))
 
         assert ui._chat_spinner_active is False
-        assert ui._chat_history[-1] == ("assistant", "**Natural**")
+        assert ui._active_chat_session.history[-1] == ("assistant", "**Natural**")
         assert ui._chat_transcript_text.count("**Natural**") == 1
+    finally:
+        ui.close()
+
+
+def test_chat_sessions_restore_per_sense_and_survive_provider_changes():
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    percale = tui.chat_module.LexicalContext("fabric", "percale", "a fine cotton fabric", "noun")
+    reverence = tui.chat_module.LexicalContext("respect", "reverence", "deep respect", "noun")
+    try:
+        ui._activate_chat_session(percale)
+        ui._append_chat_turn("You", "How formal is it?")
+        ui._active_chat_session.history.append(("user", "How formal is it?"))
+
+        ui._activate_chat_session(reverence)
+        assert ui._chat_transcript_text == ""
+
+        ui._activate_chat_session(percale)
+        ui._chat_settings.active_provider = "gemini"
+        assert "How formal is it?" in ui._chat_transcript_text
+        assert ui._active_chat_session.bootstrap == tui.chat_module.lexical_bootstrap(percale)
+    finally:
+        ui.close()
+
+
+def test_changing_the_highlighted_result_switches_the_visible_chat_session():
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    ui._rows = [
+        {"headword": "percale", "pos": "noun", "definition": "a fine cotton fabric", "stress": None, "synonyms": [], "examples": [], "label": "neutral", "polarity": "neutral", "relevance": 100},
+        {"headword": "reverence", "pos": "noun", "definition": "deep respect", "stress": None, "synonyms": [], "examples": [], "label": "neutral", "polarity": "neutral", "relevance": 100},
+    ]
+    try:
+        ui._toggle_chat()
+        ui._append_chat_turn("You", "Tell me about percale.")
+        ui._selected_index = 1
+        ui._render_selection()
+
+        assert ui._chat_transcript_text == ""
+
+        ui._selected_index = 0
+        ui._render_selection()
+        assert "Tell me about percale." in ui._chat_transcript_text
+    finally:
+        ui.close()
+
+
+def test_empty_chat_input_is_not_queued_to_a_provider(monkeypatch):
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    ui._rows = [{"headword": "percale", "pos": "noun", "definition": "a fine cotton fabric", "stress": None, "synonyms": [], "examples": [], "label": "neutral", "polarity": "neutral", "relevance": 100}]
+    queued = []
+    monkeypatch.setattr(ui._chat_controller, "send", lambda request: queued.append(request) or True)
+    try:
+        ui._send_chat()
+
+        assert queued == []
+        assert ui.status.text == "Write a message before sending it."
     finally:
         ui.close()
 
