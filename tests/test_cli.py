@@ -417,6 +417,17 @@ def test_main_with_no_args_checks_isatty_before_going_interactive(monkeypatch):
     assert calls["interactive"] is False
 
 
+def test_main_fzf_flag_starts_the_legacy_live_session(monkeypatch):
+    """Catches removing the established fzf workflow without an escape hatch."""
+    monkeypatch.setattr(cli, "_index_exists", lambda: True)
+    monkeypatch.setattr(cli, "_fzf_missing", lambda: False)
+    calls = []
+    monkeypatch.setattr(cli.picker, "run_live_session", lambda: calls.append("started"))
+
+    assert cli.main(["--fzf"]) == 0
+    assert calls == ["started"]
+
+
 def test_query_only_prints_candidate_lines_into_the_given_preview_dir(monkeypatch, capsys, tmp_path):
     fake_result = {
         "exact_match": None,
@@ -549,20 +560,12 @@ def test_jsonl_query_candidate_without_synonyms_or_stress_defaults_cleanly(monke
     assert row["stress"] is None
 
 
-def test_main_with_no_args_and_a_tty_launches_the_live_session(monkeypatch):
-    # Patches only `isatty` on the real (capsys-managed) sys.stdout object in
-    # place, rather than replacing sys.stdout wholesale -- a wholesale
-    # replacement breaks Rich's Console and capsys (see the sibling test
-    # below). Also explicitly mocks _fzf_missing: previously this test only
-    # passed because fzf happened to be on PATH on the dev machine, so the
-    # real fzf-missing branch (which crashes on the old-style fake stdout)
-    # was never exercised. Without fzf installed, this test would have
-    # failed with the same AttributeError the sibling test's fix addressed.
+def test_main_with_no_args_and_a_tty_launches_the_native_tui(monkeypatch):
+    """Catches bare revdict regressing to the old fzf-only live session."""
     monkeypatch.setattr(cli, "_index_exists", lambda: True)
-    monkeypatch.setattr(cli, "_fzf_missing", lambda: False)
 
     called = {"ran": False}
-    monkeypatch.setattr(cli.picker, "run_live_session", lambda: called.__setitem__("ran", True))
+    monkeypatch.setattr(cli.tui, "run", lambda: called.__setitem__("ran", True))
 
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
 
@@ -572,29 +575,18 @@ def test_main_with_no_args_and_a_tty_launches_the_live_session(monkeypatch):
     assert called["ran"] is True
 
 
-def test_main_with_no_args_and_a_tty_but_missing_fzf_prints_a_clear_message(monkeypatch, capsys):
-    # Deviation from the task brief's literal test code: the brief's
-    # _TtyStdout fake only implements isatty(), then does
-    # `monkeypatch.setattr(cli.sys, "stdout", _TtyStdout())`. Since `cli.sys`
-    # is the actual process-wide `sys` module, that replaces the real
-    # sys.stdout everywhere -- including inside Rich's Console, which
-    # resolves `self.file` to `sys.stdout` dynamically on every print() call.
-    # Because the fake has no `write()`, the console.print() call this branch
-    # requires crashes with AttributeError instead of returning code 1. It
-    # also disconnects capsys's own capture object, so even a working
-    # write() on the fake wouldn't reach `captured.out`. The minimal fix that
-    # preserves the brief's assertions and capsys capture is to patch just
-    # `isatty` on the real (capsys-managed) sys.stdout object in place,
-    # rather than replacing sys.stdout wholesale.
+def test_main_with_no_args_and_a_tty_does_not_require_fzf(monkeypatch):
+    """Catches fzf becoming an accidental dependency of the native live UI."""
     monkeypatch.setattr(cli, "_index_exists", lambda: True)
     monkeypatch.setattr(cli, "_fzf_missing", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    called = {"ran": False}
+    monkeypatch.setattr(cli.tui, "run", lambda: called.__setitem__("ran", True))
 
     code = cli.main([])
 
-    captured = capsys.readouterr()
-    assert code == 1
-    assert "fzf" in captured.out.lower()
+    assert code == 0
+    assert called["ran"] is True
 
 
 def test_is_remote_session_true_when_tmux_is_set(monkeypatch):

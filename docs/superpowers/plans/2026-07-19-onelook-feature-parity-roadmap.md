@@ -1,5 +1,11 @@
 # OneLook Feature Parity — Architecture & Rollout Roadmap
 
+> **2026-08-02 update:** The Phase 6 Go-TUI decision below has been
+> superseded. The Go implementation was removed after its subprocess model
+> caused server-load problems. Bare `revdict` now uses an in-process native
+> Python UI, while fzf remains available for one-shot selection and via
+> `revdict --fzf`.
+
 > **This is a roadmap/index document, not a task-execution plan.** It answers
 > TODO.md's explicit ask ("architecture, data/API needs, fzf integration
 > approach, and phased rollout") and resolves the fzf-vs-TUI question. Each
