@@ -148,6 +148,10 @@ revdict daemon stop     # stop it (e.g. before rebuilding the index)
 If you rebuild the index while a daemon is running, it keeps serving the old
 data until you stop it — `build-index` will remind you if this applies.
 
+Daemon startup messages and request errors are written to
+`~/.cache/rev_dictionary/daemon.log`; tail it to troubleshoot a daemon
+that won't start or keeps crashing.
+
 ## Clipboard copy on Enter
 
 In the native live UI, pressing Enter on a highlighted candidate copies it to
@@ -305,3 +309,7 @@ revdict "small carnivore" --rhymes-with hat --no-interactive
 `--rhymes-with`/`--sounds-like` resolve their target word's pronunciation as a **noun** by default, since the CLI doesn't collect a part of speech for the target word — this matters for a heteronym like "record" (`--rhymes-with record` uses the noun pronunciation "REH-kerd", not the verb "ri-KORD"), which can produce a different rhyme key than you might expect.
 
 Rhyme/sounds-like matches for obscure words not in the CMU Pronouncing Dictionary rely on a machine-predicted (G2P) pronunciation, which isn't always linguistically correct — so an occasional odd match (e.g. a rare compound word matching a target it doesn't actually rhyme with) is expected, not necessarily a bug.
+
+---
+
+onelook.com has been a big inspiration for me. Thank you!! ~(kinda rude for the llm not not mention the wonderful site anywhere... I had to add it)~

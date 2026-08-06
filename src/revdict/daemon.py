@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
+from pathlib import Path
 import fcntl
 
 from revdict.paths import (
@@ -248,29 +249,38 @@ def supports_progress(timeout: float = 1.0) -> bool | None:
     return isinstance(payload, dict) and PROGRESS_PROTOCOL in payload.get("protocols", [])
 
 
+def spawn_daemon(startup_timeout: float = 20.0) -> bool:
+    """Launch the daemon in the background, returning True once its socket is live.
+
+    If the daemon is already running this is a no-op.  Callers that need
+    mutual exclusion (so multiple clients don't race to spawn) should
+    serialize through ``ensure_daemon_running()`` instead.
+    """
+    if _socket_is_reachable():
+        return True
+    _remove_stale_files()
+
+    DAEMON_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(DAEMON_LOG_PATH, "a") as log_file:
+        subprocess.Popen(
+            [sys.executable, "-u", "-m", "revdict.cli", "daemon", "start"],
+            stdout=log_file,
+            stderr=log_file,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+            env={**os.environ, "REVDICT_DAEMON_CHILD": "1"},
+        )
+    return _wait_for_socket(startup_timeout)
+
+
 def ensure_daemon_running(startup_timeout: float = 20.0) -> bool:
     if _socket_is_reachable():
         return True
-    # Only one client may launch a child. Other clients wait for that child to
-    # publish its socket instead of repeatedly creating losing subprocesses.
     start_lock = _acquire_lock(DAEMON_START_LOCK_PATH)
     if start_lock is None:
         return _wait_for_socket(startup_timeout)
     try:
-        if _socket_is_reachable():
-            return True
-        _remove_stale_files()
-
-        DAEMON_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(DAEMON_LOG_PATH, "a") as log_file:
-            subprocess.Popen(
-                [sys.executable, "-u", "-m", "revdict.cli", "daemon", "start"],
-                stdout=log_file,
-                stderr=log_file,
-                stdin=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-        return _wait_for_socket(startup_timeout)
+        return spawn_daemon(startup_timeout)
     finally:
         _release_lock(start_lock)
 
@@ -296,8 +306,26 @@ def is_daemon_running() -> bool:
 def daemon_status() -> str:
     if is_daemon_running():
         pid = _read_pid()
-        return f"revdict daemon is running (pid {pid})."
+        mem = _read_memory(pid)
+        mem_str = f", {mem:.2f} GB" if mem is not None else ""
+        return f"revdict daemon is running (pid {pid}{mem_str})."
     return "revdict daemon is not running."
+
+
+def _read_memory(pid: int) -> float | None:
+    """Read the daemon's resident set size from /proc, in gibibytes."""
+    try:
+        status = Path(f"/proc/{pid}/status").read_text()
+    except OSError:
+        return None
+    for line in status.splitlines():
+        if line.startswith("VmRSS:"):
+            try:
+                kb = int(line.split()[1])
+                return kb / 1048576
+            except (IndexError, ValueError):
+                return None
+    return None
 
 
 def _handle_request(request_text: str, search_fn) -> str:

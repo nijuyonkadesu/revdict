@@ -40,7 +40,7 @@ class _ArgumentError(Exception):
 
 
 class _QuietArgumentParser(argparse.ArgumentParser):
-    def error(self, message: str) -> None:
+    def error(self, message: str):
         raise _ArgumentError(message, self.format_usage())
 
 
@@ -329,7 +329,20 @@ def _build_index(skip_confirm: bool) -> None:
 
 
 def _daemon_start() -> None:
-    daemon.run_server()
+    if os.environ.get("REVDICT_DAEMON_CHILD"):
+        daemon.run_server()
+        return
+    if daemon.is_daemon_running():
+        pid = daemon._read_pid()
+        console.print(
+            f"[yellow]A daemon is already running (pid {pid}).[/yellow] "
+            "Run [bold]revdict daemon stop[/bold] to restart it."
+        )
+        return
+    if daemon.spawn_daemon():
+        console.print("Daemon started.")
+    else:
+        console.print("[yellow]Daemon failed to start within the timeout.[/yellow]")
 
 
 def _daemon_stop() -> bool:
