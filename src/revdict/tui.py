@@ -14,9 +14,12 @@ from typing import Any
 
 from prompt_toolkit.formatted_text import ANSI, to_formatted_text
 from prompt_toolkit.application.current import get_app
-from prompt_toolkit.layout import HSplit, VSplit, Window
+from prompt_toolkit.completion import Completer, Completion, ThreadedCompleter
+from prompt_toolkit.filters import has_completions, has_focus
+from prompt_toolkit.layout import Float, FloatContainer, HSplit, VSplit, Window
 from prompt_toolkit.layout.controls import UIContent, UIControl
 from prompt_toolkit.layout.margins import ScrollbarMargin
+from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.output.color_depth import ColorDepth
@@ -27,6 +30,7 @@ from rich.markdown import Markdown
 
 from revdict.category import CATEGORIES
 from revdict import chat as chat_module
+from revdict import daemon
 from revdict.progress import STAGES
 from revdict.sort import SORT_MODES
 
@@ -764,6 +768,31 @@ class DebouncedSearchController:
             self._schedule_callback(lambda: self._current(generation) and self._on_progress(event))
 
 
+class DaemonCompleter(Completer):
+    """prompt_toolkit completer that fetches headword suggestions from the daemon.
+
+    Suggestions are suppressed when the typed text is already an exact match
+    for a dictionary headword — if the only match is the word itself, the
+    dropdown stays hidden so it does not obscure an already-completed entry.
+    """
+
+    def __init__(self, send_fn: Callable[[str, int], list[str]]) -> None:
+        self._send = send_fn
+        self._last_call: float = 0.0
+        self._debounce: float = 0.02
+
+    def get_completions(self, document, complete_event):
+        prefix = document.text_before_cursor.strip()
+        if not prefix:
+            return
+        now = time.monotonic()
+        if now - self._last_call < self._debounce:
+            return
+        self._last_call = now
+        for word in self._send(prefix, 20):
+            yield Completion(word, start_position=-len(prefix))
+
+
 class NativeTui:
     """A colour-neutral prompt-toolkit interface over the daemon-backed API."""
 
@@ -805,7 +834,8 @@ class NativeTui:
         self._chat_chunk_lock = threading.Lock()
         self._chat_pending_chunks: list[tuple[ChatSessionKey, str]] = []
         self._chat_chunk_flush_scheduled = False
-        self.query = TextArea(prompt="> ", multiline=False, height=1, style="class:query", focus_on_click=True)
+        self._accepting = False
+        self.query = TextArea(prompt="> ", multiline=False, height=1, style="class:query", focus_on_click=True, complete_while_typing=False, completer=ThreadedCompleter(DaemonCompleter(daemon.send_autocomplete)))
         self.sort_field = TrackingRadioList(SORT_CHOICES, default=None, select_on_focus=True, on_change=self._schedule_search)
         self.category_field = TrackingRadioList(CATEGORY_CHOICES, default=None, select_on_focus=True, on_change=self._schedule_search)
         self.syllables_field = TextArea(prompt="Syllables: ", multiline=False, height=1)
@@ -956,7 +986,15 @@ class NativeTui:
         @bindings.add("c-p")
         def previous_result(event): self._move_selection(-1); event.app.invalidate()
         @bindings.add("enter", filter=Condition(lambda: self.application.layout.current_window == self.query.window))
-        def copy_result(event): self._copy_selected(); event.app.invalidate()
+        def accept_or_copy(event): self._accept_or_copy(); event.app.invalidate()
+        @bindings.add("tab", filter=Condition(lambda: self.application.layout.current_window == self.query.window and self.query.control.buffer.complete_state is not None))
+        def complete_next_tab(event): self._navigate_completion(1); event.app.invalidate()
+        @bindings.add("s-tab", filter=Condition(lambda: self.application.layout.current_window == self.query.window and self.query.control.buffer.complete_state is not None))
+        def complete_prev_tab(event): self._navigate_completion(-1); event.app.invalidate()
+        @bindings.add("down", filter=Condition(lambda: self.application.layout.current_window == self.query.window and self.query.control.buffer.complete_state is not None))
+        def complete_down(event): self._navigate_completion(1); event.app.invalidate()
+        @bindings.add("up", filter=Condition(lambda: self.application.layout.current_window == self.query.window and self.query.control.buffer.complete_state is not None))
+        def complete_up(event): self._navigate_completion(-1); event.app.invalidate()
         @bindings.add("enter", filter=Condition(lambda: self.application.layout.current_window == self.chat_input.window))
         def send_chat(event): self._send_chat()
         @bindings.add("escape", eager=True)
@@ -965,7 +1003,21 @@ class NativeTui:
         @bindings.add("c-c")
         def quit_ui(event): self.close()
         self.application = Application(
-            layout=Layout(self.root, focused_element=self.query),
+            layout=Layout(
+                FloatContainer(
+                    content=self.root,
+                    floats=[
+                        Float(
+                            xcursor=True, ycursor=True, transparent=True,
+                            content=CompletionsMenu(
+                                max_height=16, scroll_offset=1,
+                                extra_filter=has_focus(self.query.control) & has_completions,
+                            ),
+                        ),
+                    ],
+                ),
+                focused_element=self.query,
+            ),
             key_bindings=bindings,
             style=Style.from_dict(self.theme.styles),
             full_screen=True,
@@ -1054,7 +1106,9 @@ class NativeTui:
             self.application.exit()
 
     def _clear_or_exit(self) -> None:
-        if self.query.text:
+        if self.query.control.buffer.complete_state is not None:
+            self.query.control.buffer.cancel_completion()
+        elif self.query.text:
             self.query.text = ""
         else:
             self.close()
@@ -1081,7 +1135,11 @@ class NativeTui:
         except ValidationError as error:
             self.status.text = f"Invalid filter: {error}"; self.application.invalidate(); return
         self._controls = controls; self._set_active_filters(); self._reset_progress()
-        self.status.text = "Searching…"; self._controller.request(query, controls); self.application.invalidate()
+        self.status.text = "Searching…"; self._controller.request(query, controls)
+        buf = self.query.control.buffer
+        if not self._accepting and buf.complete_state is None and get_app().loop is not None:
+            buf.start_completion()
+        self.application.invalidate()
 
     def _set_active_filters(self) -> None:
         active = [f"sort: {self._controls.sort_mode or 'relevance'}", f"category: {self._controls.category or 'all'}"]
@@ -1421,6 +1479,38 @@ class NativeTui:
         if self._active_chat_session_key in by_session:
             self._sync_active_chat_transcript()
         self.application.invalidate()
+
+    def _navigate_completion(self, delta: int) -> None:
+        """Move the completion highlight without replacing text inline."""
+        buf = self.query.control.buffer
+        state = buf.complete_state
+        if state is None or not state.completions:
+            return
+        N = len(state.completions)
+        index = state.complete_index
+        if index is None:
+            index = 0 if delta > 0 else N - 1
+        else:
+            index = (index + delta) % N
+        state.go_to_index(index)
+        buf.on_completions_changed.fire()
+
+    def _accept_or_copy(self) -> None:
+        """Accept the highlighted autocomplete suggestion, or copy the selected result."""
+        buf = self.query.control.buffer
+        state = buf.complete_state
+        if state is not None and state.completions:
+            completion = state.current_completion
+            if completion is None:
+                completion = state.completions[0]
+            self._accepting = True
+            replaced = buf.text[:len(buf.text) + completion.start_position]
+            buf.text = replaced + completion.text
+            buf.cursor_position = len(buf.text)
+            buf.complete_state = None
+            self._accepting = False
+        else:
+            self._copy_selected()
 
     def _copy_selected(self) -> None:
         if self._rows:

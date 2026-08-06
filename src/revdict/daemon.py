@@ -1,4 +1,5 @@
 # src/revdict/daemon.py
+import bisect
 import json
 import os
 import signal
@@ -16,6 +17,7 @@ from revdict.paths import (
     DAEMON_PID_PATH,
     DAEMON_SOCKET_PATH,
     DAEMON_START_LOCK_PATH,
+    INDEX_DIR,
 )
 from revdict.progress import ProgressReporter
 
@@ -249,6 +251,27 @@ def supports_progress(timeout: float = 1.0) -> bool | None:
     return isinstance(payload, dict) and PROGRESS_PROTOCOL in payload.get("protocols", [])
 
 
+def send_autocomplete(prefix: str, limit: int = 20, timeout: float = 1.0) -> list[str]:
+    if not DAEMON_SOCKET_PATH.exists():
+        return []
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+            sock.connect(str(DAEMON_SOCKET_PATH))
+            sock.sendall(json.dumps({"op": "autocomplete", "prefix": prefix, "limit": limit}).encode("utf-8"))
+            sock.shutdown(socket.SHUT_WR)
+            chunks = []
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            response = json.loads(b"".join(chunks).decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return []
+    return response.get("suggestions", [])
+
+
 def spawn_daemon(startup_timeout: float = 20.0) -> bool:
     """Launch the daemon in the background, returning True once its socket is live.
 
@@ -366,6 +389,12 @@ def run_server() -> None:
 
         configure_offline_quiet_env()
         from revdict import search as search_mod
+        from revdict import dictionary as dict_mod
+
+        _autocomplete_words = sorted(dict_mod.load_word_index(INDEX_DIR).keys())
+        _autocomplete_by_length: dict[int, list[str]] = {}
+        for word in _autocomplete_words:
+            _autocomplete_by_length.setdefault(len(word), []).append(word)
 
         DAEMON_SOCKET_PATH.parent.mkdir(parents=True, exist_ok=True)
         _remove_stale_files()
@@ -394,6 +423,38 @@ def run_server() -> None:
 
         print(f"revdict daemon listening on {DAEMON_SOCKET_PATH} (pid {os.getpid()})")
 
+        def _autocomplete_suggest(prefix: str, limit: int) -> list[str]:
+            from rapidfuzz import fuzz, process
+
+            if not prefix:
+                return []
+            start = bisect.bisect_left(_autocomplete_words, prefix)
+            matches: list[str] = []
+            for i in range(start, len(_autocomplete_words)):
+                word = _autocomplete_words[i]
+                if not word.startswith(prefix):
+                    break
+                if word != prefix:
+                    matches.append(word)
+                if len(matches) >= limit:
+                    return matches
+            if len(matches) < limit:
+                target_len = len(prefix)
+                candidates: list[str] = []
+                for delta in range(4):
+                    candidates.extend(_autocomplete_by_length.get(target_len - delta, []))
+                    if delta > 0:
+                        candidates.extend(_autocomplete_by_length.get(target_len + delta, []))
+                if candidates:
+                    fuzzy = process.extract(
+                        prefix, candidates, scorer=fuzz.ratio,
+                        limit=limit - len(matches), score_cutoff=70,
+                    )
+                    for word, _score, _idx in fuzzy:
+                        if word != prefix and word not in matches:
+                            matches.append(word)
+            return matches[:limit]
+
         try:
             while True:
                 conn, _ = server.accept()
@@ -411,6 +472,11 @@ def run_server() -> None:
                         request = json.loads(request_text)
                         if request.get("op") == "capabilities":
                             conn.sendall(json.dumps({"protocols": [PROGRESS_PROTOCOL]}).encode("utf-8"))
+                        elif request.get("op") == "autocomplete":
+                            prefix = request.get("prefix", "").lower()
+                            limit = request.get("limit", 20)
+                            suggestions = _autocomplete_suggest(prefix, limit)
+                            conn.sendall(json.dumps({"suggestions": suggestions}).encode("utf-8"))
                         elif request.get("protocol") == PROGRESS_PROTOCOL:
                             def emit(event: dict) -> None:
                                 conn.sendall((json.dumps(event) + "\n").encode("utf-8"))

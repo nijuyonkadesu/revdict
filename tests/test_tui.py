@@ -3,6 +3,8 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from prompt_toolkit.buffer import CompletionState
+from prompt_toolkit.completion import Completion
 from prompt_toolkit.application.current import create_app_session
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.input.defaults import create_pipe_input
@@ -569,6 +571,66 @@ def test_escape_clears_a_nonempty_query_before_it_can_quit():
             for binding in ui.application.key_bindings.get_bindings_for_keys((Keys.Escape,))
         )
         assert ui.application.ttimeoutlen <= 0.02
+    finally:
+        ui.close()
+
+
+def test_accept_completion_applies_first_when_none_highlighted():
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    try:
+        buf = ui.query.control.buffer
+        buf.text = "hppy"
+        buf.complete_state = CompletionState(
+            original_document=buf.document,
+            completions=[Completion("happy", -4), Completion("hippy", -4)],
+            complete_index=None,
+        )
+        ui._accept_or_copy()
+        assert buf.text == "happy"
+    finally:
+        ui.close()
+
+
+def test_accept_completion_applies_highlighted_item():
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    try:
+        buf = ui.query.control.buffer
+        buf.text = "hppy"
+        buf.complete_state = CompletionState(
+            original_document=buf.document,
+            completions=[Completion("happy", -4), Completion("hippy", -4)],
+            complete_index=1,
+        )
+        ui._accept_or_copy()
+        assert buf.text == "hippy"
+    finally:
+        ui.close()
+
+
+def test_accept_falls_back_to_copy_when_no_completions():
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    copied = {}
+    ui._copy_selected = lambda: copied.__setitem__("ran", True)
+    try:
+        ui._accept_or_copy()
+        assert copied.get("ran") is True
+    finally:
+        ui.close()
+
+
+def test_accept_falls_back_to_copy_when_empty_completions():
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    ui._rows = [{"headword": "test", "pos": "n", "definition": "a test", "stress": None, "synonyms": [], "examples": [], "label": "neutral", "polarity": "neutral", "relevance": 100}]
+    try:
+        buf = ui.query.control.buffer
+        buf.text = "hppy"
+        buf.complete_state = CompletionState(
+            original_document=buf.document,
+            completions=[],
+            complete_index=None,
+        )
+        ui._accept_or_copy()
+        assert buf.text == "hppy"
     finally:
         ui.close()
 
