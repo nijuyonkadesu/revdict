@@ -1,94 +1,113 @@
-# Process-Aware Daemon Startup Coordination
+# Lock-Authoritative Daemon Startup Coordination
 
 Date: 2026-08-10
 Status: approved for implementation
 
 ## Problem
 
-Automatic startup from a query and explicit startup through
-`revdict daemon start` currently take different paths. Automatic startup uses
-the startup lock, while explicit startup calls the unsynchronized spawn helper
-directly. Both paths also stop waiting after a fixed 20 seconds, even when the
-daemon process is still alive and legitimately loading the index and models.
-This can create redundant child processes and cause clients to fall back to a
-second, memory-intensive local model load while the daemon is still starting.
+Automatic startup and `revdict daemon start` used different launch paths. They
+also treated a missing socket or an elapsed 20-second deadline as proof that no
+daemon was running. During the daemon's multi-gigabyte model load, however, the
+socket does not exist yet. A second client could therefore launch another
+daemon or fall back to an equally expensive local load.
 
-## Design
+PID and socket sidecars are not safe ownership signals: either can be stale or
+deleted while its process remains alive. Startup coordination must instead be
+based on state whose ownership the operating system releases when the process
+exits.
 
-All external callers will use `ensure_daemon_running()`. The low-level detached
-spawn operation will remain an implementation detail and will return the child
-process handle instead of deciding readiness itself.
+## Authoritative state
 
-The daemon child will publish its PID immediately after it acquires the
-lifetime server lock and before it begins expensive imports. Socket creation
-will remain the readiness signal: a live PID without a reachable socket means
-"starting," while a reachable socket means "ready."
+`daemon.lock` is the daemon's lifetime lock and the sole authority for daemon
+ownership. The lock file remains on disk. While holding its advisory lock, the
+daemon writes one JSON record into it:
 
-`ensure_daemon_running()` will:
+```json
+{"pid":1234,"identity":"987654","phase":"starting"}
+```
 
-1. Return immediately when the daemon socket is reachable.
-2. If a published daemon PID is alive, wait for its socket while that process
-   remains alive.
-3. Otherwise acquire the startup lock, recheck the socket and PID state, and
-   spawn exactly one detached child when needed.
-4. Wait without an arbitrary startup deadline. Succeed when the socket becomes
-   reachable and fail only when the observed child or published daemon PID
-   exits before readiness.
-5. Release the startup lock after readiness or confirmed process failure so a
-   later caller may make a fresh attempt.
+`identity` is Linux's process start-time tick from `/proc/<pid>/stat`. Checking
+both PID and start identity prevents a stale record from identifying a reused
+PID. `phase` is `starting` until initialization finishes and `ready` only after
+the Unix socket is bound and listening.
 
-A caller waiting on another launcher will periodically retry acquisition and
-re-evaluate socket/PID state. If the original launcher exits unexpectedly but
-its daemon child remains alive, the early PID allows subsequent callers to
-adopt and wait for that same startup rather than spawning another child.
+The PID file remains a compatibility sidecar. Neither it nor the socket path
+decides whether a daemon process exists.
 
-The detached child remains independent of the invoking terminal. Interrupting
-a waiting CLI process will not terminate the daemon child.
+## One startup coordinator
 
-## CLI Behavior
+Every external launch route calls `ensure_daemon_running()`, including query
+startup, native-UI startup, and `revdict daemon start`. Only the daemon child
+entered with `REVDICT_DAEMON_CHILD=1` calls `run_server()` directly.
 
-`revdict daemon start` and query-triggered startup will both call
-`ensure_daemon_running()`. Explicit startup will print `Daemon started.` after
-the socket becomes reachable. If the daemon exits before readiness, it will
-print a failure message that points to the daemon log.
+The coordinator:
 
-`daemon_status()` will distinguish three states:
+1. returns immediately for a reachable socket;
+2. takes `daemon.start.lock` with a blocking advisory lock so concurrent
+   callers serialize without each running their own timeout loop;
+3. rechecks readiness;
+4. if `daemon.lock` is held, adopts that owner and waits while its `starting`
+   record remains current;
+5. if `daemon.lock` is free, holds it and waits for any validated prior record
+   to finish process teardown, then clears the record and stale socket/PID
+   sidecars before spawning exactly one detached child;
+6. waits until the socket becomes reachable or the spawned process actually
+   exits.
 
-- ready: PID alive and socket reachable;
-- starting: PID alive but socket not yet reachable;
-- stopped: no live published PID and no reachable socket.
+The detached child inherits the launcher's locked startup-file descriptor.
+After acquiring `daemon.lock` and publishing `starting`, the child closes that
+descriptor. This hands ownership directly from startup lock to lifetime lock:
+even if the launcher is interrupted or killed immediately after spawning,
+another caller cannot enter the gap and create a second child.
 
-## Failure and Cleanup
+Waiting on the previous record after its lock is released matters because
+Python can spend seconds unloading the model after `run_server()` returns. It
+prevents any caller—not only `daemon stop`—from overlapping that teardown with
+a new multi-gigabyte load.
 
-The daemon will install its termination handlers before expensive loading so
-`revdict daemon stop` can stop a starting daemon cleanly. A child that fails
-during startup will remove its PID and socket files in `run_server()` cleanup.
-Unexpected hard termination may leave stale files; launchers will treat a PID
-whose process is no longer alive as stale and clean it before a new launch.
+There is no elapsed-time startup failure. A slow but live daemon remains the
+one startup in progress. A `ready` lock owner whose socket is unreachable is
+unhealthy: callers do not kill it, delete its files, or start a competing
+process.
 
-There is deliberately no automatic retry loop after a confirmed child failure:
-deterministic model or index errors should be surfaced instead of spawning
-forever. A later invocation may attempt startup again.
+If a waiting coordinator dies, its startup lock is released by the kernel.
+The detached daemon retains its lifetime lock; the next caller adopts that
+same process.
 
-## Tests
+## Daemon lifecycle
 
-Tests will prove that:
+`run_server()` acquires `daemon.lock` before expensive imports, immediately
+publishes the `starting` record, and installs termination handlers. After
+loading the index, binding the socket, and calling `listen()`, it updates the
+same locked record to `ready`.
 
-- explicit and automatic startup use the same synchronized path;
-- concurrent callers spawn only one child;
-- a startup lasting longer than the former 20-second deadline continues
-  waiting while the daemon PID is alive;
-- readiness is reported only after the socket accepts connections;
-- child exit before socket readiness returns failure;
-- status reports `starting` for a live PID without a socket;
-- termination during startup cleans up published state;
-- detached process configuration remains unchanged.
+On exit, only the lock-owning server removes the socket and PID sidecars it
+created. The lifetime lock is released automatically on any process exit, even
+when ordinary cleanup cannot run. The lock file itself is never deleted.
 
-Tests will use temporary PID/socket/lock paths and lightweight stand-in
-processes or in-process socket servers; they will not load the real models.
+## Status and stop
 
-## Scope
+Status derives from the lifetime lock and its validated record:
 
-This change does not alter query handling, daemon request concurrency, daemon
-idle lifetime, search fallback after a confirmed startup failure, or the Unix
-socket protocol.
+- free lifetime lock: not running;
+- held lock with `starting`: starting;
+- held lock with `ready` and a reachable socket: running;
+- held lock with `ready` and no reachable socket: unhealthy.
+
+`daemon stop` signals only the PID whose start identity matches the record in
+the currently held lifetime lock. It then waits for that exact process
+identity to exit, even if the process releases its lock earlier during Python
+teardown, so a restart cannot overlap two multi-gigabyte processes. It never
+signals a PID taken only from a sidecar.
+
+## Test isolation
+
+Every pytest test replaces all five daemon runtime paths—socket, PID, lifetime
+lock, startup lock, and log—with paths under that test's temporary directory.
+This prevents a failing test from deleting or probing a user's live daemon
+state.
+
+Regression tests cover concurrent single-spawn behavior, adoption of a slow
+live startup without a deadline, concrete child failure, stale record races,
+unhealthy owners, cleanup lock ownership, shared CLI routing, and runtime-path
+isolation.

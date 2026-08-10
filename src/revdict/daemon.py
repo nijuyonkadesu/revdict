@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 import fcntl
 
@@ -23,6 +24,13 @@ from revdict.progress import ProgressReporter
 
 
 PROGRESS_PROTOCOL = "progress-v1"
+
+
+@dataclass(frozen=True)
+class DaemonRecord:
+    pid: int
+    identity: str
+    phase: str
 
 
 def _query_payload(
@@ -71,14 +79,68 @@ def _read_pid() -> int | None:
         return None
 
 
-def _process_is_alive(pid: int) -> bool:
+def _process_start_identity(pid: int) -> str | None:
+    """Return Linux's per-process start tick, which survives PID reuse checks."""
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    closing_paren = stat.rfind(")")
+    if closing_paren < 0:
+        return None
+    fields_after_name = stat[closing_paren + 1 :].split()
+    try:
+        if fields_after_name[0] == "Z":
+            return None
+        return fields_after_name[19]
+    except IndexError:
+        return None
+
+
+def _write_daemon_record(descriptor: int, phase: str) -> None:
+    if phase not in {"starting", "ready"}:
+        raise ValueError(f"invalid daemon phase: {phase}")
+    identity = _process_start_identity(os.getpid())
+    if identity is None:
+        raise RuntimeError("cannot determine daemon process identity")
+    payload = json.dumps(
+        {"pid": os.getpid(), "identity": identity, "phase": phase},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    os.ftruncate(descriptor, 0)
+    offset = 0
+    while offset < len(payload):
+        offset += os.write(descriptor, payload[offset:])
+    os.fsync(descriptor)
+
+
+def _clear_daemon_record(descriptor: int) -> None:
+    os.ftruncate(descriptor, 0)
+    os.fsync(descriptor)
+
+
+def _read_daemon_record() -> DaemonRecord | None:
+    try:
+        payload = json.loads(DAEMON_LOCK_PATH.read_text())
+        pid = payload["pid"]
+        identity = payload["identity"]
+        phase = payload["phase"]
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError):
+        return None
+    if (
+        not isinstance(pid, int)
+        or isinstance(pid, bool)
+        or not isinstance(identity, str)
+        or phase not in {"starting", "ready"}
+    ):
+        return None
+    return DaemonRecord(pid=pid, identity=identity, phase=phase)
+
+
+def _record_identifies_live_process(record: DaemonRecord) -> bool:
+    identity = _process_start_identity(record.pid)
+    return identity is not None and identity == record.identity
 
 
 def _remove_stale_files() -> None:
@@ -89,12 +151,15 @@ def _remove_stale_files() -> None:
             pass
 
 
-def _acquire_lock(path) -> int | None:
-    """Take a nonblocking, process-lifetime advisory lock at *path*."""
+def _acquire_lock(path, *, blocking: bool = False) -> int | None:
+    """Take a process-lifetime advisory lock at *path*."""
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        operation = fcntl.LOCK_EX
+        if not blocking:
+            operation |= fcntl.LOCK_NB
+        fcntl.flock(descriptor, operation)
     except BlockingIOError:
         os.close(descriptor)
         return None
@@ -118,12 +183,11 @@ def _acquire_server_lock() -> int | None:
     return _acquire_lock(DAEMON_LOCK_PATH)
 
 
-def _wait_for_socket(startup_timeout: float) -> bool:
-    deadline = time.time() + startup_timeout
-    while time.time() < deadline:
-        if _socket_is_reachable():
-            return True
-        time.sleep(0.1)
+def _server_lock_is_held() -> bool:
+    descriptor = _acquire_server_lock()
+    if descriptor is None:
+        return True
+    _release_lock(descriptor)
     return False
 
 
@@ -272,67 +336,155 @@ def send_autocomplete(prefix: str, limit: int = 20, timeout: float = 1.0) -> lis
     return response.get("suggestions", [])
 
 
-def spawn_daemon(startup_timeout: float = 20.0) -> bool:
-    """Launch the daemon in the background, returning True once its socket is live.
-
-    If the daemon is already running this is a no-op.  Callers that need
-    mutual exclusion (so multiple clients don't race to spawn) should
-    serialize through ``ensure_daemon_running()`` instead.
-    """
-    if _socket_is_reachable():
-        return True
-    _remove_stale_files()
-
+def _spawn_daemon(start_lock_descriptor: int) -> subprocess.Popen:
+    """Start a detached child that inherits the launcher's startup claim."""
     DAEMON_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(DAEMON_LOG_PATH, "a") as log_file:
-        subprocess.Popen(
+        return subprocess.Popen(
             [sys.executable, "-u", "-m", "revdict.cli", "daemon", "start"],
             stdout=log_file,
             stderr=log_file,
             stdin=subprocess.DEVNULL,
             start_new_session=True,
-            env={**os.environ, "REVDICT_DAEMON_CHILD": "1"},
+            env={
+                **os.environ,
+                "REVDICT_DAEMON_CHILD": "1",
+                "REVDICT_START_LOCK_FD": str(start_lock_descriptor),
+            },
+            pass_fds=(start_lock_descriptor,),
         )
-    return _wait_for_socket(startup_timeout)
 
 
-def ensure_daemon_running(startup_timeout: float = 20.0) -> bool:
+def _wait_for_existing_daemon() -> bool:
+    """Wait while the actual lock owner is starting, without a time deadline."""
+    while True:
+        if _socket_is_reachable():
+            return True
+        if not _server_lock_is_held():
+            return False
+        record = _read_daemon_record()
+        if (
+            record is not None
+            and record.phase == "ready"
+            and _record_identifies_live_process(record)
+        ):
+            # A ready owner with no reachable socket is unhealthy. It still
+            # owns the daemon lock, so spawning another copy would be unsafe.
+            return False
+        time.sleep(0.1)
+
+
+def _wait_for_spawned_daemon(process: subprocess.Popen) -> bool:
+    """Wait for readiness or a concrete child failure, never elapsed time."""
+    while True:
+        if _socket_is_reachable():
+            return True
+        if process.poll() is not None:
+            if _socket_is_reachable():
+                return True
+            if _server_lock_is_held():
+                return _wait_for_existing_daemon()
+            return False
+        if _server_lock_is_held():
+            record = _read_daemon_record()
+            if (
+                record is not None
+                and record.phase == "ready"
+                and _record_identifies_live_process(record)
+            ):
+                return False
+        time.sleep(0.1)
+
+
+def ensure_daemon_running() -> bool:
+    """Use the one serialized path to find, adopt, or launch the daemon."""
     if _socket_is_reachable():
         return True
-    start_lock = _acquire_lock(DAEMON_START_LOCK_PATH)
-    if start_lock is None:
-        return _wait_for_socket(startup_timeout)
+
+    start_lock = _acquire_lock(DAEMON_START_LOCK_PATH, blocking=True)
+    assert start_lock is not None
+    start_lock_was_inherited = False
     try:
-        return spawn_daemon(startup_timeout)
+        if _socket_is_reachable():
+            return True
+        cleanup_lock = _acquire_server_lock()
+        if cleanup_lock is None:
+            return _wait_for_existing_daemon()
+
+        # Both conditions are required for cleanup: this coordinator owns the
+        # startup lock, and no daemon owns the lifetime lock.
+        try:
+            prior_record = _read_daemon_record()
+            while (
+                prior_record is not None
+                and _record_identifies_live_process(prior_record)
+            ):
+                time.sleep(0.1)
+            _clear_daemon_record(cleanup_lock)
+            _remove_stale_files()
+        finally:
+            _release_lock(cleanup_lock)
+        start_lock_was_inherited = True
+        try:
+            process = _spawn_daemon(start_lock)
+        except OSError:
+            return False
+        return _wait_for_spawned_daemon(process)
     finally:
-        _release_lock(start_lock)
+        if start_lock_was_inherited:
+            # Do not issue LOCK_UN on the shared open-file description. If this
+            # coordinator is interrupted, the child keeps the startup claim
+            # until it has acquired and published the lifetime lock.
+            os.close(start_lock)
+        else:
+            _release_lock(start_lock)
+
+
+def spawn_daemon() -> bool:
+    """Compatibility wrapper; all launches go through the coordinator."""
+    return ensure_daemon_running()
 
 
 def stop_daemon() -> bool:
-    pid = _read_pid()
-    if pid is None or not _process_is_alive(pid):
-        _remove_stale_files()
+    if not _server_lock_is_held():
         return False
-    os.kill(pid, signal.SIGTERM)
-    deadline = time.time() + 5.0
-    while time.time() < deadline and _process_is_alive(pid):
+    record = _read_daemon_record()
+    if record is None or not _record_identifies_live_process(record):
+        return False
+    try:
+        os.kill(record.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        return False
+    while _record_identifies_live_process(record):
         time.sleep(0.1)
-    _remove_stale_files()
     return True
 
 
 def is_daemon_running() -> bool:
-    pid = _read_pid()
-    return pid is not None and _process_is_alive(pid) and DAEMON_SOCKET_PATH.exists()
+    if not _server_lock_is_held():
+        return False
+    record = _read_daemon_record()
+    return record is not None and _record_identifies_live_process(record)
 
 
 def daemon_status() -> str:
-    if is_daemon_running():
-        pid = _read_pid()
-        mem = _read_memory(pid)
-        mem_str = f", {mem:.2f} GB" if mem is not None else ""
-        return f"revdict daemon is running (pid {pid}{mem_str})."
-    return "revdict daemon is not running."
+    if not _server_lock_is_held():
+        return "revdict daemon is not running."
+
+    record = _read_daemon_record()
+    if record is None or not _record_identifies_live_process(record):
+        return "revdict daemon is starting (lock owner details pending)."
+
+    mem = _read_memory(record.pid)
+    mem_str = f", {mem:.2f} GB" if mem is not None else ""
+    if record.phase == "starting":
+        return f"revdict daemon is starting (pid {record.pid}{mem_str})."
+    if _socket_is_reachable():
+        return f"revdict daemon is running (pid {record.pid}{mem_str})."
+    return (
+        f"revdict daemon is unhealthy (pid {record.pid}{mem_str}): "
+        "the process owns the daemon lock but its socket is unreachable."
+    )
 
 
 def _read_memory(pid: int) -> float | None:
@@ -379,10 +531,38 @@ def run_server() -> None:
     # The lock is deliberately taken *before* importing the search module:
     # that import can load a multi-gigabyte index while no socket exists yet.
     # A socket-only race guard lets every concurrent launcher pay that cost.
+    inherited_start_lock = None
+    inherited_value = os.environ.get("REVDICT_START_LOCK_FD")
+    if inherited_value is not None:
+        try:
+            inherited_start_lock = int(inherited_value)
+        except ValueError:
+            pass
+
     lock_descriptor = _acquire_server_lock()
     if lock_descriptor is None:
+        if inherited_start_lock is not None:
+            os.close(inherited_start_lock)
         return
+    server = None
+    owns_socket = False
     try:
+        try:
+            _write_daemon_record(lock_descriptor, "starting")
+        finally:
+            if inherited_start_lock is not None:
+                # The lifetime lock is now the authoritative claim. Closing,
+                # rather than unlocking, preserves a still-live parent copy.
+                os.close(inherited_start_lock)
+
+        def _exit_on_signal(signum, frame):
+            if server is not None:
+                server.close()
+            raise SystemExit(0)
+
+        signal.signal(signal.SIGTERM, _exit_on_signal)
+        signal.signal(signal.SIGINT, _exit_on_signal)
+
         if _socket_is_reachable():
             return
         from revdict.query_env import configure_offline_quiet_env
@@ -397,7 +577,6 @@ def run_server() -> None:
             _autocomplete_by_length.setdefault(len(word), []).append(word)
 
         DAEMON_SOCKET_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _remove_stale_files()
 
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
@@ -410,16 +589,10 @@ def run_server() -> None:
                 return
             raise
 
+        owns_socket = True
         server.listen(5)
         DAEMON_PID_PATH.write_text(str(os.getpid()))
-
-        def _cleanup_and_exit(signum, frame):
-            server.close()
-            _remove_stale_files()
-            sys.exit(0)
-
-        signal.signal(signal.SIGTERM, _cleanup_and_exit)
-        signal.signal(signal.SIGINT, _cleanup_and_exit)
+        _write_daemon_record(lock_descriptor, "ready")
 
         print(f"revdict daemon listening on {DAEMON_SOCKET_PATH} (pid {os.getpid()})")
 
@@ -455,39 +628,48 @@ def run_server() -> None:
                             matches.append(word)
             return matches[:limit]
 
-        try:
-            while True:
-                conn, _ = server.accept()
-                try:
-                    with conn:
-                        chunks = []
-                        while True:
-                            chunk = conn.recv(65536)
-                            if not chunk:
-                                break
-                            chunks.append(chunk)
-                        request_text = b"".join(chunks).decode("utf-8")
-                        if not request_text.strip():
-                            continue
-                        request = json.loads(request_text)
-                        if request.get("op") == "capabilities":
-                            conn.sendall(json.dumps({"protocols": [PROGRESS_PROTOCOL]}).encode("utf-8"))
-                        elif request.get("op") == "autocomplete":
-                            prefix = request.get("prefix", "").lower()
-                            limit = request.get("limit", 20)
-                            suggestions = _autocomplete_suggest(prefix, limit)
-                            conn.sendall(json.dumps({"suggestions": suggestions}).encode("utf-8"))
-                        elif request.get("protocol") == PROGRESS_PROTOCOL:
-                            def emit(event: dict) -> None:
-                                conn.sendall((json.dumps(event) + "\n").encode("utf-8"))
+        while True:
+            conn, _ = server.accept()
+            try:
+                with conn:
+                    chunks = []
+                    while True:
+                        chunk = conn.recv(65536)
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                    request_text = b"".join(chunks).decode("utf-8")
+                    if not request_text.strip():
+                        continue
+                    request = json.loads(request_text)
+                    if request.get("op") == "capabilities":
+                        conn.sendall(json.dumps({"protocols": [PROGRESS_PROTOCOL]}).encode("utf-8"))
+                    elif request.get("op") == "autocomplete":
+                        prefix = request.get("prefix", "").lower()
+                        limit = request.get("limit", 20)
+                        suggestions = _autocomplete_suggest(prefix, limit)
+                        conn.sendall(json.dumps({"suggestions": suggestions}).encode("utf-8"))
+                    elif request.get("protocol") == PROGRESS_PROTOCOL:
+                        def emit(event: dict) -> None:
+                            conn.sendall((json.dumps(event) + "\n").encode("utf-8"))
 
-                            _handle_progress_request(request_text, search_mod.search, emit)
-                        else:
-                            response_text = _handle_request(request_text, search_mod.search)
-                            conn.sendall(response_text.encode("utf-8"))
-                except Exception as error:
-                    print(f"revdict daemon: error handling a request: {error}")
-        finally:
-            _remove_stale_files()
+                        _handle_progress_request(request_text, search_mod.search, emit)
+                    else:
+                        response_text = _handle_request(request_text, search_mod.search)
+                        conn.sendall(response_text.encode("utf-8"))
+            except Exception as error:
+                print(f"revdict daemon: error handling a request: {error}")
     finally:
+        if server is not None:
+            server.close()
+        if owns_socket:
+            try:
+                DAEMON_SOCKET_PATH.unlink()
+            except FileNotFoundError:
+                pass
+        try:
+            if _read_pid() == os.getpid():
+                DAEMON_PID_PATH.unlink()
+        except FileNotFoundError:
+            pass
         _release_lock(lock_descriptor)

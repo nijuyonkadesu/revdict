@@ -1,10 +1,13 @@
 # tests/test_daemon.py
 import json
 import os
+import signal
 import socket
 import subprocess
 import threading
 import time
+
+import pytest
 
 from revdict import daemon
 
@@ -224,206 +227,501 @@ def test_socket_is_reachable_returns_true_for_a_real_listening_socket(tmp_path, 
         server.close()
 
 
-def test_run_server_bails_immediately_when_a_live_daemon_already_owns_the_socket(
-    tmp_path, monkeypatch
-):
-    """The core regression test for the bind-race bug: run_server() must not
-    attempt to steal/rebind the socket (which would orphan the live owner)
-    when one is already reachable -- it should return immediately, before
-    ever importing revdict.search or touching the PID/socket files."""
-    socket_path = tmp_path / "daemon.sock"
-    pid_path = tmp_path / "daemon.pid"
-    monkeypatch.setattr(daemon, "DAEMON_SOCKET_PATH", socket_path)
-    monkeypatch.setattr(daemon, "DAEMON_PID_PATH", pid_path)
-    pid_path.write_text("999999")  # a real "owner" PID, should be left untouched
+def _hold_daemon_lock(phase="starting"):
+    descriptor = daemon._acquire_server_lock()
+    assert descriptor is not None
+    daemon._write_daemon_record(descriptor, phase)
+    return descriptor
 
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(str(socket_path))
-    server.listen(1)
 
+def test_daemon_record_round_trips_pid_identity_and_phase():
+    descriptor = _hold_daemon_lock("starting")
     try:
-        daemon.run_server()  # must return quickly, not hang or raise
-        # The "losing" run_server() must not have touched the live owner's files.
-        assert pid_path.read_text() == "999999"
-        assert socket_path.exists()
+        record = daemon._read_daemon_record()
+        assert record.pid == os.getpid()
+        assert record.identity == daemon._process_start_identity(os.getpid())
+        assert record.phase == "starting"
     finally:
-        server.close()
+        daemon._release_lock(descriptor)
 
 
-def test_run_server_bails_before_loading_when_another_process_holds_the_start_lock(
-    tmp_path, monkeypatch
+def test_status_uses_held_lifetime_lock_to_report_starting(monkeypatch):
+    descriptor = _hold_daemon_lock("starting")
+    monkeypatch.setattr(daemon, "_socket_is_reachable", lambda: False)
+    try:
+        status = daemon.daemon_status()
+        assert "starting" in status
+        assert str(os.getpid()) in status
+        assert "not running" not in status
+    finally:
+        daemon._release_lock(descriptor)
+
+
+def test_status_tolerates_corrupt_lock_record(monkeypatch):
+    descriptor = daemon._acquire_server_lock()
+    assert descriptor is not None
+    os.write(descriptor, b"\xff")
+    monkeypatch.setattr(daemon, "_socket_is_reachable", lambda: False)
+    try:
+        assert "starting" in daemon.daemon_status()
+    finally:
+        daemon._release_lock(descriptor)
+
+
+def test_status_reports_ready_owner_without_socket_as_unhealthy(monkeypatch):
+    descriptor = _hold_daemon_lock("ready")
+    monkeypatch.setattr(daemon, "_socket_is_reachable", lambda: False)
+    try:
+        status = daemon.daemon_status()
+        assert "unhealthy" in status
+        assert str(os.getpid()) in status
+        assert "not running" not in status
+    finally:
+        daemon._release_lock(descriptor)
+
+
+def test_status_reports_ready_lock_owner_with_reachable_socket_as_running(monkeypatch):
+    descriptor = _hold_daemon_lock("ready")
+    monkeypatch.setattr(daemon, "_socket_is_reachable", lambda: True)
+    try:
+        status = daemon.daemon_status()
+        assert "running" in status
+        assert "not running" not in status
+    finally:
+        daemon._release_lock(descriptor)
+
+
+def test_status_ignores_stale_record_when_lifetime_lock_is_free():
+    descriptor = _hold_daemon_lock("ready")
+    daemon._release_lock(descriptor)
+
+    assert "not running" in daemon.daemon_status()
+    assert daemon.is_daemon_running() is False
+
+
+def test_is_daemon_running_recognizes_a_live_starting_owner():
+    descriptor = _hold_daemon_lock("starting")
+    try:
+        assert daemon.is_daemon_running() is True
+    finally:
+        daemon._release_lock(descriptor)
+
+
+def test_run_server_bails_before_loading_when_another_process_holds_lifetime_lock(
+    monkeypatch,
 ):
-    """A socket is unavailable while an owner loads the index, so lock first."""
-    monkeypatch.setattr(daemon, "DAEMON_SOCKET_PATH", tmp_path / "daemon.sock")
-    monkeypatch.setattr(daemon, "DAEMON_PID_PATH", tmp_path / "daemon.pid")
-    monkeypatch.setattr(daemon, "DAEMON_LOCK_PATH", tmp_path / "daemon.lock")
     monkeypatch.setattr(daemon, "_acquire_server_lock", lambda: None)
 
     daemon.run_server()
 
-    assert not (tmp_path / "daemon.sock").exists()
-    assert not (tmp_path / "daemon.pid").exists()
+    assert not daemon.DAEMON_SOCKET_PATH.exists()
+    assert not daemon.DAEMON_PID_PATH.exists()
 
 
-def test_is_daemon_running_true_only_with_live_pid_and_existing_socket(tmp_path, monkeypatch):
-    pid_path = tmp_path / "daemon.pid"
-    socket_path = tmp_path / "daemon.sock"
-    monkeypatch.setattr(daemon, "DAEMON_PID_PATH", pid_path)
-    monkeypatch.setattr(daemon, "DAEMON_SOCKET_PATH", socket_path)
+def test_run_server_publishes_starting_before_expensive_initialization(monkeypatch):
+    from revdict import query_env
 
-    assert daemon.is_daemon_running() is False  # no pid file at all
+    observed = {}
+    monkeypatch.setattr(daemon, "_socket_is_reachable", lambda: False)
+    monkeypatch.setattr(daemon.signal, "signal", lambda *_args: None)
 
-    pid_path.write_text(str(os.getpid()))
-    assert daemon.is_daemon_running() is False  # pid alive but no socket file
+    def fail_during_initialization():
+        record = daemon._read_daemon_record()
+        observed["record"] = record
+        observed["lock_held"] = daemon._server_lock_is_held()
+        raise RuntimeError("startup failed")
 
-    socket_path.write_text("")
-    assert daemon.is_daemon_running() is True  # both present
+    monkeypatch.setattr(
+        query_env, "configure_offline_quiet_env", fail_during_initialization
+    )
+
+    with pytest.raises(RuntimeError, match="startup failed"):
+        daemon.run_server()
+
+    assert observed["record"].pid == os.getpid()
+    assert observed["record"].phase == "starting"
+    assert observed["lock_held"] is True
+    assert daemon._server_lock_is_held() is False
+    assert not daemon.DAEMON_PID_PATH.exists()
 
 
-def test_ensure_daemon_running_returns_true_immediately_when_already_up(
-    tmp_path, monkeypatch
+def test_run_server_releases_inherited_start_lock_only_after_lifetime_claim(
+    monkeypatch,
 ):
-    socket_path = tmp_path / "daemon.sock"
-    pid_path = tmp_path / "daemon.pid"
-    monkeypatch.setattr(daemon, "DAEMON_SOCKET_PATH", socket_path)
-    monkeypatch.setattr(daemon, "DAEMON_PID_PATH", pid_path)
-    pid_path.write_text(str(os.getpid()))  # this test process is guaranteed alive
+    from revdict import query_env
 
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(str(socket_path))
-    server.listen(1)
+    inherited = daemon._acquire_lock(daemon.DAEMON_START_LOCK_PATH)
+    assert inherited is not None
+    monkeypatch.setenv("REVDICT_START_LOCK_FD", str(inherited))
+    monkeypatch.setattr(daemon, "_socket_is_reachable", lambda: False)
+    monkeypatch.setattr(daemon.signal, "signal", lambda *_args: None)
 
-    def fail_if_called(*args, **kwargs):
-        raise AssertionError("subprocess.Popen should not be called when already running")
+    def fail_after_handoff():
+        assert daemon._server_lock_is_held() is True
+        with pytest.raises(OSError):
+            os.fstat(inherited)
+        raise RuntimeError("stop after handoff")
 
-    monkeypatch.setattr(subprocess, "Popen", fail_if_called)
+    monkeypatch.setattr(query_env, "configure_offline_quiet_env", fail_after_handoff)
 
-    try:
-        assert daemon.ensure_daemon_running(startup_timeout=1.0) is True
-    finally:
-        server.close()
+    with pytest.raises(RuntimeError, match="stop after handoff"):
+        daemon.run_server()
 
 
-def test_ensure_daemon_running_waits_for_an_in_progress_start_without_spawning(
-    tmp_path, monkeypatch
-):
-    socket_path = tmp_path / "daemon.sock"
-    monkeypatch.setattr(daemon, "DAEMON_SOCKET_PATH", socket_path)
-    monkeypatch.setattr(daemon, "DAEMON_PID_PATH", tmp_path / "daemon.pid")
-    monkeypatch.setattr(daemon, "DAEMON_LOG_PATH", tmp_path / "daemon.log")
-    monkeypatch.setattr(daemon, "DAEMON_START_LOCK_PATH", tmp_path / "daemon.start.lock")
+def test_spawned_daemon_is_detached_and_uses_child_entrypoint(monkeypatch):
+    captured = {}
+
+    def fake_popen(command, **kwargs):
+        captured["command"] = command
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(daemon.subprocess, "Popen", fake_popen)
+
     start_lock = daemon._acquire_lock(daemon.DAEMON_START_LOCK_PATH)
     assert start_lock is not None
-
-    ready_event = threading.Event()
-
-    def start_socket_after_a_short_delay():
-        time.sleep(0.1)
-        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        server.bind(str(socket_path))
-        server.listen(1)
-        ready_event.set()
-        connection, _ = server.accept()
-        connection.close()
-        server.close()
-
-    thread = threading.Thread(target=start_socket_after_a_short_delay, daemon=True)
-    thread.start()
-    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not spawn")))
-
     try:
-        assert daemon.ensure_daemon_running(startup_timeout=1.0) is True
-        assert ready_event.is_set()
+        daemon._spawn_daemon(start_lock)
     finally:
         daemon._release_lock(start_lock)
 
-
-def test_ensure_daemon_running_spawns_and_waits_for_a_fresh_daemon(tmp_path, monkeypatch):
-    socket_path = tmp_path / "daemon.sock"
-    pid_path = tmp_path / "daemon.pid"
-    log_path = tmp_path / "daemon.log"
-    monkeypatch.setattr(daemon, "DAEMON_SOCKET_PATH", socket_path)
-    monkeypatch.setattr(daemon, "DAEMON_PID_PATH", pid_path)
-    monkeypatch.setattr(daemon, "DAEMON_LOG_PATH", log_path)
-
-    def fake_popen(*args, **kwargs):
-        def _start_late_server():
-            time.sleep(0.2)
-            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            server.bind(str(socket_path))
-            server.listen(1)
-            server.accept()  # keep it alive long enough for the probe connect
-
-        threading.Thread(target=_start_late_server, daemon=True).start()
-
-        class _FakeProcess:
-            pass
-
-        return _FakeProcess()
-
-    monkeypatch.setattr(subprocess, "Popen", fake_popen)
-
-    assert daemon.ensure_daemon_running(startup_timeout=3.0) is True
+    assert captured["command"] == [
+        daemon.sys.executable,
+        "-u",
+        "-m",
+        "revdict.cli",
+        "daemon",
+        "start",
+    ]
+    assert captured["stdin"] is daemon.subprocess.DEVNULL
+    assert captured["start_new_session"] is True
+    assert captured["env"]["REVDICT_DAEMON_CHILD"] == "1"
+    assert captured["env"]["REVDICT_START_LOCK_FD"] == str(start_lock)
+    assert captured["pass_fds"] == (start_lock,)
 
 
-def test_ensure_daemon_running_returns_false_if_daemon_never_becomes_ready(
-    tmp_path, monkeypatch
+def test_ensure_daemon_running_returns_immediately_for_reachable_socket(monkeypatch):
+    monkeypatch.setattr(daemon, "_socket_is_reachable", lambda: True)
+    monkeypatch.setattr(
+        daemon,
+        "_spawn_daemon",
+        lambda _start_lock: (_ for _ in ()).throw(AssertionError("must not spawn")),
+    )
+
+    assert daemon.ensure_daemon_running() is True
+
+
+def test_ensure_daemon_running_waits_for_live_starting_owner_without_timeout(
+    monkeypatch,
 ):
-    monkeypatch.setattr(daemon, "DAEMON_SOCKET_PATH", tmp_path / "daemon.sock")
-    monkeypatch.setattr(daemon, "DAEMON_PID_PATH", tmp_path / "daemon.pid")
-    monkeypatch.setattr(daemon, "DAEMON_LOG_PATH", tmp_path / "daemon.log")
-    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: object())
+    descriptor = _hold_daemon_lock("starting")
+    ready = threading.Event()
+    monkeypatch.setattr(daemon, "_socket_is_reachable", ready.is_set)
+    monkeypatch.setattr(
+        daemon,
+        "_spawn_daemon",
+        lambda _start_lock: (_ for _ in ()).throw(AssertionError("must not spawn")),
+    )
+    monkeypatch.setattr(
+        daemon.time,
+        "time",
+        lambda: (_ for _ in ()).throw(AssertionError("startup must not use a deadline")),
+    )
 
-    assert daemon.ensure_daemon_running(startup_timeout=0.5) is False
+    def finish_starting():
+        time.sleep(0.15)
+        daemon._write_daemon_record(descriptor, "ready")
+        ready.set()
+
+    thread = threading.Thread(target=finish_starting)
+    thread.start()
+    try:
+        assert daemon.ensure_daemon_running() is True
+    finally:
+        thread.join(timeout=2)
+        daemon._release_lock(descriptor)
 
 
-def test_stop_daemon_returns_false_when_nothing_is_running(tmp_path, monkeypatch):
-    monkeypatch.setattr(daemon, "DAEMON_PID_PATH", tmp_path / "daemon.pid")
-    monkeypatch.setattr(daemon, "DAEMON_SOCKET_PATH", tmp_path / "daemon.sock")
+def test_new_lock_owner_is_not_mistaken_for_stale_ready_record(monkeypatch):
+    descriptor = daemon._acquire_server_lock()
+    assert descriptor is not None
+    os.write(
+        descriptor,
+        json.dumps({"pid": 999999, "identity": "old", "phase": "ready"}).encode(),
+    )
+    ready = threading.Event()
+    monkeypatch.setattr(daemon, "_socket_is_reachable", ready.is_set)
+    monkeypatch.setattr(
+        daemon,
+        "_spawn_daemon",
+        lambda _start_lock: (_ for _ in ()).throw(AssertionError("must not spawn")),
+    )
 
+    def publish_new_owner():
+        time.sleep(0.15)
+        daemon._write_daemon_record(descriptor, "ready")
+        ready.set()
+
+    thread = threading.Thread(target=publish_new_owner)
+    thread.start()
+    try:
+        assert daemon.ensure_daemon_running() is True
+    finally:
+        thread.join(timeout=2)
+        daemon._release_lock(descriptor)
+
+
+def test_ensure_daemon_running_reports_failure_when_spawned_child_exits(monkeypatch):
+    monkeypatch.setattr(daemon, "_socket_is_reachable", lambda: False)
+
+    class FailedProcess:
+        def poll(self):
+            return 1
+
+    monkeypatch.setattr(daemon, "_spawn_daemon", lambda _start_lock: FailedProcess())
+
+    assert daemon.ensure_daemon_running() is False
+
+
+def test_interrupted_spawn_does_not_unlock_child_startup_claim(monkeypatch):
+    inherited_copy = {"descriptor": None}
+
+    def interrupt_after_inheriting(start_lock):
+        inherited_copy["descriptor"] = os.dup(start_lock)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(daemon, "_socket_is_reachable", lambda: False)
+    monkeypatch.setattr(daemon, "_spawn_daemon", interrupt_after_inheriting)
+
+    with pytest.raises(KeyboardInterrupt):
+        daemon.ensure_daemon_running()
+
+    contender = daemon._acquire_lock(daemon.DAEMON_START_LOCK_PATH)
+    try:
+        assert contender is None
+    finally:
+        if contender is not None:
+            daemon._release_lock(contender)
+        os.close(inherited_copy["descriptor"])
+
+
+def test_losing_spawn_adopts_the_actual_lifetime_lock_owner(monkeypatch):
+    ready = threading.Event()
+    owner = {"descriptor": None}
+    monkeypatch.setattr(daemon, "_socket_is_reachable", ready.is_set)
+
+    class LosingProcess:
+        def poll(self):
+            return 1
+
+    def spawn_while_another_owner_wins(_start_lock):
+        owner["descriptor"] = daemon._acquire_server_lock()
+        assert owner["descriptor"] is not None
+        daemon._write_daemon_record(owner["descriptor"], "starting")
+        threading.Timer(0.15, ready.set).start()
+        return LosingProcess()
+
+    monkeypatch.setattr(daemon, "_spawn_daemon", spawn_while_another_owner_wins)
+
+    try:
+        assert daemon.ensure_daemon_running() is True
+    finally:
+        if owner["descriptor"] is not None:
+            daemon._release_lock(owner["descriptor"])
+
+
+def test_ensure_daemon_running_does_not_respawn_unhealthy_lock_owner(monkeypatch):
+    descriptor = _hold_daemon_lock("ready")
+    monkeypatch.setattr(daemon, "_socket_is_reachable", lambda: False)
+    monkeypatch.setattr(
+        daemon,
+        "_spawn_daemon",
+        lambda _start_lock: (_ for _ in ()).throw(AssertionError("must not spawn")),
+    )
+    try:
+        assert daemon.ensure_daemon_running() is False
+    finally:
+        daemon._release_lock(descriptor)
+
+
+def test_concurrent_ensure_calls_share_one_spawn(monkeypatch):
+    ready = threading.Event()
+    spawn_count = 0
+    spawn_count_lock = threading.Lock()
+    monkeypatch.setattr(daemon, "_socket_is_reachable", ready.is_set)
+
+    class LiveProcess:
+        def poll(self):
+            return None
+
+    def spawn_once(_start_lock):
+        nonlocal spawn_count
+        with spawn_count_lock:
+            spawn_count += 1
+        threading.Timer(0.15, ready.set).start()
+        return LiveProcess()
+
+    monkeypatch.setattr(daemon, "_spawn_daemon", spawn_once)
+    results = []
+    threads = [
+        threading.Thread(target=lambda: results.append(daemon.ensure_daemon_running()))
+        for _ in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert results == [True, True]
+    assert spawn_count == 1
+
+
+def test_stale_sidecars_are_removed_only_while_startup_lock_is_held(monkeypatch):
+    daemon.DAEMON_SOCKET_PATH.parent.mkdir(parents=True)
+    daemon.DAEMON_SOCKET_PATH.write_text("stale")
+    daemon.DAEMON_PID_PATH.write_text("123")
+    checked = []
+
+    def checked_cleanup():
+        contender = daemon._acquire_lock(daemon.DAEMON_START_LOCK_PATH)
+        assert contender is None
+        server_lock = daemon._acquire_server_lock()
+        assert server_lock is None
+        checked.append(True)
+        daemon.DAEMON_SOCKET_PATH.unlink()
+        daemon.DAEMON_PID_PATH.unlink()
+
+    class FailedProcess:
+        def poll(self):
+            return 1
+
+    monkeypatch.setattr(daemon, "_socket_is_reachable", lambda: False)
+    monkeypatch.setattr(daemon, "_remove_stale_files", checked_cleanup)
+    monkeypatch.setattr(daemon, "_spawn_daemon", lambda _start_lock: FailedProcess())
+
+    assert daemon.ensure_daemon_running() is False
+    assert checked == [True]
+
+
+def test_cleanup_invalidates_stale_lifetime_record_before_spawning(monkeypatch):
+    descriptor = _hold_daemon_lock("ready")
+    daemon._release_lock(descriptor)
+    prior_process_exited = threading.Event()
+    monkeypatch.setattr(
+        daemon,
+        "_record_identifies_live_process",
+        lambda _record: not prior_process_exited.is_set(),
+    )
+
+    class FailedProcess:
+        def poll(self):
+            return 1
+
+    def spawn_after_teardown(_start_lock):
+        assert prior_process_exited.is_set()
+        return FailedProcess()
+
+    monkeypatch.setattr(daemon, "_socket_is_reachable", lambda: False)
+    monkeypatch.setattr(daemon, "_spawn_daemon", spawn_after_teardown)
+    threading.Timer(0.15, prior_process_exited.set).start()
+
+    assert daemon.ensure_daemon_running() is False
+    assert daemon._read_daemon_record() is None
+
+
+def test_stop_daemon_returns_false_when_lifetime_lock_is_free():
     assert daemon.stop_daemon() is False
 
 
-def test_stop_daemon_terminates_a_real_process_and_cleans_up_files(tmp_path, monkeypatch):
-    pid_path = tmp_path / "daemon.pid"
-    socket_path = tmp_path / "daemon.sock"
-    monkeypatch.setattr(daemon, "DAEMON_PID_PATH", pid_path)
-    monkeypatch.setattr(daemon, "DAEMON_SOCKET_PATH", socket_path)
+def test_stop_daemon_signals_pid_from_validated_lock_record(monkeypatch):
+    descriptor = _hold_daemon_lock("ready")
+    signals = []
+    lock_released = threading.Event()
+    process_exited = threading.Event()
 
-    stand_in = subprocess.Popen(["sleep", "30"])
-    pid_path.write_text(str(stand_in.pid))
-    socket_path.write_text("")  # dummy file standing in for a real socket
+    def signal_and_release(pid, sig):
+        signals.append((pid, sig))
 
+        def release_owner():
+            daemon._release_lock(descriptor)
+            lock_released.set()
+            time.sleep(0.15)
+            process_exited.set()
+
+        threading.Timer(0.15, release_owner).start()
+
+    monkeypatch.setattr(daemon.os, "kill", signal_and_release)
+    monkeypatch.setattr(
+        daemon,
+        "_record_identifies_live_process",
+        lambda _record: not process_exited.is_set(),
+    )
     try:
         assert daemon.stop_daemon() is True
-        assert not pid_path.exists()
-        assert not socket_path.exists()
+        assert signals == [(os.getpid(), signal.SIGTERM)]
+        assert lock_released.is_set()
+        assert process_exited.is_set()
+    finally:
+        lock_released.wait(timeout=1)
+        if not lock_released.is_set():
+            daemon._release_lock(descriptor)
+
+
+def test_zombie_pid_is_not_a_live_daemon_identity():
+    child = subprocess.Popen([daemon.sys.executable, "-c", "pass"])
+    try:
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            stat = daemon.Path(f"/proc/{child.pid}/stat").read_text()
+            if stat[stat.rfind(")") + 1 :].split()[0] == "Z":
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("stand-in process did not become a zombie")
+
+        assert daemon._process_start_identity(child.pid) is None
+    finally:
+        child.wait(timeout=2)
+
+
+def test_stop_daemon_terminates_real_validated_lock_owner():
+    script = r"""
+import fcntl
+import json
+import os
+from pathlib import Path
+import sys
+import time
+
+lock_path = Path(sys.argv[1])
+lock_path.parent.mkdir(parents=True, exist_ok=True)
+with lock_path.open("w") as lock_file:
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+    stat = Path(f"/proc/{os.getpid()}/stat").read_text()
+    identity = stat[stat.rfind(")") + 1:].split()[19]
+    json.dump(
+        {"pid": os.getpid(), "identity": identity, "phase": "ready"},
+        lock_file,
+    )
+    lock_file.flush()
+    os.fsync(lock_file.fileno())
+    print("ready", flush=True)
+    time.sleep(30)
+"""
+    stand_in = subprocess.Popen(
+        [daemon.sys.executable, "-c", script, str(daemon.DAEMON_LOCK_PATH)],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert stand_in.stdout.readline().strip() == "ready"
+        assert daemon.stop_daemon() is True
         stand_in.wait(timeout=5)
-        assert stand_in.returncode is not None
+        assert stand_in.returncode == -signal.SIGTERM
+        assert daemon._server_lock_is_held() is False
     finally:
         if stand_in.poll() is None:
             stand_in.kill()
-
-
-def test_daemon_status_reports_not_running_with_no_pid_file(tmp_path, monkeypatch):
-    monkeypatch.setattr(daemon, "DAEMON_PID_PATH", tmp_path / "daemon.pid")
-    monkeypatch.setattr(daemon, "DAEMON_SOCKET_PATH", tmp_path / "daemon.sock")
-
-    assert "not running" in daemon.daemon_status()
-
-
-def test_daemon_status_reports_running_with_a_live_pid_and_socket(tmp_path, monkeypatch):
-    pid_path = tmp_path / "daemon.pid"
-    socket_path = tmp_path / "daemon.sock"
-    monkeypatch.setattr(daemon, "DAEMON_PID_PATH", pid_path)
-    monkeypatch.setattr(daemon, "DAEMON_SOCKET_PATH", socket_path)
-    pid_path.write_text(str(os.getpid()))
-    socket_path.write_text("")
-
-    status = daemon.daemon_status()
-
-    assert "running" in status
-    assert "not running" not in status
 
 
 def _run_capturing_server(socket_path, received, ready_event):

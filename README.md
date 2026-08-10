@@ -138,7 +138,9 @@ The first query when no daemon is running starts a background daemon that keeps 
 and models warm in memory, so subsequent queries are fast. The native UI uses
 the daemon's progress protocol; if it finds an older daemon, it restarts it
 once automatically before replaying the current query. This keeps exactly one
-daemon running while enabling truthful progress details:
+daemon running while enabling truthful progress details. Startup has no fixed
+timeout: concurrent clients wait on the same process while it loads, and only
+retry after that process actually exits.
 
 ```bash
 revdict daemon status   # is it running?
@@ -150,7 +152,8 @@ data until you stop it — `build-index` will remind you if this applies.
 
 Daemon startup messages and request errors are written to
 `~/.cache/rev_dictionary/daemon.log`; tail it to troubleshoot a daemon
-that won't start or keeps crashing.
+that won't start or keeps crashing. Status distinguishes a daemon that is
+still `starting` from a `ready` process whose socket has become `unhealthy`.
 
 ## Clipboard copy on Enter
 

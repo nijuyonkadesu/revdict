@@ -305,9 +305,9 @@ def _get_search_result_with_progress(
         "primary_vowel": primary_vowel, "rhymes_with": rhymes_with,
         "sounds_like": sounds_like, "meter": meter,
     }
-    if daemon.DAEMON_SOCKET_PATH.exists() and daemon.supports_progress() is False:
+    if daemon.supports_progress() is False:
         daemon.stop_daemon()
-    if not daemon.DAEMON_SOCKET_PATH.exists() and not daemon.ensure_daemon_running():
+    if not daemon.ensure_daemon_running():
         return _local_search_fallback(query, top_n, progress=progress_module.ProgressReporter(on_progress), **kwargs)
     result = daemon.send_progress_query(query, top_n, on_progress, **kwargs)
     if result is not None:
@@ -332,17 +332,14 @@ def _daemon_start() -> None:
     if os.environ.get("REVDICT_DAEMON_CHILD"):
         daemon.run_server()
         return
-    if daemon.is_daemon_running():
-        pid = daemon._read_pid()
-        console.print(
-            f"[yellow]A daemon is already running (pid {pid}).[/yellow] "
-            "Run [bold]revdict daemon stop[/bold] to restart it."
-        )
-        return
-    if daemon.spawn_daemon():
-        console.print("Daemon started.")
+    already_running = daemon.is_daemon_running()
+    if daemon.ensure_daemon_running():
+        if already_running:
+            console.print(f"[yellow]{daemon.daemon_status()}[/yellow]")
+        else:
+            console.print("Daemon started.")
     else:
-        console.print("[yellow]Daemon failed to start within the timeout.[/yellow]")
+        console.print(f"[yellow]{daemon.daemon_status()}[/yellow]")
 
 
 def _daemon_stop() -> bool:

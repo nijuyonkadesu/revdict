@@ -129,6 +129,49 @@ def test_main_routes_daemon_start_to_run_server(monkeypatch):
     assert called["ran"] is True
 
 
+def test_explicit_daemon_start_uses_shared_startup_coordinator(monkeypatch, capsys):
+    monkeypatch.delenv("REVDICT_DAEMON_CHILD", raising=False)
+    calls = []
+    monkeypatch.setattr(
+        cli.daemon, "ensure_daemon_running", lambda: calls.append("ensure") or True
+    )
+    monkeypatch.setattr(
+        cli.daemon,
+        "spawn_daemon",
+        lambda: (_ for _ in ()).throw(AssertionError("must not bypass coordinator")),
+    )
+
+    cli._daemon_start()
+
+    assert calls == ["ensure"]
+    assert "started" in capsys.readouterr().out.lower()
+
+
+def test_progress_ui_runs_coordinator_even_when_stale_socket_path_exists(
+    monkeypatch, tmp_path
+):
+    socket_path = tmp_path / "daemon.sock"
+    socket_path.write_text("stale")
+    monkeypatch.setattr(cli.daemon, "DAEMON_SOCKET_PATH", socket_path)
+    monkeypatch.setattr(cli.daemon, "supports_progress", lambda: None)
+    calls = []
+    monkeypatch.setattr(
+        cli.daemon, "ensure_daemon_running", lambda: calls.append("ensure") or False
+    )
+    monkeypatch.setattr(
+        cli,
+        "_local_search_fallback",
+        lambda *args, **kwargs: {"exact_match": None, "candidates": []},
+    )
+
+    result = cli._get_search_result_with_progress(
+        "happy", 50, lambda _event: None
+    )
+
+    assert calls == ["ensure"]
+    assert result == {"exact_match": None, "candidates": []}
+
+
 def test_progress_ui_restarts_a_legacy_daemon_once_before_querying(monkeypatch, tmp_path):
     """The native UI must replace, rather than multiply, an old daemon process."""
     socket_path = tmp_path / "daemon.sock"
