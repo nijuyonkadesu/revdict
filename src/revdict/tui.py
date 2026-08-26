@@ -745,11 +745,11 @@ class DebouncedSearchController:
                     continue
                 self._pending = None
             try:
-                result = self._execute(query, on_progress=lambda event: self._publish_progress(generation, event), **controls.as_search_kwargs())
+                result = self._execute(query, on_progress=lambda event, generation=generation: self._publish_progress(generation, event), **controls.as_search_kwargs())
             except Exception as error:
-                self._schedule_callback(lambda error=error: self._publish_error(generation, error))
+                self._schedule_callback(lambda generation=generation, error=error: self._publish_error(generation, error))
             else:
-                self._schedule_callback(lambda: self._publish_result(generation, result))
+                self._schedule_callback(lambda generation=generation, result=result: self._publish_result(generation, result))
 
     def _current(self, generation: int) -> bool:
         with self._condition:
@@ -765,7 +765,7 @@ class DebouncedSearchController:
 
     def _publish_progress(self, generation: int, event: dict) -> None:
         if self._on_progress is not None:
-            self._schedule_callback(lambda: self._current(generation) and self._on_progress(event))
+            self._schedule_callback(lambda generation=generation, event=event: self._current(generation) and self._on_progress(event))
 
 
 class DaemonCompleter(Completer):
@@ -1130,9 +1130,11 @@ class NativeTui:
         if not query:
             self._controller.clear(); self._rows = []; self._selected_index = 0; self.preview_control.fragments = []
             self._hide_progress(); self.status.text = ""; self.application.invalidate(); return
+        self._rows = []; self._selected_index = 0; self._render_selection()
         try:
             controls = self._read_controls(); controls.validate()
         except ValidationError as error:
+            self._controller.clear()
             self.status.text = f"Invalid filter: {error}"; self.application.invalidate(); return
         self._controls = controls; self._set_active_filters(); self._reset_progress()
         self.status.text = "Searching…"; self._controller.request(query, controls)

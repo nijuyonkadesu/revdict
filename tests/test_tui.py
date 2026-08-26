@@ -112,6 +112,107 @@ def test_debounced_controller_coalesces_changes_while_a_search_is_running():
         controller.close()
 
 
+def test_debounced_controller_drops_stale_result_queued_on_ui_thread():
+    """Queued callbacks must retain the generation that produced their result."""
+    scheduled = []
+    scheduled_lock = threading.Lock()
+    latest_started = threading.Event()
+    release_latest = threading.Event()
+    received_results = []
+
+    def schedule(callback):
+        with scheduled_lock:
+            scheduled.append(callback)
+
+    def pop_scheduled_callback():
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            with scheduled_lock:
+                if scheduled:
+                    return scheduled.pop(0)
+            time.sleep(0.01)
+        pytest.fail("worker did not schedule its UI callback")
+
+    def execute(query, **_kwargs):
+        if query == "latest":
+            latest_started.set()
+            assert release_latest.wait(timeout=2)
+        return {"query": query}
+
+    controller = DebouncedSearchController(
+        execute,
+        received_results.append,
+        lambda error: pytest.fail(str(error)),
+        debounce_seconds=0,
+        callback_scheduler=schedule,
+    )
+    try:
+        controller.request("stale", SearchControls())
+        stale_callback = pop_scheduled_callback()
+        controller.request("latest", SearchControls())
+        assert latest_started.wait(timeout=2)
+
+        stale_callback()
+
+        assert received_results == []
+        release_latest.set()
+        latest_callback = pop_scheduled_callback()
+        latest_callback()
+        assert received_results == [{"query": "latest"}]
+    finally:
+        release_latest.set()
+        controller.close()
+
+
+def test_debounced_controller_drops_stale_error_queued_on_ui_thread():
+    """An old failure must not masquerade as an error for the latest query."""
+    scheduled = []
+    scheduled_lock = threading.Lock()
+    latest_started = threading.Event()
+    release_latest = threading.Event()
+    received_errors = []
+
+    def schedule(callback):
+        with scheduled_lock:
+            scheduled.append(callback)
+
+    def pop_scheduled_callback():
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            with scheduled_lock:
+                if scheduled:
+                    return scheduled.pop(0)
+            time.sleep(0.01)
+        pytest.fail("worker did not schedule its UI callback")
+
+    def execute(query, **_kwargs):
+        if query == "stale":
+            raise RuntimeError("stale failure")
+        latest_started.set()
+        assert release_latest.wait(timeout=2)
+        return {"query": query}
+
+    controller = DebouncedSearchController(
+        execute,
+        lambda _result: None,
+        lambda error: received_errors.append(str(error)),
+        debounce_seconds=0,
+        callback_scheduler=schedule,
+    )
+    try:
+        controller.request("stale", SearchControls())
+        stale_callback = pop_scheduled_callback()
+        controller.request("latest", SearchControls())
+        assert latest_started.wait(timeout=2)
+
+        stale_callback()
+
+        assert received_errors == []
+    finally:
+        release_latest.set()
+        controller.close()
+
+
 def test_debounced_controller_publishes_the_latest_backend_error():
     """Catches a failed daemon request disappearing instead of reaching the status line."""
     received_errors = []
@@ -535,6 +636,88 @@ def test_idle_status_is_hidden_and_function_buttons_are_a_single_compact_row():
         ui.close()
 
 
+def test_new_input_hides_results_from_the_previous_query_immediately():
+    """Only results for the latest settled input may remain on screen."""
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    ui._controller.close()
+
+    class RecordingController:
+        def __init__(self):
+            self.requests = []
+
+        def request(self, query, controls):
+            self.requests.append((query, controls))
+
+        def clear(self):
+            pass
+
+        def close(self):
+            pass
+
+    controller = RecordingController()
+    ui._controller = controller
+    ui._rows = [
+        {
+            "headword": "old",
+            "pos": "adjective",
+            "definition": "belonging to the previous query",
+            "stress": None,
+            "synonyms": [],
+            "examples": [],
+            "label": "neutral",
+            "polarity": "neutral",
+            "relevance": 100,
+        }
+    ]
+    ui._render_selection()
+    try:
+        ui.query.text = "latest query"
+
+        assert len(controller.requests) == 1
+        assert controller.requests[0][0] == "latest query"
+        assert ui._rows == []
+        assert ui._selected_index == 0
+        assert ui.preview_control.fragments == []
+        assert ui.status.text == "Searching…"
+    finally:
+        ui.close()
+
+
+def test_invalid_filter_invalidates_an_active_search_without_starting_another():
+    """A result for the old valid controls must not overwrite validation feedback."""
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    ui._controller.close()
+
+    class RecordingController:
+        def __init__(self):
+            self.requests = []
+            self.clear_count = 0
+
+        def request(self, query, controls):
+            self.requests.append((query, controls))
+
+        def clear(self):
+            self.clear_count += 1
+
+        def close(self):
+            pass
+
+    controller = RecordingController()
+    ui._controller = controller
+    try:
+        ui.query.text = "happy"
+        assert len(controller.requests) == 1
+
+        ui.syllables_field.text = "not-a-number"
+
+        assert len(controller.requests) == 1
+        assert controller.clear_count == 1
+        assert ui._rows == []
+        assert "Invalid filter" in ui.status.text
+    finally:
+        ui.close()
+
+
 def test_idle_footer_reserves_no_blank_status_or_progress_rows():
     """Catches invisible footer content leaving vertical holes above the buttons."""
     ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
@@ -637,8 +820,8 @@ def test_accept_falls_back_to_copy_when_empty_completions():
 
 def test_chat_panel_prefills_a_writing_prompt_from_the_selected_result():
     ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
-    ui._rows = [{"headword": "tailor", "pos": "noun", "definition": "a person who makes and alters garments", "stress": None, "synonyms": [], "examples": [], "label": "neutral", "polarity": "neutral", "relevance": 100}]
     ui.query.text = "make clothing fit"
+    ui._rows = [{"headword": "tailor", "pos": "noun", "definition": "a person who makes and alters garments", "stress": None, "synonyms": [], "examples": [], "label": "neutral", "polarity": "neutral", "relevance": 100}]
     ui._render_selection()
     try:
         ui._toggle_chat()
