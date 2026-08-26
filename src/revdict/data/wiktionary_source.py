@@ -30,7 +30,24 @@ def _combine_glosses(glosses: list[str]) -> str:
 
 
 def _relation_words(items: list[dict] | None) -> list[str]:
-    return list(dict.fromkeys(item["word"] for item in items or [] if item.get("word")))
+    words = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        word = item.get("word")
+        if isinstance(word, str) and word.strip():
+            words.append(word.strip())
+    return list(dict.fromkeys(words))
+
+
+def _string_values(items: list | None) -> list[str]:
+    return list(
+        dict.fromkeys(
+            item.strip()
+            for item in items or []
+            if isinstance(item, str) and item.strip()
+        )
+    )
 
 
 def iter_filtered_entries(lines: Iterable[str]) -> Iterator[dict]:
@@ -43,19 +60,30 @@ def iter_filtered_entries(lines: Iterable[str]) -> Iterator[dict]:
             continue
         word = entry.get("word")
         pos = entry.get("pos")
-        if not word or not pos:
+        if (
+            not isinstance(word, str)
+            or not word.strip()
+            or not isinstance(pos, str)
+            or not pos.strip()
+        ):
             continue
+        word = word.strip()
+        pos = pos.strip()
         for sense in entry.get("senses", []):
+            if not isinstance(sense, dict):
+                continue
             tags = sense.get("tags") or []
             if "form-of" in tags or "form_of" in sense or "alt-of" in tags:
                 continue
-            glosses = sense.get("glosses") or []
+            glosses = _string_values(sense.get("glosses"))
             if not glosses:
                 continue
             examples = [
-                example.get("text", "")
+                example["text"].strip()
                 for example in sense.get("examples", [])
-                if example.get("text")
+                if isinstance(example, dict)
+                and isinstance(example.get("text"), str)
+                and example["text"].strip()
             ]
             yield {
                 "headword": word,
@@ -63,12 +91,12 @@ def iter_filtered_entries(lines: Iterable[str]) -> Iterator[dict]:
                 "definition": _combine_glosses(glosses),
                 "examples": examples,
                 "source": "wiktionary",
-                "tags": tags,
+                "tags": _string_values(tags),
                 "synonyms": _relation_words(sense.get("synonyms")),
                 "antonyms": _relation_words(sense.get("antonyms")),
-                "topics": list(dict.fromkeys(sense.get("topics") or [])),
-                "wiktionary_sense_ids": list(dict.fromkeys(sense.get("senseid") or [])),
-                "wikidata_ids": list(dict.fromkeys(sense.get("wikidata") or [])),
+                "topics": _string_values(sense.get("topics")),
+                "wiktionary_sense_ids": _string_values(sense.get("senseid")),
+                "wikidata_ids": _string_values(sense.get("wikidata")),
                 "etymology_number": entry.get("etymology_number"),
             }
 

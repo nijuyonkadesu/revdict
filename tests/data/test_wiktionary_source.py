@@ -129,6 +129,40 @@ def test_parse_filtered_entries_preserves_sense_relations_and_provenance():
     assert record["etymology_number"] == 2
 
 
+def test_parse_filtered_entries_rejects_whitespace_only_required_fields():
+    whitespace_word = (
+        '{"word": " ", "pos": "punct", "lang_code": "en", '
+        '"senses": [{"glosses": ["A punctuation mark."]}]}'
+    )
+    whitespace_pos = (
+        '{"word": "word", "pos": " ", "lang_code": "en", '
+        '"senses": [{"glosses": ["A unit of language."]}]}'
+    )
+    whitespace_gloss = (
+        '{"word": "word", "pos": "noun", "lang_code": "en", '
+        '"senses": [{"glosses": [" "]}]}'
+    )
+
+    assert parse_filtered_entries([whitespace_word, whitespace_pos, whitespace_gloss]) == []
+
+
+def test_parse_filtered_entries_trims_source_text_at_the_boundary():
+    line = (
+        '{"word": " calm ", "pos": " adj ", "lang_code": "en", '
+        '"senses": [{"glosses": [" Not excited. "], '
+        '"examples": [{"text": " remain calm "}], '
+        '"synonyms": [{"word": " placid "}]}]}'
+    )
+
+    record = parse_filtered_entries([line])[0]
+
+    assert record["headword"] == "calm"
+    assert record["pos"] == "adjective"
+    assert record["definition"] == "Not excited."
+    assert record["examples"] == ["remain calm"]
+    assert record["synonyms"] == ["placid"]
+
+
 _REAL_RAW_WIKTIONARY_PATH = RAW_WIKTIONARY_PATH
 
 

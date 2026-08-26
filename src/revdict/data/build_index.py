@@ -137,11 +137,19 @@ def build_statistics(
     }
 
 
+def validate_records(records: list[dict]) -> None:
+    if not records:
+        raise ValueError("Refusing to publish an empty index")
+    for position, record in enumerate(records):
+        for field in ("headword", "pos", "definition"):
+            if not isinstance(record.get(field), str) or not record[field].strip():
+                raise ValueError(f"Record {position} has an invalid {field}")
+
+
 def validate_build_arrays(
     records: list[dict], embeddings: np.ndarray, record_embedding_indices: np.ndarray
 ) -> None:
-    if not records:
-        raise ValueError("Refusing to publish an empty index")
+    validate_records(records)
     if embeddings.ndim != 2 or embeddings.shape[0] == 0 or embeddings.shape[1] == 0:
         raise ValueError(f"Embedding model returned an invalid shape: {embeddings.shape}")
     if record_embedding_indices.shape != (len(records),):
@@ -151,10 +159,6 @@ def validate_build_arrays(
     for start in range(0, len(embeddings), 16_384):
         if not np.isfinite(embeddings[start : start + 16_384]).all():
             raise ValueError("Embedding model returned NaN or infinite values")
-    for position, record in enumerate(records):
-        for field in ("headword", "pos", "definition"):
-            if not isinstance(record.get(field), str) or not record[field].strip():
-                raise ValueError(f"Record {position} has an invalid {field}")
 
 
 @contextmanager
@@ -211,6 +215,7 @@ def _build(refresh_data: bool = False) -> None:
         raise RuntimeError(
             f"Failed while parsing the verified Wiktionary dump: {error}"
         ) from error
+    validate_records(records)
     print(f"Merged corpus: {len(records)} sense records.")
 
     print("Precomputing phonetics (syllables, rhyme key, meter)...")

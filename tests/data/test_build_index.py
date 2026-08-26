@@ -6,6 +6,7 @@ from revdict.data.build_index import (
     estimate_full_duration,
     group_by_definition,
     validate_build_arrays,
+    validate_records,
 )
 import numpy as np
 import pytest
@@ -64,6 +65,13 @@ def test_validate_build_arrays_rejects_non_finite_vectors():
             np.array([[np.nan]], dtype="float32"),
             np.array([0], dtype="int32"),
         )
+
+
+def test_validate_records_rejects_invalid_fields_before_embedding():
+    records = [{"headword": " ", "pos": "punct", "definition": "a mark"}]
+
+    with pytest.raises(ValueError, match="Record 0 has an invalid headword"):
+        validate_records(records)
 
 
 def test_build_statistics_records_coverage_and_saved_vector_rows():
