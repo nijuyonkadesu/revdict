@@ -36,7 +36,50 @@ your machine):
 revdict build-index
 ```
 
-Re-run this any time you want to refresh the underlying data.
+An ordinary rebuild reuses datasets only after verifying their recorded
+SHA-256 checksums. To explicitly request fresh upstream snapshots:
+
+```bash
+revdict build-index --refresh-data
+```
+
+A failed download or validation never replaces the last verified dataset or
+the active index.
+
+### Index integrity and reproducibility
+
+New indexes are immutable, versioned bundles under
+`~/.cache/rev_dictionary/index/versions/`. A build writes into a narrowly
+scoped staging directory, records corpus hashes, source metadata, model
+revisions, artifact checksums, schema version, dimensions, row counts, and
+coverage statistics in `manifest.json`, and validates every reference before
+atomically switching the `index/current` symlink. If validation or publication
+fails, the previous index remains current. Legacy indexes stored directly in
+the index directory remain readable until a successful rebuild.
+
+Downloaded datasets have adjacent `.source.json` provenance files. Existing
+files are never treated as valid merely because they exist: their hashes and
+validator versions must match. Refreshes use HTTPS, bounded network-operation
+timeouts and retries, and separate partial files.
+
+Definition embeddings are stored once per unique definition, with a compact
+record-to-vector mapping. This avoids duplicating vectors for many records
+that share a gloss while retaining record-level ranking.
+
+### Emotion tagging
+
+Emotion badges use a revision-pinned, sense-definition classifier with NRC
+EmoLex and SentiWordNet retained as separate evidence. All NRC categories are
+preserved; multi-emotion words are no longer reduced by alphabetically picking
+one label. The displayed category and polarity are resolved together, so a
+contradictory badge such as `fear · positive` is not emitted. Weak classifier
+predictions can fall back to an unambiguous lexicon category, and weak
+SentiWordNet margins are treated as neutral.
+
+Classifier predictions are batched and cached by model revision plus exact
+definition in `~/.cache/rev_dictionary/emotion-predictions-v1.sqlite3`. A
+damaged prediction cache is moved aside with a `.corrupt-*` suffix and rebuilt;
+it is not silently deleted.
 
 ## Usage
 
@@ -227,8 +270,8 @@ query). Override this with `--sort`:
 | `alpha_desc` | Z → A |
 | `shortest` | Shortest word first |
 | `longest` | Longest word first |
-| `most_common` | Most common in modern published fiction first |
-| `least_common` | Least common in modern published fiction first |
+| `most_common` | Most common in the 2010–2019 English Fiction corpus first |
+| `least_common` | Least common in the 2010–2019 English Fiction corpus first |
 | `most_formal` | Most formal-register first (e.g. "lavatory" before "toilet" before "khazi") |
 | `oldest` | Most archaic/dated/obsolete/historical-tagged first |
 | `most_modern` | Least archaic/dated/obsolete/historical-tagged first |

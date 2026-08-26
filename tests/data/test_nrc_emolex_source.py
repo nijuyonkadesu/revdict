@@ -8,6 +8,12 @@ def test_lookup_emolex_is_case_insensitive_and_returns_none_for_unknown_word():
     assert lookup_emolex("zzznotarealword", fake_emolex) is None
 
 
+def test_lookup_emolex_falls_back_to_a_pos_aware_lemma():
+    fake_emolex = {"run": frozenset({"anticipation"})}
+
+    assert lookup_emolex("running", fake_emolex, "verb") == frozenset({"anticipation"})
+
+
 def test_load_emolex_returns_real_bundled_lexicon():
     emolex = load_emolex()
     assert len(emolex) > 1000

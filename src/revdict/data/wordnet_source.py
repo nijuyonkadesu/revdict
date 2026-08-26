@@ -10,7 +10,18 @@ def _ensure_nltk_data() -> None:
         try:
             nltk.data.find(f"corpora/{package}")
         except LookupError:
-            nltk.download(package, quiet=True)
+            if not nltk.download(package, quiet=True):
+                raise RuntimeError(f"NLTK could not download required corpus {package!r}")
+
+
+def wordnet_provenance() -> dict:
+    _ensure_nltk_data()
+    return {
+        "provider": "nltk",
+        "nltk_version": nltk.__version__,
+        "wordnet_version": wn.get_version(),
+        "sentiwordnet_release": "3.0.0",
+    }
 
 
 def load_wordnet_senses() -> list[dict]:

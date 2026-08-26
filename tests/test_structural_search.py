@@ -62,14 +62,8 @@ from revdict.structural_search import run_structural
 
 
 def _build_state():
-    # emolex carries a specific category ("joy", not just a bare sentiment
-    # flag) for both fixture records so tag_emotion's classifier fallback
-    # never fires -- see emotion.py's _emolex_has_specific_category. Without
-    # this, run_structural's classifier_factory would actually construct a
-    # real EmotionClassifier (downloads/loads a transformers pipeline),
-    # exactly as test_search.py's own existing fixtures are careful to avoid
-    # (see its test_tag_exact_match_senses_tags_each_sense_... first-sense
-    # comment and _FakeClassifier usage).
+    # tests/conftest.py supplies a lightweight deterministic classifier, while
+    # these records retain a clear lexicon category for output assertions.
     metadata = [
         {
             "headword": "bluebird",
@@ -126,7 +120,9 @@ def test_run_structural_builds_full_candidate_records_for_every_match():
         assert set(candidate.keys()) == {
             "headword", "pos", "definition", "examples",
             "label", "polarity", "relevance", "stress", "synonyms",
-            "tags", "phonetics",
+            "tags", "phonetics", "emotion_labels", "emotion_source",
+            "category_source", "polarity_source", "emotion_confidence",
+            "emotion_display",
         }
 
 

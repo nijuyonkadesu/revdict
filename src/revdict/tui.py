@@ -311,7 +311,8 @@ def format_candidate_preview(candidate: dict) -> str:
     synonyms = candidate.get("synonyms") or []
     if synonyms:
         lines.extend(["", "Synonyms: " + ", ".join(synonyms)])
-    lines.extend([f"Emotion: {candidate['label']} · {candidate['polarity']}", f"Match confidence: {candidate['relevance']}%"])
+    emotion_display = candidate.get("emotion_display", candidate["label"])
+    lines.extend([f"Emotion: {emotion_display} · {candidate['polarity']}", f"Match confidence: {candidate['relevance']}%"])
     if candidate.get("stress"):
         lines.append("Stress: " + _strip_ansi(candidate["stress"]).rstrip())
     examples = candidate.get("examples") or []
@@ -380,7 +381,7 @@ def candidate_preview_fragments(candidate: dict, *, no_color: bool | None = None
     sentiment_style = f"class:result.sentiment.{polarity}" if polarity in {"positive", "negative"} else ""
     fragments.extend([
         ("", "\nEmotion: "),
-        (sentiment_style, f"{candidate['label']} · {polarity}"),
+        (sentiment_style, f"{candidate.get('emotion_display', candidate['label'])} · {polarity}"),
         ("", "\nMatch confidence: "),
         ("class:result.confidence", f"{candidate['relevance']}%"),
     ])
@@ -1179,7 +1180,7 @@ class NativeTui:
         exact_match = result.get("exact_match")
         if exact_match and exact_match.get("senses"):
             sense = exact_match["senses"][0]
-            rows.append({"headword": exact_match["headword"], "pos": sense["pos"], "definition": sense["definition"], "stress": sense.get("stress"), "label": sense["label"], "polarity": sense["polarity"], "synonyms": sense.get("synonyms") or [], "examples": sense.get("examples") or [], "relevance": 100})
+            rows.append({"headword": exact_match["headword"], "pos": sense["pos"], "definition": sense["definition"], "stress": sense.get("stress"), "label": sense["label"], "emotion_display": sense.get("emotion_display", sense["label"]), "polarity": sense["polarity"], "synonyms": sense.get("synonyms") or [], "examples": sense.get("examples") or [], "relevance": 100})
         rows.extend(result.get("candidates") or [])
         return rows
 

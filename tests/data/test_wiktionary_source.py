@@ -47,6 +47,13 @@ ENGLISH_NO_TAGS_LINE = (
     '{"word": "dog", "pos": "noun", "lang": "English", "lang_code": "en", '
     '"senses": [{"glosses": ["A domesticated canine."]}]}'
 )
+ENGLISH_RELATIONS_LINE = (
+    '{"word": "calm", "pos": "adj", "lang_code": "en", "etymology_number": 2, '
+    '"senses": [{"glosses": ["Not excited."], "senseid": ["en:calm-quiet"], '
+    '"wikidata": ["Q154729"], "topics": ["emotion"], '
+    '"synonyms": [{"word": "placid"}, {"word": "serene"}], '
+    '"antonyms": [{"word": "agitated"}]}]}'
+)
 
 
 def test_parse_filtered_entries_keeps_english_drops_form_of_alt_of_and_non_english():
@@ -109,6 +116,17 @@ def test_parse_filtered_entries_captures_the_tags_field_when_present():
 def test_parse_filtered_entries_defaults_tags_to_an_empty_list_when_absent():
     records = parse_filtered_entries([ENGLISH_NO_TAGS_LINE])
     assert records[0]["tags"] == []
+
+
+def test_parse_filtered_entries_preserves_sense_relations_and_provenance():
+    record = parse_filtered_entries([ENGLISH_RELATIONS_LINE])[0]
+
+    assert record["synonyms"] == ["placid", "serene"]
+    assert record["antonyms"] == ["agitated"]
+    assert record["topics"] == ["emotion"]
+    assert record["wiktionary_sense_ids"] == ["en:calm-quiet"]
+    assert record["wikidata_ids"] == ["Q154729"]
+    assert record["etymology_number"] == 2
 
 
 _REAL_RAW_WIKTIONARY_PATH = RAW_WIKTIONARY_PATH

@@ -2,6 +2,7 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 
 MODEL_NAME = "BAAI/bge-small-en-v1.5"
+MODEL_REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
 QUERY_INSTRUCTION = "Represent this sentence for searching relevant passages: "
 
 
@@ -10,8 +11,8 @@ def format_query_text(query: str) -> str:
 
 
 class Embedder:
-    def __init__(self, model_name: str = MODEL_NAME):
-        self._model = SentenceTransformer(model_name)
+    def __init__(self, model_name: str = MODEL_NAME, revision: str = MODEL_REVISION):
+        self._model = SentenceTransformer(model_name, revision=revision)
 
     def encode_passages(self, texts: list[str]) -> np.ndarray:
         vectors = self._model.encode(

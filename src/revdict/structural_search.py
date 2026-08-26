@@ -68,7 +68,7 @@ def run_structural(
     # circular. Matches the lazy-import pattern already used elsewhere in
     # this codebase (cli.py's _local_search_fallback, daemon.py's
     # run_server) to defer a heavy/cyclic import until it's actually needed.
-    from revdict.search import build_candidate, relative_relevance
+    from revdict.search import build_candidate, preload_emotions, relative_relevance
 
     word_index = state["word_index"]
     metadata = state["metadata"]
@@ -108,6 +108,8 @@ def run_structural(
     relevances = relative_relevance([score for _, score in ranked])
 
     progress.active("enrich")
+    selected_records = [metadata[word_index[headword][0]] for headword, _ in ranked]
+    preload_emotions(selected_records, state)
     candidates = [
         build_candidate(metadata[word_index[headword][0]], relevance, state)
         for (headword, _), relevance in zip(ranked, relevances)

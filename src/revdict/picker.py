@@ -65,7 +65,9 @@ def _render_exact_preview(exact_match: dict) -> str:
         lines.append(f"({sense['pos']}) {sense['definition']}")
         if sense.get("stress"):
             lines.append(f"Stress: {sense['stress']}")
-        lines.append(f"Emotion: {sense['label']} · {sense['polarity']}")
+        lines.append(
+            f"Emotion: {sense.get('emotion_display', sense['label'])} · {sense['polarity']}"
+        )
         synonyms = sense.get("synonyms")
         if synonyms:
             lines.append(f"Synonyms: {', '.join(synonyms)}")
@@ -84,7 +86,9 @@ def _render_candidate_preview(candidate: dict) -> str:
     ]
     if candidate.get("stress"):
         lines.append(f"Stress: {candidate['stress']}")
-    lines.append(f"Emotion: {candidate['label']} · {candidate['polarity']}")
+    lines.append(
+        f"Emotion: {candidate.get('emotion_display', candidate['label'])} · {candidate['polarity']}"
+    )
     lines.append(f"Match confidence: {candidate['relevance']}%")
     synonyms = candidate.get("synonyms")
     if synonyms:
@@ -117,7 +121,7 @@ def write_candidate_files(
                 exact_match["headword"],
                 first_sense["pos"],
                 first_sense["definition"],
-                first_sense["label"],
+                first_sense.get("emotion_display", first_sense["label"]),
                 first_sense["polarity"],
                 100,
                 index=index,
@@ -135,7 +139,7 @@ def write_candidate_files(
                 candidate["headword"],
                 candidate["pos"],
                 candidate["definition"],
-                candidate["label"],
+                candidate.get("emotion_display", candidate["label"]),
                 candidate["polarity"],
                 candidate["relevance"],
                 index=index,

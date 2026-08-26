@@ -19,6 +19,7 @@ from revdict import progress as progress_module
 from revdict import sort
 from revdict import tui
 from revdict.paths import INDEX_DIR
+from revdict.index_bundle import index_layout_exists
 from revdict.picker import PickerError, run_picker, write_candidate_files
 
 console = Console()
@@ -49,6 +50,11 @@ def _build_index_parser() -> argparse.ArgumentParser:
         prog="revdict build-index", description="Build (or rebuild) the local search index."
     )
     parser.add_argument("--yes", action="store_true", help="Skip the confirmation prompt.")
+    parser.add_argument(
+        "--refresh-data",
+        action="store_true",
+        help="Download fresh dataset snapshots after validating the existing cache remains usable.",
+    )
     return parser
 
 
@@ -172,7 +178,7 @@ def _query_parser() -> argparse.ArgumentParser:
 
 
 def _index_exists() -> bool:
-    return (INDEX_DIR / "embeddings.npy").exists()
+    return index_layout_exists(INDEX_DIR)
 
 
 def _fzf_missing() -> bool:
@@ -198,7 +204,7 @@ def _print_static_results(result: dict) -> None:
                 sense["pos"],
                 sense["definition"],
                 stress_text,
-                f"{sense['label']} · {sense['polarity']}",
+                f"{sense.get('emotion_display', sense['label'])} · {sense['polarity']}",
                 ", ".join(synonyms) if synonyms else "",
             )
         console.print(table)
@@ -219,7 +225,7 @@ def _print_static_results(result: dict) -> None:
             candidate["headword"],
             candidate["definition"],
             stress_text,
-            f"{candidate['label']} · {candidate['polarity']}",
+            f"{candidate.get('emotion_display', candidate['label'])} · {candidate['polarity']}",
             ", ".join(synonyms) if synonyms else "",
             f"{candidate['relevance']}%",
         )
@@ -315,10 +321,10 @@ def _get_search_result_with_progress(
     return _local_search_fallback(query, top_n, progress=progress_module.ProgressReporter(on_progress), **kwargs)
 
 
-def _build_index(skip_confirm: bool) -> None:
+def _build_index(skip_confirm: bool, refresh_data: bool = False) -> None:
     from revdict.data.build_index import build
 
-    build(skip_confirm=skip_confirm)
+    build(skip_confirm=skip_confirm, refresh_data=refresh_data)
 
     if daemon.is_daemon_running():
         console.print(
@@ -415,6 +421,7 @@ def _build_result_rows(result: dict) -> list[dict]:
                 "definition": first_sense["definition"],
                 "stress": first_sense.get("stress"),
                 "label": first_sense["label"],
+                "emotion_display": first_sense.get("emotion_display", first_sense["label"]),
                 "polarity": first_sense["polarity"],
                 "synonyms": first_sense.get("synonyms") or [],
                 "examples": first_sense["examples"],
@@ -430,6 +437,7 @@ def _build_result_rows(result: dict) -> list[dict]:
                 "definition": candidate["definition"],
                 "stress": candidate.get("stress"),
                 "label": candidate["label"],
+                "emotion_display": candidate.get("emotion_display", candidate["label"]),
                 "polarity": candidate["polarity"],
                 "synonyms": candidate.get("synonyms") or [],
                 "examples": candidate["examples"],
@@ -513,7 +521,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if argv and argv[0] == "build-index":
             args = _build_index_parser().parse_args(argv[1:])
-            _build_index(skip_confirm=args.yes)
+            _build_index(skip_confirm=args.yes, refresh_data=args.refresh_data)
             return 0
 
         if argv and argv[0] == "daemon":

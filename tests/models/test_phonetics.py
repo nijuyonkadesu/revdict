@@ -31,6 +31,13 @@ def test_resolve_returns_none_for_a_multi_word_headword():
     assert phonetics.resolve("kick the bucket", "verb") is None
 
 
+def test_resolve_diagnostic_explains_an_unsupported_compound():
+    result, reason = phonetics.resolve_with_diagnostic("kick the bucket", "verb")
+
+    assert result is None
+    assert reason == "multiword-or-hyphenated"
+
+
 def test_resolve_returns_none_for_a_hyphenated_headword():
     assert phonetics.resolve("well-known", "adjective") is None
 

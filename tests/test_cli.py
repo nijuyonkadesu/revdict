@@ -84,8 +84,9 @@ def test_main_prints_error_and_returns_1_when_index_missing(monkeypatch, capsys)
 def test_main_routes_the_build_index_subcommand(monkeypatch):
     called = {}
 
-    def fake_build_index(skip_confirm):
+    def fake_build_index(skip_confirm, refresh_data=False):
         called["skip_confirm"] = skip_confirm
+        called["refresh_data"] = refresh_data
 
     monkeypatch.setattr(cli, "_build_index", fake_build_index)
 
@@ -93,12 +94,29 @@ def test_main_routes_the_build_index_subcommand(monkeypatch):
 
     assert code == 0
     assert called["skip_confirm"] is True
+    assert called["refresh_data"] is False
+
+
+def test_build_index_refresh_data_flag_is_forwarded(monkeypatch):
+    called = {}
+    monkeypatch.setattr(
+        cli,
+        "_build_index",
+        lambda skip_confirm, refresh_data=False: called.update(
+            skip_confirm=skip_confirm, refresh_data=refresh_data
+        ),
+    )
+
+    assert cli.main(["build-index", "--yes", "--refresh-data"]) == 0
+    assert called == {"skip_confirm": True, "refresh_data": True}
 
 
 def test_build_index_warns_when_a_daemon_is_still_running_afterward(monkeypatch, capsys):
     import revdict.data.build_index as build_index_module
 
-    monkeypatch.setattr(build_index_module, "build", lambda skip_confirm: None)
+    monkeypatch.setattr(
+        build_index_module, "build", lambda skip_confirm, refresh_data=False: None
+    )
     monkeypatch.setattr(cli.daemon, "is_daemon_running", lambda: True)
 
     cli._build_index(skip_confirm=True)
@@ -110,7 +128,9 @@ def test_build_index_warns_when_a_daemon_is_still_running_afterward(monkeypatch,
 def test_build_index_says_nothing_when_no_daemon_is_running(monkeypatch, capsys):
     import revdict.data.build_index as build_index_module
 
-    monkeypatch.setattr(build_index_module, "build", lambda skip_confirm: None)
+    monkeypatch.setattr(
+        build_index_module, "build", lambda skip_confirm, refresh_data=False: None
+    )
     monkeypatch.setattr(cli.daemon, "is_daemon_running", lambda: False)
 
     cli._build_index(skip_confirm=True)

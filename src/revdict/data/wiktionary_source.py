@@ -1,8 +1,9 @@
 import gzip
 import json
-import urllib.request
 from pathlib import Path
 from typing import Iterable, Iterator
+
+from revdict.data.download import download_cached_file, validate_gzip_header
 
 RAW_WIKTEXTRACT_URL = "https://kaikki.org/dictionary/raw-wiktextract-data.jsonl.gz"
 
@@ -26,6 +27,10 @@ def _combine_glosses(glosses: list[str]) -> str:
     if len(glosses) == 1:
         return glosses[0]
     return "; ".join(gloss.rstrip(".") for gloss in glosses) + "."
+
+
+def _relation_words(items: list[dict] | None) -> list[str]:
+    return list(dict.fromkeys(item["word"] for item in items or [] if item.get("word")))
 
 
 def iter_filtered_entries(lines: Iterable[str]) -> Iterator[dict]:
@@ -59,6 +64,12 @@ def iter_filtered_entries(lines: Iterable[str]) -> Iterator[dict]:
                 "examples": examples,
                 "source": "wiktionary",
                 "tags": tags,
+                "synonyms": _relation_words(sense.get("synonyms")),
+                "antonyms": _relation_words(sense.get("antonyms")),
+                "topics": list(dict.fromkeys(sense.get("topics") or [])),
+                "wiktionary_sense_ids": list(dict.fromkeys(sense.get("senseid") or [])),
+                "wikidata_ids": list(dict.fromkeys(sense.get("wikidata") or [])),
+                "etymology_number": entry.get("etymology_number"),
             }
 
 
@@ -71,11 +82,29 @@ def stream_filtered_entries_from_gzip(path: str) -> Iterator[dict]:
         yield from iter_filtered_entries(f)
 
 
-def download_raw_wiktextract(dest_path: str) -> None:
-    dest = Path(dest_path)
-    if dest.exists():
-        return
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(dest.suffix + ".part")
-    urllib.request.urlretrieve(RAW_WIKTEXTRACT_URL, tmp)
-    tmp.rename(dest)
+def _validate_wiktextract_dump(path: Path) -> None:
+    validate_gzip_header(path)
+    parsed = 0
+    with gzip.open(path, "rt", encoding="utf-8") as f:
+        for line_number, line in enumerate(f, start=1):
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise ValueError(f"Invalid Wiktextract JSON on line {line_number}: {error}") from error
+            if not isinstance(entry, dict):
+                raise ValueError(f"Invalid Wiktextract entry on line {line_number}")
+            parsed += 1
+    if parsed == 0:
+        raise ValueError(f"Wiktextract dump contains no entries: {path}")
+
+
+def download_raw_wiktextract(dest_path: str, refresh: bool = False) -> dict:
+    return download_cached_file(
+        RAW_WIKTEXTRACT_URL,
+        Path(dest_path),
+        validator=_validate_wiktextract_dump,
+        refresh=refresh,
+        validation_id="wiktextract-jsonl-v1",
+    )

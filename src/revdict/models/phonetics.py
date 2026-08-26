@@ -38,7 +38,7 @@ def _phonetic_primary_index(phonemes: list[str]) -> int:
     return vowel_indices[0]
 
 
-def resolve(word: str, pos: str) -> dict | None:
+def resolve_with_diagnostic(word: str, pos: str) -> tuple[dict | None, str | None]:
     """Full phonetic resolution for a single word -- used both at index-
     build time (every clean headword in the corpus) and at query time (an
     arbitrary --rhymes-with/--sounds-like target). Returns None, and never
@@ -51,14 +51,14 @@ def resolve(word: str, pos: str) -> dict | None:
     must never crash a reindex, or a live query, over one weird headword.
     """
     if not is_available():
-        return None
+        return None, "stressmark-unavailable"
     if " " in word or "-" in word:
-        return None
+        return None, "multiword-or-hyphenated"
     try:
         result = _engine.resolve_word_by_pos(word, pos)
         phonemes = result.phonemes
         if not phonemes:
-            return None
+            return None, "no-phonemes"
         syllable_count = len(result.syllables)
         idx = _phonetic_primary_index(phonemes)
         primary_vowel = _strip_stress(phonemes[idx])
@@ -71,6 +71,11 @@ def resolve(word: str, pos: str) -> dict | None:
             "rhyme_key": rhyme_key,
             "meter": meter,
             "phonemes": list(phonemes),
-        }
-    except Exception:
-        return None
+        }, None
+    except Exception as error:
+        return None, f"resolver-error:{type(error).__name__}"
+
+
+def resolve(word: str, pos: str) -> dict | None:
+    result, _reason = resolve_with_diagnostic(word, pos)
+    return result

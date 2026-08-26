@@ -8,8 +8,10 @@ from revdict.search import (
     absolute_relevance,
     combine_score,
     cosine_top_k,
+    cosine_top_k_mapped,
     dedupe_by_headword,
     exclude_headword,
+    matching_filter_row_indices,
     relative_relevance,
     tag_exact_match_senses,
 )
@@ -39,6 +41,49 @@ def test_cosine_top_k_gives_the_same_ranking_with_precomputed_matrix_norms():
 
     assert results[0][0] == 0
     assert results[1][0] == 2
+
+
+def test_cosine_top_k_mapped_ranks_records_without_expanding_duplicate_vectors():
+    query = np.array([1.0, 0.0], dtype="float32")
+    unique = np.array([[1.0, 0.0], [0.0, 1.0]], dtype="float32")
+    mapping = np.array([0, 1, 0], dtype="int32")
+
+    results = cosine_top_k_mapped(query, unique, mapping, k=3)
+
+    assert {row for row, score in results if score > 0.9} == {0, 2}
+    assert results[-1][0] == 1
+
+
+def test_cosine_top_k_mapped_returns_global_rows_for_a_restricted_scope():
+    query = np.array([1.0, 0.0], dtype="float32")
+    unique = np.array([[1.0, 0.0], [0.0, 1.0]], dtype="float32")
+    mapping = np.array([0, 1, 0, 1], dtype="int32")
+
+    results = cosine_top_k_mapped(query, unique, mapping, k=2, record_indices=[1, 2, 3])
+
+    assert results[0][0] == 2
+    assert {row for row, _score in results}.issubset({1, 2, 3})
+
+
+def test_category_filter_builds_the_retrieval_scope_before_top_k():
+    metadata = [
+        {"headword": f"verb-{i}", "pos": "verb", "tags": []}
+        for i in range(100)
+    ]
+    metadata[99] = {"headword": "only-noun", "pos": "noun", "tags": []}
+
+    rows = matching_filter_row_indices(
+        metadata,
+        None,
+        category="noun",
+        syllables=None,
+        primary_vowel=None,
+        rhyme_key=None,
+        sounds_like_phonemes=None,
+        meter=None,
+    )
+
+    assert rows == [99]
 
 
 def test_dedupe_by_headword_keeps_the_best_scoring_sense_per_word_case_insensitively():
@@ -166,20 +211,21 @@ def test_tag_exact_match_senses_tags_each_sense_and_preserves_display_fields():
     assert result["headword"] == "happy"
     first, second = result["senses"]
 
-    # First sense: EmoLex already supplies a specific category ("joy"), so
-    # the classifier fallback must not fire for it.
-    assert first["label"] == "joy"
-    assert first["polarity"] == "positive"
+    # The sense-level classifier is authoritative while the raw EmoLex labels
+    # remain preserved as evidence in emotion_labels.
+    assert first["label"] == "anger"
+    assert first["polarity"] == "negative"
+    assert first["emotion_labels"] == ["joy"]
     assert first["definition"] == "feeling great pleasure"
     assert first["examples"] == ["a happy child"]
     assert first["source"] == "wordnet"
     assert first["synonyms"] == ["glad", "content"]
 
-    # Second sense has no EmoLex category, so the classifier fallback fires.
+    # The second sense is classified independently.
     assert second["label"] == "anger"
     assert second["polarity"] == "negative"
     assert second["synonyms"] is None
-    assert classifier.calls == 1
+    assert classifier.calls == 2
 
 
 def test_search_candidates_and_exact_match_senses_include_a_stress_key(monkeypatch):
@@ -224,12 +270,20 @@ def test_cold_state_loading_reports_its_actual_suboperations(monkeypatch):
     """The long cold-start phase should explain real work as it happens."""
     events = []
     monkeypatch.setattr(search_mod, "_state", {})
-    monkeypatch.setattr(search_mod.np, "load", lambda _path: np.array([[1.0]], dtype="float32"))
-    monkeypatch.setattr(search_mod.dictionary, "load_metadata", lambda _path: [])
-    monkeypatch.setattr(search_mod.dictionary, "load_word_index", lambda _path: {})
+    monkeypatch.setattr(
+        search_mod.np,
+        "load",
+        lambda _path, **_kwargs: np.array([[1.0]], dtype="float32"),
+    )
+    monkeypatch.setattr(
+        search_mod.dictionary,
+        "load_metadata",
+        lambda _path: [{"headword": "x", "definition": "x"}],
+    )
+    monkeypatch.setattr(search_mod.dictionary, "load_word_index", lambda _path: {"x": [0]})
     monkeypatch.setattr(search_mod, "Embedder", lambda: object())
     monkeypatch.setattr(search_mod, "Reranker", lambda: object())
-    monkeypatch.setattr(search_mod, "_load_literary_frequency", lambda: {})
+    monkeypatch.setattr(search_mod, "_load_literary_frequency", lambda _path=None: {})
     from revdict.progress import ProgressReporter
 
     token = search_mod._load_progress.set(ProgressReporter(events.append))
@@ -364,10 +418,9 @@ def test_build_candidate_defaults_tags_to_empty_list_and_phonetics_to_none():
 
 
 def _fake_state():
-    # emolex=["joy"] (a specific category, not None) so tag_emotion's
-    # classifier fallback never fires and these tests never construct a
-    # real EmotionClassifier -- see the identical note in
-    # tests/test_structural_search.py's _build_state().
+    # The autouse test fixture replaces the expensive production classifier
+    # with a deterministic low-confidence neutral classifier, allowing this
+    # unambiguous EmoLex category to remain authoritative.
     metadata = [
         {
             "headword": "bluebird",
@@ -451,9 +504,8 @@ def test_search_combined_mode_restricts_candidates_to_the_pattern_match(monkeypa
     even though the fake reranker below would happily score every row
     equally -- proving the structural filter actually narrows the pool
     before reranking, not just after."""
-    # emolex=["joy"] on both records, not None -- see _fake_state()'s note
-    # above on why this is required to avoid constructing a real
-    # EmotionClassifier inside this test.
+    # Both records use deterministic lexicon evidence; the classifier itself
+    # is replaced by tests/conftest.py's lightweight implementation.
     metadata = [
         {
             "headword": "bluebird", "pos": "noun", "definition": "a songbird",

@@ -49,7 +49,7 @@ def test_compute_literary_frequencies_only_returns_scores_for_requested_headword
         assert set(result.keys()) == {"murmur"}
 
 
-def test_compute_literary_frequencies_merges_pos_suffixed_variants_of_the_same_word():
+def test_compute_literary_frequencies_prefers_bare_count_over_overlapping_pos_variants():
     with tempfile.TemporaryDirectory() as tmp:
         raw_path = Path(tmp) / "fiction.jsonl.gz"
         totalcounts_path = Path(tmp) / "totalcounts-1"
@@ -61,11 +61,27 @@ def test_compute_literary_frequencies_merges_pos_suffixed_variants_of_the_same_w
 
         result = compute_literary_frequencies({"run"}, str(raw_path), str(totalcounts_path))
 
-        # (100 + 300 + 50) / 1_000_000_000 * 1_000_000_000 = 450 matches per
-        # billion words -> log10(450)
+        # POS-tagged rows are projections of the same occurrences represented
+        # by the bare row, not additional matches.
         import math
 
-        assert result["run"] == math.log10(450)
+        assert result["run"] == math.log10(50)
+
+
+def test_compute_literary_frequencies_uses_pos_sum_when_bare_token_is_absent():
+    with tempfile.TemporaryDirectory() as tmp:
+        raw_path = Path(tmp) / "fiction.jsonl.gz"
+        totalcounts_path = Path(tmp) / "totalcounts-1"
+        with gzip.open(raw_path, "wt", encoding="utf-8") as f:
+            f.write("run_NOUN\t2010,100,5\n")
+            f.write("run_VERB\t2010,300,10\n")
+        totalcounts_path.write_text("\t2010,1000000000,1,1\t")
+
+        result = compute_literary_frequencies({"run"}, str(raw_path), str(totalcounts_path))
+
+        import math
+
+        assert result["run"] == math.log10(400)
 
 
 def test_compute_literary_frequencies_is_case_insensitive_and_lowercases_output_keys():

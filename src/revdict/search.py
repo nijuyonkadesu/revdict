@@ -13,9 +13,12 @@ from revdict import structural_search
 from revdict.progress import ProgressReporter
 from revdict.models import phonetics as phonetics_models
 from revdict.models import stress
+from revdict.models.embedder import MODEL_NAME as EMBEDDING_MODEL_NAME
+from revdict.models.embedder import MODEL_REVISION as EMBEDDING_MODEL_REVISION
 from revdict.models.embedder import Embedder
-from revdict.models.emotion import EmotionClassifier, tag_emotion
+from revdict.models.emotion import EmotionClassifier, format_emotion_label, tag_emotion
 from revdict.models.reranker import Reranker
+from revdict.index_bundle import load_manifest, resolve_active_index_dir, validate_loaded_index
 from revdict.paths import INDEX_DIR
 
 _state: dict = {}
@@ -47,6 +50,36 @@ def cosine_top_k(
     top_indices = np.argpartition(-scores, k - 1)[:k]
     top_indices = top_indices[np.argsort(-scores[top_indices])]
     return [(int(i), float(scores[i])) for i in top_indices]
+
+
+def cosine_top_k_mapped(
+    query_vec: np.ndarray,
+    unique_matrix: np.ndarray,
+    record_embedding_indices: np.ndarray,
+    k: int,
+    *,
+    matrix_norms: np.ndarray | None = None,
+    record_indices: list[int] | np.ndarray | None = None,
+) -> list[tuple[int, float]]:
+    """Rank record rows while computing each unique definition score once."""
+    query_norm = query_vec / (np.linalg.norm(query_vec) + 1e-12)
+    if matrix_norms is None:
+        matrix_norms = np.linalg.norm(unique_matrix, axis=1) + 1e-12
+    definition_scores = (unique_matrix @ query_norm) / matrix_norms
+    if record_indices is None:
+        selected_records = np.arange(len(record_embedding_indices), dtype=np.int64)
+    else:
+        selected_records = np.asarray(record_indices, dtype=np.int64)
+    if selected_records.size == 0:
+        return []
+    scores = definition_scores[record_embedding_indices[selected_records]]
+    k = min(k, len(scores))
+    top_local = np.argpartition(-scores, k - 1)[:k]
+    top_local = top_local[np.argsort(-scores[top_local])]
+    return [
+        (int(selected_records[local]), float(scores[local]))
+        for local in top_local
+    ]
 
 
 def dedupe_by_headword(
@@ -128,6 +161,41 @@ def filter_by_phonetics(
     ]
 
 
+def matching_filter_row_indices(
+    metadata: list[dict],
+    candidate_rows: list[int] | None,
+    *,
+    category: str | None,
+    syllables: int | None,
+    primary_vowel: str | None,
+    rhyme_key: str | None,
+    sounds_like_phonemes: list[str] | None,
+    meter: str | None,
+) -> list[int] | None:
+    has_category = bool(category and category != "all")
+    has_phonetics = syllables is not None or any(
+        [primary_vowel, rhyme_key, sounds_like_phonemes, meter]
+    )
+    if not has_category and not has_phonetics:
+        return candidate_rows
+    rows = range(len(metadata)) if candidate_rows is None else candidate_rows
+    matched = []
+    for row in rows:
+        record = metadata[row]
+        if has_category and not category_module.matches_category(record, category):
+            continue
+        if has_phonetics and not (
+            phonetics.matches_syllable_count(record, syllables)
+            and phonetics.matches_primary_vowel(record, primary_vowel)
+            and phonetics.matches_rhyme(record, rhyme_key)
+            and phonetics.matches_sounds_like(record, sounds_like_phonemes)
+            and phonetics.matches_meter(record, meter)
+        ):
+            continue
+        matched.append(row)
+    return matched
+
+
 def resolve_phonetic_target(word: str, flag_name: str) -> dict:
     """Resolves an arbitrary user-typed word (the target of --rhymes-with
     or --sounds-like) into its phonetic data at QUERY time -- this is the
@@ -192,7 +260,7 @@ def absolute_relevance(scores: list[float]) -> list[int]:
 def combine_score(
     raw_score: float, headword: str, literary_frequency: dict[str, float]
 ) -> float:
-    """Adds a real, measured "how common is this word in modern published
+    """Adds a real, measured "how common was this word in 2010s published
     fiction" signal to the raw reranker score -- this is what actually
     separates common, natural-sounding synonyms (e.g. "glad") from obscure
     or dialectal ones (e.g. "wealful", "vogie") when both restate the query
@@ -222,8 +290,9 @@ def combine_score(
     return raw_score + freq
 
 
-def _load_literary_frequency() -> dict[str, float]:
-    path = INDEX_DIR / "literary_frequency.json"
+def _load_literary_frequency(index_dir=None) -> dict[str, float]:
+    index_dir = resolve_active_index_dir(INDEX_DIR) if index_dir is None else index_dir
+    path = index_dir / "literary_frequency.json"
     if not path.exists():
         return {}
     with path.open(encoding="utf-8") as f:
@@ -232,20 +301,49 @@ def _load_literary_frequency() -> dict[str, float]:
 
 def _load_state() -> dict:
     if not _state:
+        # Resolve the atomic pointer exactly once. A concurrent rebuild may
+        # publish a newer bundle, but this process finishes loading one
+        # immutable, internally consistent version.
+        index_dir = resolve_active_index_dir(INDEX_DIR)
+        manifest = load_manifest(index_dir)
+        if manifest is not None:
+            indexed_model = manifest.get("models", {}).get("embedding", {})
+            expected_model = {
+                "name": EMBEDDING_MODEL_NAME,
+                "revision": EMBEDDING_MODEL_REVISION,
+            }
+            if indexed_model != expected_model:
+                raise RuntimeError(
+                    "Index embedding model does not match this revdict version; "
+                    "run `revdict build-index` to rebuild it"
+                )
         _load_detail("Loading embedding index")
-        _state["embeddings"] = np.load(INDEX_DIR / "embeddings.npy")
+        _state["embeddings"] = np.load(index_dir / "embeddings.npy", mmap_mode="r")
+        mapping_path = index_dir / "record_embeddings.npy"
+        _state["record_embedding_indices"] = (
+            np.load(mapping_path, mmap_mode="r") if mapping_path.is_file() else None
+        )
         _load_detail("Calculating embedding norms")
         _state["embedding_norms"] = np.linalg.norm(_state["embeddings"], axis=1) + 1e-12
         _load_detail("Loading dictionary metadata")
-        _state["metadata"] = dictionary.load_metadata(INDEX_DIR)
+        _state["metadata"] = dictionary.load_metadata(index_dir)
         _load_detail("Loading word index")
-        _state["word_index"] = dictionary.load_word_index(INDEX_DIR)
+        _state["word_index"] = dictionary.load_word_index(index_dir)
+        validate_loaded_index(
+            index_dir,
+            _state["embeddings"],
+            _state["metadata"],
+            _state["word_index"],
+            _state["record_embedding_indices"],
+        )
         _load_detail("Starting embedding model")
         _state["embedder"] = Embedder()
         _load_detail("Starting reranker")
         _state["reranker"] = Reranker()
         _load_detail("Loading frequency data")
-        _state["literary_frequency"] = _load_literary_frequency()
+        _state["literary_frequency"] = _load_literary_frequency(index_dir)
+        _state["index_dir"] = index_dir
+        _state["manifest"] = manifest
         _state["classifier"] = None
     else:
         _load_detail("Using warm search state")
@@ -256,6 +354,15 @@ def get_classifier(state: dict) -> EmotionClassifier:
     if state["classifier"] is None:
         state["classifier"] = EmotionClassifier()
     return state["classifier"]
+
+
+def preload_emotions(records: list[dict], state: dict) -> None:
+    if not records:
+        return
+    classifier = get_classifier(state)
+    classify_many = getattr(classifier, "classify_many", None)
+    if classify_many is not None:
+        classify_many([record["definition"] for record in records])
 
 
 def build_candidate(record: dict, relevance: int, state: dict) -> dict:
@@ -269,7 +376,13 @@ def build_candidate(record: dict, relevance: int, state: dict) -> dict:
         "definition": record["definition"],
         "examples": record["examples"],
         "label": emotion["label"],
+        "emotion_labels": emotion["labels"],
+        "emotion_display": format_emotion_label(emotion["label"], emotion["labels"]),
         "polarity": emotion["polarity"],
+        "emotion_source": emotion["emotion_source"],
+        "category_source": emotion["category_source"],
+        "polarity_source": emotion["polarity_source"],
+        "emotion_confidence": emotion["confidence"],
         "relevance": relevance,
         "stress": stress.mark(record["headword"], record["pos"], preserve_color=True),
         "synonyms": record.get("synonyms"),
@@ -306,7 +419,13 @@ def tag_exact_match_senses(exact_match_raw: dict | None, classifier_factory) -> 
                 "source": sense["source"],
                 "synonyms": sense.get("synonyms"),
                 "label": emotion["label"],
+                "emotion_labels": emotion["labels"],
+                "emotion_display": format_emotion_label(emotion["label"], emotion["labels"]),
                 "polarity": emotion["polarity"],
+                "emotion_source": emotion["emotion_source"],
+                "category_source": emotion["category_source"],
+                "polarity_source": emotion["polarity_source"],
+                "emotion_confidence": emotion["confidence"],
                 "stress": stress.mark(exact_match_raw["headword"], sense["pos"], preserve_color=True),
             }
         )
@@ -394,6 +513,20 @@ def search(
         restrict_row_indices = structural_search.matching_row_indices(parsed, state["word_index"])
         suppress_exact_match = True
 
+    # Category and phonetic constraints narrow the cosine search domain, not
+    # merely the first 75 retrieved rows. Otherwise a valid match outside that
+    # arbitrary pool can never reach the UI.
+    restrict_row_indices = matching_filter_row_indices(
+        metadata,
+        restrict_row_indices,
+        category=category,
+        syllables=syllables,
+        primary_vowel=primary_vowel,
+        rhyme_key=rhyme_key,
+        sounds_like_phonemes=sounds_like_phonemes,
+        meter=meter,
+    )
+
     meaning_query = parsed.meaning_text if parsed.meaning_text is not None else query
     progress.completed("scope")
 
@@ -406,15 +539,41 @@ def search(
         retrieved = [(index, 0.0) for index in restrict_row_indices]
     elif restrict_row_indices is not None:
         query_vec = state["embedder"].encode_query(meaning_query)
-        subset_matrix = state["embeddings"][restrict_row_indices]
-        subset_norms = state["embedding_norms"][restrict_row_indices]
-        local_top = cosine_top_k(query_vec, subset_matrix, k=retrieval_pool_size, matrix_norms=subset_norms)
-        retrieved = [(restrict_row_indices[local_index], score) for local_index, score in local_top]
+        if state.get("record_embedding_indices") is not None:
+            retrieved = cosine_top_k_mapped(
+                query_vec,
+                state["embeddings"],
+                state["record_embedding_indices"],
+                retrieval_pool_size,
+                matrix_norms=state["embedding_norms"],
+                record_indices=restrict_row_indices,
+            )
+        else:
+            subset_matrix = state["embeddings"][restrict_row_indices]
+            subset_norms = state["embedding_norms"][restrict_row_indices]
+            local_top = cosine_top_k(
+                query_vec, subset_matrix, k=retrieval_pool_size, matrix_norms=subset_norms
+            )
+            retrieved = [
+                (restrict_row_indices[local_index], score) for local_index, score in local_top
+            ]
     else:
         query_vec = state["embedder"].encode_query(meaning_query)
-        retrieved = cosine_top_k(
-            query_vec, state["embeddings"], k=retrieval_pool_size, matrix_norms=state["embedding_norms"]
-        )
+        if state.get("record_embedding_indices") is not None:
+            retrieved = cosine_top_k_mapped(
+                query_vec,
+                state["embeddings"],
+                state["record_embedding_indices"],
+                retrieval_pool_size,
+                matrix_norms=state["embedding_norms"],
+            )
+        else:
+            retrieved = cosine_top_k(
+                query_vec,
+                state["embeddings"],
+                k=retrieval_pool_size,
+                matrix_norms=state["embedding_norms"],
+            )
     progress.completed("retrieve")
 
     definitions = [metadata[index]["definition"] for index, _ in retrieved]
@@ -457,6 +616,10 @@ def search(
     relevances = absolute_relevance([score for _, score in deduped])
 
     progress.active("enrich")
+    emotion_records = [metadata[row_index] for row_index, _ in deduped]
+    if exact_match_raw is not None:
+        emotion_records.extend(exact_match_raw["senses"])
+    preload_emotions(emotion_records, state)
     candidates = [
         build_candidate(metadata[row_index], relevance, state)
         for (row_index, _), relevance in zip(deduped, relevances)
