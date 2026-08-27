@@ -10,7 +10,7 @@ from prompt_toolkit.application.current import create_app_session
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.input.defaults import create_pipe_input
 from prompt_toolkit.keys import Keys
-from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType, MouseModifier
 from prompt_toolkit.output import DummyOutput
 from prompt_toolkit.output.color_depth import ColorDepth
 from prompt_toolkit.styles import Style
@@ -441,6 +441,116 @@ def test_preview_wrapper_moves_a_whole_word_to_the_next_line():
         "woven cotton",
         "fabric",
     ]
+
+
+def test_preview_wrapper_preserves_link_mouse_handlers_when_wrapping():
+    handler = lambda _event: None
+
+    lines = word_wrap_fragments(
+        [("underline", "https://www.onelook.com/a-long-link", handler)],
+        width=15,
+    )
+
+    assert all(
+        len(fragment) == 3 and fragment[2] is handler
+        for line in lines
+        for fragment in line
+    )
+    assert all(sum(len(fragment[1]) for fragment in line) <= 15 for line in lines)
+
+
+def test_onelook_preview_link_opens_only_on_control_click():
+    opened = []
+    fragments = tui.onelook_link_fragments(
+        "closely woven pill",
+        open_url=lambda url: opened.append(url) or True,
+    )
+    handler = fragments[-1][2]
+
+    ordinary_click = MouseEvent(
+        position=Point(x=0, y=0),
+        event_type=MouseEventType.MOUSE_UP,
+        button=MouseButton.LEFT,
+        modifiers=frozenset(),
+    )
+    control_click = MouseEvent(
+        position=Point(x=0, y=0),
+        event_type=MouseEventType.MOUSE_UP,
+        button=MouseButton.LEFT,
+        modifiers=frozenset({MouseModifier.CONTROL}),
+    )
+
+    assert handler(ordinary_click) is NotImplemented
+    assert opened == []
+    assert handler(control_click) is None
+    assert opened == [
+        "https://www.onelook.com/thesaurus/?loc=revfp&s=closely+woven+pill"
+    ]
+
+
+def test_wrapped_preview_routes_control_click_to_onelook_link():
+    opened = []
+    control = tui.WordWrappedControl()
+    control.fragments = tui.onelook_link_fragments(
+        "closely woven pill",
+        open_url=lambda url: opened.append(url) or True,
+    )
+    content = control.create_content(width=32, height=10)
+    link_position = next(
+        (Point(x=offset, y=line_number)
+         for line_number in range(content.line_count)
+         for offset, fragment in _fragment_offsets(content.get_line(line_number))
+         if len(fragment) == 3),
+        None,
+    )
+    assert link_position is not None
+
+    handled = control.mouse_handler(
+        MouseEvent(
+            position=link_position,
+            event_type=MouseEventType.MOUSE_UP,
+            button=MouseButton.LEFT,
+            modifiers=frozenset({MouseModifier.CONTROL}),
+        )
+    )
+
+    assert handled is None
+    assert len(opened) == 1
+
+
+def _fragment_offsets(fragments):
+    offset = 0
+    for fragment in fragments:
+        yield offset, fragment
+        offset += len(fragment[1])
+
+
+def test_selected_result_preview_ends_with_the_current_query_onelook_url():
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    ui._controller.close()
+    ui.query.text = "closely woven pill"
+    ui._rows = [
+        {
+            "headword": "pillow",
+            "pos": "noun",
+            "definition": "a support for the head",
+            "stress": None,
+            "synonyms": [],
+            "examples": [],
+            "label": "neutral",
+            "polarity": "neutral",
+            "relevance": 90,
+        }
+    ]
+    try:
+        ui._render_selection()
+
+        preview = "".join(text for _style, text, *_ in ui.preview_control.fragments)
+        assert preview.endswith(
+            "https://www.onelook.com/thesaurus/?loc=revfp&s=closely+woven+pill"
+        )
+    finally:
+        ui.close()
 
 
 def test_proportional_scrollbar_uses_a_themeable_thumb_without_arrow_chrome():

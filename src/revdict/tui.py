@@ -20,7 +20,7 @@ from prompt_toolkit.layout import Float, FloatContainer, HSplit, VSplit, Window
 from prompt_toolkit.layout.controls import UIContent, UIControl
 from prompt_toolkit.layout.margins import ScrollbarMargin
 from prompt_toolkit.layout.menus import CompletionsMenu
-from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType, MouseModifier
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.output.color_depth import ColorDepth
 from prompt_toolkit.utils import get_cwidth
@@ -31,6 +31,7 @@ from rich.markdown import Markdown
 from revdict.category import CATEGORIES
 from revdict import chat as chat_module
 from revdict import daemon
+from revdict import onelook
 from revdict.progress import STAGES
 from revdict.sort import SORT_MODES
 
@@ -393,6 +394,29 @@ def candidate_preview_fragments(candidate: dict, *, no_color: bool | None = None
     return fragments
 
 
+def onelook_link_fragments(
+    query: str,
+    *,
+    open_url: Callable[[str], bool] = onelook.open_url,
+):
+    """Render a browser link for the exact query shown in the TUI."""
+    url = onelook.build_search_url(query)
+
+    def handle_click(mouse_event: MouseEvent):
+        if (
+            mouse_event.event_type == MouseEventType.MOUSE_UP
+            and MouseModifier.CONTROL in mouse_event.modifiers
+        ):
+            open_url(url)
+            return None
+        return NotImplemented
+
+    return [
+        ("class:muted", "\n\nOneLook: "),
+        ("underline", url, handle_click),
+    ]
+
+
 def markdown_fragments(markdown: str, width: int = 120):
     """Render Markdown through Rich, retaining terminal attributes but no colours."""
     console = Console(
@@ -447,24 +471,42 @@ def markdown_fragments(markdown: str, width: int = 120):
 
 
 def word_wrap_fragments(fragments, width: int):
-    """Wrap formatted text at words while retaining every fragment's style."""
+    """Wrap formatted text while retaining styles and mouse handlers."""
     width = max(1, width)
-    lines: list[list[tuple[str, str]]] = []
-    line: list[tuple[str, str]] = []
-    word: list[tuple[str, str]] = []
+    lines: list[list[tuple]] = []
+    line: list[tuple] = []
+    word: list[tuple] = []
     used = 0
     word_width = 0
     pending_space = False
 
-    def append_fragment(target, style: str, text: str) -> None:
-        if target and target[-1][0] == style:
-            target[-1] = (style, target[-1][1] + text)
+    def append_fragment(target, style: str, text: str, extra: tuple = ()) -> None:
+        if target and target[-1][0] == style and target[-1][2:] == extra:
+            target[-1] = (style, target[-1][1] + text, *extra)
         else:
-            target.append((style, text))
+            target.append((style, text, *extra))
 
     def flush_word() -> None:
         nonlocal line, word, used, word_width, pending_space
         if not word:
+            return
+        if word_width > width and any(len(fragment) >= 3 for fragment in word):
+            if line:
+                lines.append(line)
+                line = []
+                used = 0
+            for style, text, *extra in word:
+                for character in text:
+                    character_width = get_cwidth(character)
+                    if line and used + character_width > width:
+                        lines.append(line)
+                        line = []
+                        used = 0
+                    append_fragment(line, style, character, tuple(extra))
+                    used += character_width
+            word = []
+            word_width = 0
+            pending_space = False
             return
         separator = 1 if pending_space and line else 0
         if line and used + separator + word_width > width:
@@ -481,7 +523,7 @@ def word_wrap_fragments(fragments, width: int):
         word_width = 0
         pending_space = False
 
-    for style, text, *_ in fragments:
+    for style, text, *extra in fragments:
         for character in text:
             if character == "\n":
                 flush_word()
@@ -493,7 +535,7 @@ def word_wrap_fragments(fragments, width: int):
                 flush_word()
                 pending_space = bool(line)
             else:
-                append_fragment(word, style, character)
+                append_fragment(word, style, character, tuple(extra))
                 word_width += get_cwidth(character)
     flush_word()
     if line or not lines:
@@ -631,6 +673,7 @@ class WordWrappedControl(UIControl):
 
     def __init__(self) -> None:
         self.fragments = []
+        self._wrapped_lines = []
         self._cursor_line = 0
 
     def reset_scroll(self) -> None:
@@ -640,16 +683,25 @@ class WordWrappedControl(UIControl):
         self._cursor_line = max(0, line)
 
     def create_content(self, width: int, height: int | None) -> UIContent:
-        lines = word_wrap_fragments(self.fragments, width)
-        self._cursor_line = min(self._cursor_line, len(lines) - 1)
+        self._wrapped_lines = word_wrap_fragments(self.fragments, width)
+        self._cursor_line = min(self._cursor_line, len(self._wrapped_lines) - 1)
         return UIContent(
-            get_line=lambda i: lines[i],
-            line_count=len(lines),
+            get_line=lambda i: self._wrapped_lines[i],
+            line_count=len(self._wrapped_lines),
             cursor_position=Point(x=0, y=self._cursor_line),
             show_cursor=False,
         )
 
     def mouse_handler(self, mouse_event: MouseEvent):
+        if not 0 <= mouse_event.position.y < len(self._wrapped_lines):
+            return NotImplemented
+        used = 0
+        for fragment in self._wrapped_lines[mouse_event.position.y]:
+            used += get_cwidth(fragment[1])
+            if used > mouse_event.position.x:
+                if len(fragment) >= 3:
+                    return fragment[2](mouse_event)
+                break
         return NotImplemented
 
 
@@ -1197,7 +1249,17 @@ class NativeTui:
 
     def _render_selection(self) -> None:
         self.preview_control.reset_scroll()
-        self.preview_control.fragments = candidate_preview_fragments(self._rows[self._selected_index], no_color=self.theme.no_color) if self._rows else []
+        if self._rows:
+            fragments = candidate_preview_fragments(
+                self._rows[self._selected_index],
+                no_color=self.theme.no_color,
+            )
+            query = self.query.text.strip()
+            if query:
+                fragments.extend(onelook_link_fragments(query))
+            self.preview_control.fragments = fragments
+        else:
+            self.preview_control.fragments = []
         if self._show_chat:
             context = self._current_chat_context()
             if context is not None:

@@ -147,6 +147,10 @@ they remain visibly interactive even when colours are disabled.
 | `Esc` | Clear the query; press again on an empty query to quit |
 | `Ctrl-C` | Quit immediately |
 
+The preview ends with a OneLook link for the complete current query. Hold
+Ctrl and click the URL to open the equivalent OneLook reverse-dictionary
+results in your browser.
+
 The native live UI does not require fzf. `revdict --fzf` retains the earlier
 fzf session for users who prefer it; one-shot interactive queries continue to
 use fzf when it is installed.
