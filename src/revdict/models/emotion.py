@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
+import re
 import sqlite3
 import threading
 import uuid
@@ -21,13 +23,85 @@ EMOTION_POLARITY = {
     "sadness": "negative",
     "surprise": "neutral",
     "neutral": "neutral",
+    "unknown": "neutral",
 }
 
 _SENTIMENT_FLAGS = {"positive", "negative", "neutral"}
+_SPECIFIC_EMOTIONS = frozenset(EMOTION_POLARITY) - {"neutral", "unknown"}
 CLASSIFIER_MODEL_NAME = "j-hartmann/emotion-english-distilroberta-base"
 CLASSIFIER_MODEL_REVISION = "0e1cd914e3d46199ed785853e12b57304e04178b"
 SENTIWORDNET_MIN_MARGIN = 0.25
-CLASSIFIER_MIN_CONFIDENCE = 0.45
+CLASSIFIER_MIN_CONFIDENCE = 0.70
+CLASSIFIER_MIN_MARGIN = 0.20
+CLASSIFIER_MAX_ENTROPY = 0.78
+CLASSIFIER_ALIGNED_MIN_CONFIDENCE = 0.55
+CLASSIFIER_ALIGNED_MIN_MARGIN = 0.15
+CLASSIFIER_NEUTRAL_MIN_CONFIDENCE = 0.50
+CLASSIFIER_NEUTRAL_MIN_MARGIN = 0.15
+
+_WORD_RE = re.compile(r"[a-z]+(?:'[a-z]+)?")
+_GENERAL_EMOTION_CUES = frozenset(
+    {
+        "affect",
+        "affective",
+        "emotion",
+        "emotional",
+        "emotions",
+        "feeling",
+        "feelings",
+        "mood",
+        "sentiment",
+    }
+)
+_EMOTION_CUES = {
+    "anger": frozenset(
+        {"anger", "angry", "enraged", "fury", "hostile", "hostility", "irate", "rage", "wrath"}
+    ),
+    "anticipation": frozenset(
+        {"anticipate", "anticipation", "eager", "expect", "expectation", "foresee", "suspense"}
+    ),
+    "disgust": frozenset(
+        {
+            "aversion",
+            "disgust",
+            "disgusted",
+            "dislike",
+            "distaste",
+            "loathing",
+            "nauseated",
+            "repelled",
+            "revulsion",
+        }
+    ),
+    "fear": frozenset(
+        {"afraid", "anxious", "anxiety", "dread", "fear", "fearful", "fright", "scared", "terror"}
+    ),
+    "joy": frozenset(
+        {"delight", "elation", "euphoric", "euphoria", "glad", "happiness", "happy", "joy", "joyful"}
+    ),
+    "sadness": frozenset(
+        {"dejected", "despair", "grief", "melancholy", "mourn", "sad", "sadness", "sorrow", "unhappy"}
+    ),
+    "surprise": frozenset(
+        {"amazed", "astonished", "astonishment", "startled", "surprise", "surprised", "unexpected"}
+    ),
+    "trust": frozenset(
+        {
+            "awe",
+            "believe",
+            "believing",
+            "confidence",
+            "faith",
+            "honest",
+            "honesty",
+            "reliability",
+            "reliable",
+            "respect",
+            "reverence",
+            "trust",
+        }
+    ),
+}
 
 
 def polarity_from_sentiwordnet(scores: dict) -> str:
@@ -42,9 +116,9 @@ def specific_emolex_labels(labels: frozenset[str] | None) -> list[str]:
 
 
 def format_emotion_label(primary: str, labels: list[str]) -> str:
-    if len(labels) <= 1:
-        return primary
-    return f"{primary} ({'/'.join(labels)})"
+    if primary == "mixed" and len(labels) > 1:
+        return f"mixed ({'/'.join(labels)})"
+    return primary
 
 
 def label_from_emolex(labels: frozenset[str]) -> tuple[str, str]:
@@ -188,11 +262,19 @@ class EmotionClassifier:
 
     @staticmethod
     def _prediction(scores: dict[str, float]) -> dict:
-        label, confidence = max(scores.items(), key=lambda item: item[1])
+        ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+        label, confidence = ranked[0]
+        margin = confidence - ranked[1][1] if len(ranked) > 1 else confidence
+        total = sum(max(score, 0.0) for score in scores.values())
+        probabilities = [max(score, 0.0) / total for score in scores.values()] if total else []
+        entropy = -sum(p * math.log(p) for p in probabilities if p > 0.0)
+        normalized_entropy = entropy / math.log(len(probabilities)) if len(probabilities) > 1 else 0.0
         return {
             "label": label,
             "polarity": EMOTION_POLARITY.get(label, "neutral"),
             "confidence": confidence,
+            "margin": margin,
+            "entropy": normalized_entropy,
             "scores": scores,
         }
 
@@ -201,8 +283,27 @@ def _normalize_classifier_result(result) -> dict | None:
         return None
     if isinstance(result, tuple):
         label, polarity = result
-        return {"label": label, "polarity": polarity, "confidence": None, "scores": {}}
-    return result
+        return {
+            "label": label,
+            "polarity": polarity,
+            "confidence": None,
+            "margin": None,
+            "entropy": None,
+            "scores": {},
+        }
+    normalized = dict(result)
+    scores = normalized.get("scores") or {}
+    if "margin" not in normalized:
+        ranked = sorted((float(score) for score in scores.values()), reverse=True)
+        normalized["margin"] = ranked[0] - ranked[1] if len(ranked) > 1 else None
+    if "entropy" not in normalized:
+        total = sum(max(float(score), 0.0) for score in scores.values())
+        probabilities = [max(float(score), 0.0) / total for score in scores.values()] if total else []
+        entropy = -sum(p * math.log(p) for p in probabilities if p > 0.0)
+        normalized["entropy"] = (
+            entropy / math.log(len(probabilities)) if len(probabilities) > 1 else None
+        )
+    return normalized
 
 
 def _fallback_polarity(record: dict, emolex_labels: frozenset[str] | None) -> tuple[str, str]:
@@ -217,15 +318,172 @@ def _fallback_polarity(record: dict, emolex_labels: frozenset[str] | None) -> tu
     return "neutral", "none"
 
 
-def tag_emotion(record: dict, classifier_factory) -> dict:
-    """Resolve a coherent primary badge while preserving all lexicon labels.
+def _definition_has_emotion_cue(definition: str, labels: list[str] | None = None) -> bool:
+    words = frozenset(_WORD_RE.findall(definition.casefold()))
+    if words & _GENERAL_EMOTION_CUES:
+        return True
+    relevant = labels or list(_SPECIFIC_EMOTIONS)
+    return any(words & _EMOTION_CUES.get(label, frozenset()) for label in relevant)
 
-    A single NRC category remains authoritative and cheap. Multiple NRC
-    categories are retained and disambiguated by the sense definition; absent
-    categories also use that sense-level classifier. Polarity follows the
-    chosen category, preventing badges such as ``fear · positive``.
+
+def _definition_emotion_labels(definition: str) -> list[str]:
+    words = frozenset(_WORD_RE.findall(definition.casefold()))
+    return sorted(label for label, cues in _EMOTION_CUES.items() if words & cues)
+
+
+def _classifier_passes(
+    result: dict,
+    *,
+    min_confidence: float,
+    min_margin: float,
+    max_entropy: float = CLASSIFIER_MAX_ENTROPY,
+) -> bool:
+    confidence = result.get("confidence")
+    if confidence is None:
+        # Compatibility for deterministic/test classifiers that return a
+        # category-polarity tuple without a probability distribution.
+        return True
+    if float(confidence) < min_confidence:
+        return False
+    margin = result.get("margin")
+    if margin is not None and float(margin) < min_margin:
+        return False
+    entropy = result.get("entropy")
+    return entropy is None or float(entropy) <= max_entropy
+
+
+def _sentiwordnet_evidence(record: dict) -> tuple[str, bool]:
+    scores = record.get("sentiwordnet")
+    if record.get("source") != "wordnet" or scores is None:
+        return "neutral", False
+    return polarity_from_sentiwordnet(scores), True
+
+
+def _lexicon_polarity(labels: frozenset[str] | None, specific: list[str]) -> str:
+    flagged = _polarity_from_emolex_flags(labels)
+    if flagged != "neutral":
+        return flagged
+    polarities = {EMOTION_POLARITY[label] for label in specific if label in EMOTION_POLARITY}
+    return polarities.pop() if len(polarities) == 1 else "neutral"
+
+
+def _classifier_decision(
+    record: dict,
+    result: dict | None,
+    specific: list[str],
+    senti_polarity: str,
+    has_sentiwordnet: bool,
+) -> tuple[bool, str]:
+    if result is None:
+        return False, "unavailable"
+    label = str(result.get("label", "")).casefold()
+    if label not in EMOTION_POLARITY:
+        return False, "unsupported-label"
+    definition_labels = _definition_emotion_labels(record["definition"])
+
+    if label == "neutral":
+        accepted = _classifier_passes(
+            result,
+            min_confidence=CLASSIFIER_NEUTRAL_MIN_CONFIDENCE,
+            min_margin=CLASSIFIER_NEUTRAL_MIN_MARGIN,
+            max_entropy=0.85,
+        )
+        if accepted and (
+            definition_labels
+            or (specific and _definition_has_emotion_cue(record["definition"], specific))
+        ):
+            return False, "lexicon-cue-preferred"
+        return accepted, "neutral-abstention" if accepted else "weak-neutral"
+
+    aligned = label in specific
+    accepted_quality = _classifier_passes(
+        result,
+        min_confidence=(
+            CLASSIFIER_ALIGNED_MIN_CONFIDENCE if aligned else CLASSIFIER_MIN_CONFIDENCE
+        ),
+        min_margin=CLASSIFIER_ALIGNED_MIN_MARGIN if aligned else CLASSIFIER_MIN_MARGIN,
+        max_entropy=0.85 if aligned else CLASSIFIER_MAX_ENTROPY,
+    )
+    if not accepted_quality:
+        return False, "weak-prediction"
+
+    classifier_polarity = EMOTION_POLARITY[label]
+    canonical_headword = str(record.get("headword", "")).strip().casefold()
+    canonical_prior = canonical_headword if canonical_headword in specific else None
+
+    unsupported_full_taxonomy_cues = [
+        cue
+        for cue in definition_labels
+        if cue in {"trust", "anticipation"} and cue != label
+    ]
+    if unsupported_full_taxonomy_cues and any(
+        not has_sentiwordnet
+        or senti_polarity == "neutral"
+        or EMOTION_POLARITY[cue] == senti_polarity
+        for cue in unsupported_full_taxonomy_cues
+    ):
+        return False, "full-taxonomy-cue-preferred"
+
+    if aligned:
+        # For words that are themselves canonical emotion names, prefer that
+        # exact category over a sibling category with the same polarity. This
+        # prevents senses of "disgust" from becoming "anger" merely because
+        # the seven-label classifier conflates nearby negative emotions.
+        if (
+            canonical_prior is not None
+            and label != canonical_prior
+            and EMOTION_POLARITY[canonical_prior] == classifier_polarity
+        ):
+            return False, "canonical-prior-preferred"
+        return True, "classifier-lexicon-agreement"
+
+    if specific:
+        # A conflicting sense prediction may override the word-level prior
+        # only when sense-specific SentiWordNet independently supports its
+        # polarity. This retains legitimate polysemy such as fear=reverence
+        # while rejecting unsupported category swaps.
+        if (
+            has_sentiwordnet
+            and senti_polarity != "neutral"
+            and senti_polarity == classifier_polarity
+        ):
+            return True, "classifier-sense-override"
+        return False, "lexicon-conflict"
+
+    if has_sentiwordnet:
+        if senti_polarity != "neutral" and senti_polarity == classifier_polarity:
+            return True, "classifier-sentiwordnet-agreement"
+        return False, "objective-sense"
+
+    # Wiktionary senses have no SentiWordNet evidence. Require both a very
+    # strong distribution and explicit affective language in the definition;
+    # confidence alone is unsafe under the dictionary-definition domain shift.
+    strong = _classifier_passes(
+        result, min_confidence=0.85, min_margin=0.40, max_entropy=0.60
+    )
+    if strong and _definition_has_emotion_cue(record["definition"], [label]):
+        return True, "classifier-definition-cue"
+    return False, "unsupported-domain-prediction"
+
+
+def _resolved_labels(label: str, specific: list[str]) -> list[str]:
+    if label == "mixed":
+        return specific
+    if label in _SPECIFIC_EMOTIONS:
+        return [label]
+    return []
+
+
+def tag_emotion(record: dict, classifier_factory) -> dict:
+    """Resolve one coherent sense badge from independent evidence.
+
+    NRC EmoLex is a word-level prior, never a second set of display labels.
+    The classifier must pass confidence, separation, entropy, and independent
+    sense-evidence gates. Unsupported conflicts abstain instead of being
+    forced into a plausible-looking but contradictory category.
     """
-    emolex_labels = record.get("emolex")
+    raw_emolex = record.get("emolex")
+    emolex_labels = frozenset(raw_emolex) if raw_emolex else None
     specific = specific_emolex_labels(emolex_labels)
     classifier_result = None
     if classifier_factory is not None:
@@ -233,48 +491,121 @@ def tag_emotion(record: dict, classifier_factory) -> dict:
             classifier_factory().classify(record["definition"])
         )
 
-    classifier_is_confident = classifier_result is not None and (
-        classifier_result.get("confidence") is None
-        or classifier_result["confidence"] >= CLASSIFIER_MIN_CONFIDENCE
+    senti_polarity, has_sentiwordnet = _sentiwordnet_evidence(record)
+    classifier_accepted, classifier_reason = _classifier_decision(
+        record, classifier_result, specific, senti_polarity, has_sentiwordnet
     )
-    if classifier_is_confident:
-        label = classifier_result["label"]
+
+    if classifier_accepted:
+        label = str(classifier_result["label"]).casefold()
         category_source = "classifier"
         confidence = classifier_result.get("confidence")
-    elif len(specific) == 1:
-        label = specific[0]
-        category_source = "emolex"
-        confidence = None
-    elif specific:
-        label = "mixed"
-        category_source = "emolex"
-        confidence = None
     else:
-        label = None
-        category_source = None
         confidence = None
+        category_source = None
+        canonical_headword = str(record.get("headword", "")).strip().casefold()
+        cue_labels = [canonical_headword] if canonical_headword in specific else specific
+        has_definition_cue = _definition_has_emotion_cue(record["definition"], cue_labels)
+        definition_labels = _definition_emotion_labels(record["definition"])
+        lexicon_polarity = _lexicon_polarity(emolex_labels, specific)
 
-    if label in EMOTION_POLARITY:
+        supported_definition_labels = [
+            definition_label
+            for definition_label in definition_labels
+            if (
+                definition_label in specific
+                or not specific
+                or (
+                    has_sentiwordnet
+                    and senti_polarity != "neutral"
+                    and EMOTION_POLARITY[definition_label] == senti_polarity
+                )
+            )
+            and not (
+                has_sentiwordnet
+                and senti_polarity != "neutral"
+                and EMOTION_POLARITY[definition_label] != senti_polarity
+            )
+        ]
+
+        if len(supported_definition_labels) == 1:
+            label = supported_definition_labels[0]
+            category_source = "definition-cue"
+        elif has_sentiwordnet and senti_polarity == "neutral" and not has_definition_cue:
+            label = "neutral"
+            category_source = "abstained"
+            classifier_reason = "objective-sense"
+        elif len(specific) == 1 and (
+            has_definition_cue
+            or (
+                has_sentiwordnet
+                and senti_polarity != "neutral"
+                and senti_polarity == lexicon_polarity
+            )
+        ):
+            label = specific[0]
+            category_source = "emolex-prior"
+        elif len(specific) > 1 and has_definition_cue:
+            label = canonical_headword if canonical_headword in specific else "mixed"
+            category_source = "emolex-prior"
+        elif specific:
+            label = "neutral" if senti_polarity == "neutral" else "unknown"
+            category_source = "abstained"
+        elif has_sentiwordnet and senti_polarity != "neutral":
+            label = "unknown"
+            category_source = "abstained"
+        else:
+            label = "neutral"
+            category_source = "abstained" if classifier_result is not None else None
+
+    if label in _SPECIFIC_EMOTIONS or label in {"neutral", "unknown"}:
         polarity = EMOTION_POLARITY[label]
         polarity_source = category_source
-    elif classifier_result is not None:
-        polarity = classifier_result["polarity"]
-        polarity_source = "classifier"
+    elif label == "mixed":
+        polarity = _lexicon_polarity(emolex_labels, specific)
+        polarity_source = "emolex-prior"
     else:
         polarity, polarity_source = _fallback_polarity(record, emolex_labels)
 
-    if label is None:
-        label = polarity
-    preserved_labels = specific or (
-        [label] if label not in _SENTIMENT_FLAGS and label != "mixed" else []
+    resolved_labels = _resolved_labels(label, specific)
+    status = (
+        "resolved"
+        if label in _SPECIFIC_EMOTIONS
+        else "ambiguous"
+        if label == "mixed"
+        else "abstained"
     )
+    classifier_evidence = None
+    if classifier_result is not None:
+        classifier_evidence = {
+            "label": classifier_result.get("label"),
+            "confidence": classifier_result.get("confidence"),
+            "margin": classifier_result.get("margin"),
+            "entropy": classifier_result.get("entropy"),
+            "accepted": classifier_accepted,
+            "reason": classifier_reason,
+        }
     return {
         "label": label,
-        "labels": preserved_labels,
+        "labels": resolved_labels,
         "polarity": polarity,
         "category_source": category_source,
         "polarity_source": polarity_source,
-        "emotion_source": category_source or polarity_source,
+        "emotion_source": category_source or "none",
         "confidence": confidence,
         "emolex_labels": sorted(emolex_labels or ()),
+        "status": status,
+        "evidence": {
+            "classifier": classifier_evidence,
+            "emolex": {
+                "specific_labels": specific,
+                "sentiment": _polarity_from_emolex_flags(emolex_labels),
+            }
+            if emolex_labels
+            else None,
+            "sentiwordnet": {
+                "polarity": senti_polarity,
+                "available": has_sentiwordnet,
+            },
+        },
     }

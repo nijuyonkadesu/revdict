@@ -383,6 +383,9 @@ def build_candidate(record: dict, relevance: int, state: dict) -> dict:
         "category_source": emotion["category_source"],
         "polarity_source": emotion["polarity_source"],
         "emotion_confidence": emotion["confidence"],
+        "emotion_status": emotion["status"],
+        "emotion_evidence": emotion["evidence"],
+        "emolex_labels": emotion["emolex_labels"],
         "relevance": relevance,
         "stress": stress.mark(record["headword"], record["pos"], preserve_color=True),
         "synonyms": record.get("synonyms"),
@@ -405,6 +408,7 @@ def tag_exact_match_senses(exact_match_raw: dict | None, classifier_factory) -> 
     tagged_senses = []
     for sense in exact_match_raw["senses"]:
         record = {
+            "headword": exact_match_raw["headword"],
             "source": sense.get("source"),
             "definition": sense.get("definition"),
             "sentiwordnet": sense.get("sentiwordnet"),
@@ -426,6 +430,9 @@ def tag_exact_match_senses(exact_match_raw: dict | None, classifier_factory) -> 
                 "category_source": emotion["category_source"],
                 "polarity_source": emotion["polarity_source"],
                 "emotion_confidence": emotion["confidence"],
+                "emotion_status": emotion["status"],
+                "emotion_evidence": emotion["evidence"],
+                "emolex_labels": emotion["emolex_labels"],
                 "stress": stress.mark(exact_match_raw["headword"], sense["pos"], preserve_color=True),
             }
         )

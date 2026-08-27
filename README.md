@@ -69,12 +69,15 @@ that share a gloss while retaining record-level ranking.
 ### Emotion tagging
 
 Emotion badges use a revision-pinned, sense-definition classifier with NRC
-EmoLex and SentiWordNet retained as separate evidence. All NRC categories are
-preserved; multi-emotion words are no longer reduced by alphabetically picking
-one label. The displayed category and polarity are resolved together, so a
-contradictory badge such as `fear · positive` is not emitted. Weak classifier
-predictions can fall back to an unambiguous lexicon category, and weak
-SentiWordNet margins are treated as neutral.
+EmoLex and SentiWordNet retained as separate evidence. NRC is treated as a
+word-level prior rather than displayed as competing sense labels. Classifier
+predictions must pass confidence, top-label margin, entropy, definition-domain,
+and independent-evidence checks; otherwise the badge honestly becomes
+`neutral`, `mixed`, or `unknown`. This prevents emotionally irrelevant senses
+from receiving confident-looking tags and prevents contradictory category and
+polarity combinations. All eight NRC categories remain available, including
+`trust` and `anticipation`, while multi-emotion priors are not reduced by
+alphabetically picking one label.
 
 Classifier predictions are batched and cached by model revision plus exact
 definition in `~/.cache/rev_dictionary/emotion-predictions-v1.sqlite3`. A

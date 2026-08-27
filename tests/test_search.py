@@ -211,19 +211,24 @@ def test_tag_exact_match_senses_tags_each_sense_and_preserves_display_fields():
     assert result["headword"] == "happy"
     first, second = result["senses"]
 
-    # The sense-level classifier is authoritative while the raw EmoLex labels
-    # remain preserved as evidence in emotion_labels.
-    assert first["label"] == "anger"
-    assert first["polarity"] == "negative"
+    # A conflicting classifier cannot override agreeing lexical and
+    # sense-specific polarity evidence. Raw NRC data remains diagnostic while
+    # emotion_labels contains only the resolved display category.
+    assert first["label"] == "joy"
+    assert first["polarity"] == "positive"
     assert first["emotion_labels"] == ["joy"]
+    assert first["emolex_labels"] == ["joy"]
+    assert first["emotion_evidence"]["classifier"]["accepted"] is False
     assert first["definition"] == "feeling great pleasure"
     assert first["examples"] == ["a happy child"]
     assert first["source"] == "wordnet"
     assert first["synonyms"] == ["glad", "content"]
 
-    # The second sense is classified independently.
-    assert second["label"] == "anger"
-    assert second["polarity"] == "negative"
+    # The unrelated second sense has no independent emotion evidence, so the
+    # domain-mismatched classifier abstains rather than forcing anger.
+    assert second["label"] == "neutral"
+    assert second["polarity"] == "neutral"
+    assert second["emotion_status"] == "abstained"
     assert second["synonyms"] is None
     assert classifier.calls == 2
 
@@ -273,7 +278,11 @@ def test_cold_state_loading_reports_its_actual_suboperations(monkeypatch):
     monkeypatch.setattr(
         search_mod.np,
         "load",
-        lambda _path, **_kwargs: np.array([[1.0]], dtype="float32"),
+        lambda path, **_kwargs: (
+            np.array([0], dtype="int32")
+            if str(path).endswith("record_embeddings.npy")
+            else np.array([[1.0]], dtype="float32")
+        ),
     )
     monkeypatch.setattr(
         search_mod.dictionary,
@@ -281,6 +290,7 @@ def test_cold_state_loading_reports_its_actual_suboperations(monkeypatch):
         lambda _path: [{"headword": "x", "definition": "x"}],
     )
     monkeypatch.setattr(search_mod.dictionary, "load_word_index", lambda _path: {"x": [0]})
+    monkeypatch.setattr(search_mod, "validate_loaded_index", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(search_mod, "Embedder", lambda: object())
     monkeypatch.setattr(search_mod, "Reranker", lambda: object())
     monkeypatch.setattr(search_mod, "_load_literary_frequency", lambda _path=None: {})

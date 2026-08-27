@@ -122,7 +122,8 @@ def test_run_structural_builds_full_candidate_records_for_every_match():
             "label", "polarity", "relevance", "stress", "synonyms",
             "tags", "phonetics", "emotion_labels", "emotion_source",
             "category_source", "polarity_source", "emotion_confidence",
-            "emotion_display",
+            "emotion_display", "emotion_status", "emotion_evidence",
+            "emolex_labels",
         }
 
 
