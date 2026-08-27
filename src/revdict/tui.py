@@ -24,7 +24,7 @@ from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType,
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.output.color_depth import ColorDepth
 from prompt_toolkit.utils import get_cwidth
-from prompt_toolkit.widgets import Button, Label, RadioList
+from prompt_toolkit.widgets import Button, Dialog, Label, RadioList
 from rich.console import Console
 from rich.markdown import Markdown
 
@@ -92,6 +92,9 @@ class TerminalTheme:
                 "stress.secondary": "underline", "stress.reduced": "dim",
                 "scrollbar.thumb": "", "scrollbar.track": "dim",
                 "button.key": "bold", "button.label": "", "button.label.focused": "bold",
+                "chat.user.label": "bold", "chat.assistant.label": "bold",
+                "chat.user.bubble": "reverse", "chat.assistant.bubble": "",
+                "chat.error": "bold", "dialog.body": "", "dialog": "",
             }
         return {
             "query": "bold", "muted": "dim", "border": "bold", "section.title": "bold",
@@ -101,6 +104,9 @@ class TerminalTheme:
             "stress.secondary": "underline", "stress.reduced": "dim",
             "scrollbar.thumb": "", "scrollbar.track": "dim",
             "button.key": "bold", "button.label": "", "button.label.focused": "ansimagenta bold",
+            "chat.user.label": f"ansi{self.accent} bold", "chat.assistant.label": "bold",
+            "chat.user.bubble": f"bg:ansi{self.accent} ansiblack", "chat.assistant.bubble": "reverse",
+            "chat.error": "ansired bold", "dialog.body": "reverse", "dialog": "",
         }
 
 
@@ -252,10 +258,19 @@ class ChatSessionKey:
 
 
 @dataclass
+class ChatTurn:
+    role: str
+    text: str
+    request_text: str | None = None
+    pending: bool = False
+    error: str | None = None
+
+
+@dataclass
 class ChatSession:
     bootstrap: str
     history: list[tuple[str, str]]
-    transcript: str = ""
+    turns: list[ChatTurn] = field(default_factory=list)
     streamed_answer: str = ""
     draft: str = ""
 
@@ -263,8 +278,15 @@ class ChatSession:
 class ChatSessionRequestError(RuntimeError):
     """Associates an asynchronous provider failure with its initiating session."""
 
-    def __init__(self, key: ChatSessionKey, error: Exception) -> None:
+    def __init__(
+        self,
+        key: ChatSessionKey,
+        provider: chat_module.ProviderSettings,
+        error: Exception,
+    ) -> None:
         self.key = key
+        self.provider = provider
+        self.original_error = error
         super().__init__(str(error))
 
 
@@ -273,6 +295,8 @@ ACTIONS = (
     UiAction("F3", "Toggle preview", "Preview"), UiAction("F4", "Toggle writing chat", "Chat"),
     UiAction("F5", "Open or save chat provider settings", "Setup"),
     UiAction("Enter (chat)", "Send chat message"), UiAction("Ctrl-R", "Cycle sort order"),
+    UiAction("Ctrl-Z (chat)", "Undo the latest chat turn"),
+    UiAction("Ctrl-Y (chat)", "Retry the latest chat response"),
     UiAction("Ctrl-N / Ctrl-P", "Select next / previous result"), UiAction("Enter (query)", "Copy selected headword"),
     UiAction("Esc", "Clear query, then quit"), UiAction("Ctrl-C", "Quit"),
 )
@@ -543,6 +567,44 @@ def word_wrap_fragments(fragments, width: int):
     return lines
 
 
+def chat_transcript_lines(turns: list[ChatTurn], width: int) -> list[list[tuple]]:
+    """Render compact left/right chat bubbles without losing Markdown styling."""
+    width = max(12, width)
+    maximum_content_width = max(8, min(72, int(width * 0.68)) - 2)
+    rendered: list[list[tuple]] = []
+
+    for turn in turns:
+        is_user = turn.role == "user"
+        label = "You" if is_user else "Assistant"
+        bubble_style = "class:chat.user.bubble" if is_user else "class:chat.assistant.bubble"
+        label_style = "class:chat.user.label" if is_user else "class:chat.assistant.label"
+        content = turn.text or ("Thinking…" if turn.pending else "No response received.")
+        content_fragments = markdown_fragments(content, maximum_content_width)
+        content_lines = word_wrap_fragments(content_fragments, maximum_content_width)
+        content_width = max(
+            1,
+            *(sum(get_cwidth(fragment[1]) for fragment in line) for line in content_lines),
+        )
+        bubble_width = min(maximum_content_width, content_width)
+        indent = max(0, width - bubble_width - 2) if is_user else 0
+        label_indent = max(0, width - get_cwidth(label)) if is_user else 0
+        rendered.append([("", " " * label_indent), (label_style, label)])
+        for line in content_lines:
+            used = sum(get_cwidth(fragment[1]) for fragment in line)
+            bubble_line: list[tuple] = [("", " " * indent), (bubble_style, " ")]
+            bubble_line.extend(
+                (f"{bubble_style} {style}".strip(), text, *extra)
+                for style, text, *extra in line
+            )
+            bubble_line.append((bubble_style, " " * (bubble_width - used + 1)))
+            rendered.append(bubble_line)
+        if turn.error:
+            rendered.append([("class:chat.error", f"Request failed: {turn.error}")])
+        rendered.append([])
+
+    return rendered or [[("class:muted", "Start a conversation about the selected word.")]]
+
+
 def format_progress_line(states: dict[str, str], details: dict[str, str]) -> str:
     """Summarize real daemon events without a timer-driven redraw loop."""
     finished = sum(states.get(stage.id) in {"completed", "skipped"} for stage in STAGES)
@@ -702,6 +764,34 @@ class WordWrappedControl(UIControl):
                 if len(fragment) >= 3:
                     return fragment[2](mouse_event)
                 break
+        return NotImplemented
+
+
+class ChatTranscriptControl(UIControl):
+    """A scrollable view of structured chat turns rendered as aligned bubbles."""
+
+    def __init__(self, turns: Callable[[], list[ChatTurn]]) -> None:
+        self._turns = turns
+        self._lines: list[list[tuple]] = []
+        self._cursor_line = 0
+
+    def reset_scroll(self) -> None:
+        self._cursor_line = 0
+
+    def set_cursor_line(self, line: int) -> None:
+        self._cursor_line = max(0, line)
+
+    def create_content(self, width: int, height: int | None) -> UIContent:
+        self._lines = chat_transcript_lines(self._turns(), width)
+        self._cursor_line = min(self._cursor_line, len(self._lines) - 1)
+        return UIContent(
+            get_line=lambda i: self._lines[i],
+            line_count=len(self._lines),
+            cursor_position=Point(x=0, y=self._cursor_line),
+            show_cursor=False,
+        )
+
+    def mouse_handler(self, mouse_event: MouseEvent):
         return NotImplemented
 
 
@@ -878,9 +968,11 @@ class NativeTui:
         self._chat_client = chat_module.ChatClient()
         self._chat_loading_settings = False
         self._chat_form_provider = self._chat_settings.active_provider
-        self._chat_transcript_text = ""
         self._chat_spinner_active = False
         self._chat_spinner_frame = 0
+        self._chat_error_message: str | None = None
+        self._chat_error_session_key: ChatSessionKey | None = None
+        self._chat_error_provider: chat_module.ProviderSettings | None = None
         self._chat_chunk_lock = threading.Lock()
         self._chat_pending_chunks: list[tuple[ChatSessionKey, str]] = []
         self._chat_chunk_flush_scheduled = False
@@ -894,7 +986,7 @@ class NativeTui:
         self.sounds_field = TextArea(prompt="Sounds like: ", multiline=False, height=1)
         self.meter_field = TextArea(prompt="Meter: ", multiline=False, height=1)
         self.chat_header = Label(text="")
-        self.chat_transcript_control = MarkdownControl()
+        self.chat_transcript_control = ChatTranscriptControl(self._active_chat_turns)
         self.chat_transcript = MouseScrollableWindow(
             content=self.chat_transcript_control,
             wrap_lines=False,
@@ -903,6 +995,13 @@ class NativeTui:
         )
         self.chat_input = TextArea(prompt="You: ", multiline=True, height=Dimension(min=1, preferred=3, max=6), wrap_lines=True)
         self.chat_input_label = Label(text="Message · Enter sends", style="class:muted")
+        self.chat_undo_button = FooterButton("Ctrl-Z", "Undo", self._undo_chat)
+        self.chat_retry_button = FooterButton("Ctrl-Y", "Retry", self._retry_chat)
+        self.chat_actions = VSplit(
+            [self.chat_undo_button, self.chat_retry_button],
+            padding=1,
+            height=1,
+        )
         self.chat_provider_field = TrackingRadioList(
             tuple((provider, provider.title()) for provider in chat_module.SUPPORTED_PROVIDERS),
             default=self._chat_settings.active_provider,
@@ -926,6 +1025,15 @@ class NativeTui:
         self.progress = Label(text="", dont_extend_height=True, wrap_lines=False)
         self.progress_container = ConditionalContainer(self.progress, Condition(lambda: bool(self.progress.text)))
         self.chat_progress = Label(text="", style="class:muted", dont_extend_height=True, wrap_lines=False)
+        self.chat_error_text = Label(text="", wrap_lines=True)
+        self.chat_error_retry_button = Button(text="Retry", handler=self._retry_from_error_popup)
+        self.chat_error_dismiss_button = Button(text="Dismiss", handler=self._dismiss_chat_error)
+        self.chat_error_dialog = Dialog(
+            title="Chat request failed",
+            body=self.chat_error_text,
+            buttons=[self.chat_error_retry_button, self.chat_error_dismiss_button],
+            width=Dimension(min=42, preferred=64, max=76),
+        )
         self.function_key_buttons = tuple(
             FooterButton(
                 action.key,
@@ -977,6 +1085,7 @@ class NativeTui:
             HSplit([
                 self.chat_header,
                 self.chat_transcript,
+                self.chat_actions,
                 self.chat_input_label,
                 self.chat_input,
             ], padding=1),
@@ -1022,6 +1131,11 @@ class NativeTui:
         def toggle_chat(event): self._invoke_function_key("F4")
         @bindings.add("f5")
         def toggle_chat_settings(event): self._invoke_function_key("F5")
+        chat_mode = Condition(lambda: self._show_chat and not self._show_chat_settings)
+        @bindings.add("c-z", filter=chat_mode)
+        def undo_chat(event): self._undo_chat()
+        @bindings.add("c-y", filter=chat_mode)
+        def retry_chat(event): self._retry_chat()
         @bindings.add("tab", filter=Condition(lambda: self._show_chat_settings))
         def next_chat_setting(event): self._focus_chat_setting(1)
         @bindings.add("s-tab", filter=Condition(lambda: self._show_chat_settings))
@@ -1063,6 +1177,13 @@ class NativeTui:
                                 max_height=16, scroll_offset=1,
                                 extra_filter=has_focus(self.query.control) & has_completions,
                             ),
+                        ),
+                        Float(
+                            content=ConditionalContainer(
+                                self.chat_error_dialog,
+                                Condition(lambda: self._chat_error_message is not None),
+                            ),
+                            z_index=20,
                         ),
                     ],
                 ),
@@ -1157,7 +1278,9 @@ class NativeTui:
             self.application.exit()
 
     def _clear_or_exit(self) -> None:
-        if self._navigation_mode() != "results":
+        if self._chat_error_message is not None:
+            self._dismiss_chat_error()
+        elif self._navigation_mode() != "results":
             self._set_navigation_mode("results")
             self.application.invalidate()
         elif self.query.control.buffer.complete_state is not None:
@@ -1284,6 +1407,11 @@ class NativeTui:
         assert self._active_chat_session_key is not None
         return self._chat_sessions[self._active_chat_session_key]
 
+    def _active_chat_turns(self) -> list[ChatTurn]:
+        if self._active_chat_session_key is None:
+            return []
+        return self._active_chat_session.turns
+
     def _activate_chat_session(self, context: chat_module.LexicalContext) -> ChatSessionKey:
         key = ChatSessionKey.from_context(context)
         previous_key = self._active_chat_session_key
@@ -1296,7 +1424,6 @@ class NativeTui:
                 draft=chat_module.default_writing_prompt(context),
             )
         self._active_chat_session_key = key
-        self._chat_transcript_text = self._active_chat_session.transcript
         self._render_chat_transcript()
         self.chat_input.text = self._active_chat_session.draft
         self.chat_input.buffer.cursor_position = len(self.chat_input.text)
@@ -1305,7 +1432,6 @@ class NativeTui:
     def _sync_active_chat_transcript(self) -> None:
         if self._active_chat_session_key is None:
             return
-        self._chat_transcript_text = self._active_chat_session.transcript
         self._render_chat_transcript()
 
     def _update_chat_header(self) -> None:
@@ -1441,6 +1567,120 @@ class NativeTui:
         index = next((number for number, field in enumerate(fields) if field.window == current), 0)
         self.application.layout.focus(fields[(index + step) % len(fields)])
 
+    def _show_chat_error(
+        self,
+        key: ChatSessionKey | None,
+        provider: chat_module.ProviderSettings,
+        error: Exception,
+    ) -> None:
+        detail = str(error)
+        if provider.provider == "gemini" and "HTTP 503" in detail:
+            message = (
+                "Gemini is temporarily unavailable (HTTP 503).\n\n"
+                "Your message is still in this conversation. Retry it now or dismiss this message."
+            )
+        else:
+            message = (
+                f"{provider.provider.title()} could not complete the request.\n\n{detail}\n\n"
+                "Your message is still in this conversation and can be retried."
+            )
+        self._chat_error_message = message
+        self._chat_error_session_key = key
+        self._chat_error_provider = provider
+        self.chat_error_text.text = message
+        self.application.layout.focus(self.chat_error_retry_button)
+
+    def _dismiss_chat_error(self) -> None:
+        self._chat_error_message = None
+        self._chat_error_session_key = None
+        self._chat_error_provider = None
+        self.chat_error_text.text = ""
+        self.application.layout.focus(self.chat_input if self._show_chat else self.query)
+        self.application.invalidate()
+
+    def _retry_from_error_popup(self) -> None:
+        key = self._chat_error_session_key
+        provider = self._chat_error_provider
+        self._dismiss_chat_error()
+        self._retry_chat(key=key, provider=provider)
+
+    @staticmethod
+    def _history_before_last_exchange(session: ChatSession) -> list[tuple[str, str]]:
+        history = list(session.history)
+        if history and history[-1][0] == "assistant":
+            history.pop()
+        if history and history[-1][0] == "user":
+            history.pop()
+        return history
+
+    @staticmethod
+    def _last_user_turn_index(session: ChatSession) -> int | None:
+        return next(
+            (index for index in range(len(session.turns) - 1, -1, -1)
+             if session.turns[index].role == "user"),
+            None,
+        )
+
+    def _undo_chat(self) -> None:
+        if self._chat_controller.busy:
+            self.status.text = "Wait for the current response before undoing it."
+            self.application.invalidate()
+            return
+        if self._active_chat_session_key is None:
+            self.status.text = "There is no chat turn to undo."
+            self.application.invalidate()
+            return
+        session = self._active_chat_session
+        user_index = self._last_user_turn_index(session)
+        if user_index is None:
+            self.status.text = "There is no chat turn to undo."
+            self.application.invalidate()
+            return
+        user_turn = session.turns[user_index]
+        session.history = self._history_before_last_exchange(session)
+        session.turns = session.turns[:user_index]
+        session.streamed_answer = ""
+        session.draft = user_turn.text
+        self.chat_input.text = user_turn.text
+        self.chat_input.buffer.cursor_position = len(user_turn.text)
+        self._render_chat_transcript()
+        self.status.text = "Last chat turn restored to the message box."
+        self.application.invalidate()
+
+    def _retry_chat(
+        self,
+        key: ChatSessionKey | None = None,
+        provider: chat_module.ProviderSettings | None = None,
+    ) -> None:
+        if self._chat_controller.busy:
+            self.status.text = "Chat is still responding; wait before retrying."
+            self.application.invalidate()
+            return
+        key = self._active_chat_session_key if key is None else key
+        if key is None:
+            self.status.text = "There is no chat turn to retry."
+            self.application.invalidate()
+            return
+        session = self._chat_sessions[key]
+        user_index = self._last_user_turn_index(session)
+        if user_index is None:
+            self.status.text = "There is no chat turn to retry."
+            self.application.invalidate()
+            return
+        user_turn = session.turns[user_index]
+        request_message = user_turn.request_text or user_turn.text
+        prior_history = self._history_before_last_exchange(session)
+        request = (key, provider or self._active_chat_provider(), list(prior_history), request_message)
+        if not self._chat_controller.send(request):
+            self.status.text = "Chat is still responding; wait before retrying."
+            self.application.invalidate()
+            return
+        session.history = [*prior_history, ("user", request_message)]
+        session.turns = session.turns[:user_index + 1]
+        self._begin_chat_response(key)
+        self.status.text = "Retrying the last chat response…"
+        self.application.invalidate()
+
     def _send_chat(self) -> None:
         context = self._current_chat_context()
         message = self.chat_input.text.strip()
@@ -1460,7 +1700,7 @@ class NativeTui:
                 self.application.invalidate()
                 return
             session.history.append(("user", request_message))
-            self._append_chat_turn("You", message, key)
+            self._append_chat_turn("You", message, key, request_text=request_message)
             self._begin_chat_response(key)
             session.draft = ""
             self.chat_input.text = ""
@@ -1472,7 +1712,7 @@ class NativeTui:
         try:
             answer = self._chat_client.stream(provider, history, message, lambda chunk: self._queue_chat_chunk(key, chunk))
         except Exception as error:
-            raise ChatSessionRequestError(key, error) from error
+            raise ChatSessionRequestError(key, provider, error) from error
         return key, answer
 
     def _receive_chat_answer(self, result: tuple[ChatSessionKey, str]) -> None:
@@ -1480,10 +1720,14 @@ class NativeTui:
         self._flush_chat_chunks()
         session = self._chat_sessions[key]
         session.history.append(("assistant", answer))
-        if session.streamed_answer:
-            session.transcript += "\n\n"
-        else:
-            session.transcript += f"{answer}\n\n"
+        assistant_turn = next(
+            (turn for turn in reversed(session.turns) if turn.role == "assistant"),
+            None,
+        )
+        if assistant_turn is not None:
+            assistant_turn.text = answer
+            assistant_turn.pending = False
+            assistant_turn.error = None
         if key == self._active_chat_session_key:
             self._sync_active_chat_transcript()
         self._stop_chat_spinner()
@@ -1492,40 +1736,54 @@ class NativeTui:
 
     def _receive_chat_error(self, error: Exception) -> None:
         key = error.key if isinstance(error, ChatSessionRequestError) else self._active_chat_session_key
+        provider = error.provider if isinstance(error, ChatSessionRequestError) else self._active_chat_provider()
+        original_error = error.original_error if isinstance(error, ChatSessionRequestError) else error
         if key is None:
             self.status.text = "Chat request failed."
             self._stop_chat_spinner()
+            self._show_chat_error(key, provider, original_error)
             self.application.invalidate()
             return
         self._flush_chat_chunks()
         session = self._chat_sessions[key]
-        if session.streamed_answer:
-            session.transcript += f"\n\n**Chat error:** {error}\n\n"
-        else:
-            session.transcript += f"**Chat error:** {error}\n\n"
+        assistant_turn = next(
+            (turn for turn in reversed(session.turns) if turn.role == "assistant"),
+            None,
+        )
+        if assistant_turn is not None:
+            assistant_turn.pending = False
+            assistant_turn.error = str(original_error)
         if key == self._active_chat_session_key:
             self._sync_active_chat_transcript()
         self._stop_chat_spinner()
         self.status.text = "Chat request failed."
+        self._show_chat_error(key, provider, original_error)
         self.application.invalidate()
 
-    def _append_chat_turn(self, speaker: str, text: str, key: ChatSessionKey | None = None) -> None:
+    def _append_chat_turn(
+        self,
+        speaker: str,
+        text: str,
+        key: ChatSessionKey | None = None,
+        *,
+        request_text: str | None = None,
+    ) -> None:
         key = self._active_chat_session_key if key is None else key
         if key is None:
             return
         session = self._chat_sessions[key]
-        session.transcript += f"**{speaker}:**\n{text}\n\n"
+        role = "user" if speaker.casefold() in {"you", "user"} else "assistant"
+        session.turns.append(ChatTurn(role, text, request_text=request_text))
         if key == self._active_chat_session_key:
             self._sync_active_chat_transcript()
 
     def _render_chat_transcript(self) -> None:
-        self.chat_transcript_control.markdown = self._chat_transcript_text
         self.chat_transcript_control.set_cursor_line(1_000_000)
 
     def _begin_chat_response(self, key: ChatSessionKey) -> None:
         session = self._chat_sessions[key]
         session.streamed_answer = ""
-        session.transcript += "**Assistant:**\n"
+        session.turns.append(ChatTurn("assistant", "", pending=True))
         if key == self._active_chat_session_key:
             self._sync_active_chat_transcript()
         self._chat_spinner_active = True
@@ -1577,7 +1835,12 @@ class NativeTui:
             session = self._chat_sessions[key]
             text = "".join(session_chunks)
             session.streamed_answer += text
-            session.transcript += text
+            assistant_turn = next(
+                (turn for turn in reversed(session.turns) if turn.role == "assistant"),
+                None,
+            )
+            if assistant_turn is not None:
+                assistant_turn.text += text
         if self._active_chat_session_key in by_session:
             self._sync_active_chat_transcript()
         self.application.invalidate()

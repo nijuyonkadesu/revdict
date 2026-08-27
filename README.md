@@ -141,6 +141,8 @@ they remain visibly interactive even when colours are disabled.
 | `F3` | Toggle the preview pane |
 | `F4` | Toggle writing chat; Enter sends while its input has focus |
 | `F5` | Open/save the active chat provider’s local settings |
+| `Ctrl-Z` | In Chat, undo the latest turn and restore its message |
+| `Ctrl-Y` | In Chat, retry the latest response |
 | `Ctrl-R` | Cycle sort order |
 | `Ctrl-N` / `Ctrl-P` | Select next/previous result |
 | `Enter` | Copy the selected headword |
@@ -163,7 +165,11 @@ use fzf when it is installed.
 
 `F4` opens the writing-assistant pane. It pre-fills a request using the active
 search query plus the highlighted word and definition; press `Enter` to send
-it, then continue the conversation in the same pane. `F5` opens editable
+it, then continue the conversation in the same pane. User messages are compact
+and right-aligned; assistant messages are compact and left-aligned. `Ctrl-Z`
+undoes the latest turn and restores its message to the composer, while
+`Ctrl-Y` retries its response without duplicating provider history. Provider
+failures appear in a modal with Retry and Dismiss actions. `F5` opens editable
 provider settings and saves them locally.
 
 Configure a provider before first use. This stores endpoints, model choices,

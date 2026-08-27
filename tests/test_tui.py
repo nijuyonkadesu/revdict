@@ -1133,6 +1133,39 @@ def test_markdown_fragments_render_emphasis_without_painting_chat_colours():
     assert not any("ansicolor" in style or "bg:" in style for style, _text, *_ in fragments)
 
 
+def test_chat_transcript_aligns_user_right_and_assistant_left():
+    lines = tui.chat_transcript_lines(
+        [
+            tui.ChatTurn("user", "Can I use **percale** in formal writing?"),
+            tui.ChatTurn("assistant", "Yes. It is a precise textile term."),
+        ],
+        width=80,
+    )
+    visible = ["".join(fragment[1] for fragment in line) for line in lines]
+
+    assert visible[0].endswith("You")
+    assert len(visible[0]) == 80
+    assert visible[1].index("Can I use") >= 35
+    assistant_label = visible.index("Assistant")
+    assert visible[assistant_label + 1].startswith(" Yes.")
+    assert any(
+        "class:chat.user.bubble bold" in style and text == "percale"
+        for line in lines
+        for style, text, *_ in line
+    )
+
+
+def test_chat_theme_uses_existing_accent_and_has_no_color_fallback():
+    themed = tui.TerminalTheme.from_environment({"REVDICT_ACCENT": "magenta"})
+    plain = tui.TerminalTheme.from_environment({"NO_COLOR": "1"})
+
+    assert themed.styles["chat.user.label"] == "ansimagenta bold"
+    assert themed.styles["chat.user.bubble"] == "bg:ansimagenta ansiblack"
+    assert themed.styles["chat.assistant.bubble"] == "reverse"
+    assert plain.styles["chat.user.bubble"] == "reverse"
+    assert "ansi" not in plain.styles["chat.user.bubble"]
+
+
 def test_chat_renders_streamed_chunks_before_the_final_reply_arrives():
     ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
     context = tui.chat_module.LexicalContext("fabric", "percale", "a fine cotton fabric", "noun")
@@ -1144,13 +1177,107 @@ def test_chat_renders_streamed_chunks_before_the_final_reply_arrives():
 
         assert ui._chat_spinner_active is True
         assert ui._active_chat_session.streamed_answer == "**Natural**"
-        assert ui.chat_transcript_control.markdown.endswith("**Natural**")
+        assert ui._active_chat_session.turns[-1].text == "**Natural**"
+        assert ui._active_chat_session.turns[-1].pending is True
 
         ui._receive_chat_answer((key, "**Natural**"))
 
         assert ui._chat_spinner_active is False
         assert ui._active_chat_session.history[-1] == ("assistant", "**Natural**")
-        assert ui._chat_transcript_text.count("**Natural**") == 1
+        assert ui._active_chat_session.turns[-1].text == "**Natural**"
+        assert ui._active_chat_session.turns[-1].pending is False
+    finally:
+        ui.close()
+
+
+def test_chat_undo_restores_user_message_and_rolls_back_provider_history():
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    context = tui.chat_module.LexicalContext("fabric", "percale", "a fine cotton fabric", "noun")
+    try:
+        ui._activate_chat_session(context)
+        session = ui._active_chat_session
+        request = f"{session.bootstrap}\n\nUser request:\nHow formal is it?"
+        session.history = [("user", request), ("assistant", "It is fairly formal.")]
+        session.turns = [
+            tui.ChatTurn("user", "How formal is it?", request_text=request),
+            tui.ChatTurn("assistant", "It is fairly formal."),
+        ]
+
+        ui._undo_chat()
+
+        assert session.history == []
+        assert session.turns == []
+        assert ui.chat_input.text == "How formal is it?"
+        assert session.draft == "How formal is it?"
+    finally:
+        ui.close()
+
+
+def test_chat_retry_replaces_response_without_duplicating_user_history(monkeypatch):
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    context = tui.chat_module.LexicalContext("fabric", "percale", "a fine cotton fabric", "noun")
+    requests = []
+    monkeypatch.setattr(ui._chat_controller, "send", lambda request: requests.append(request) or True)
+    try:
+        key = ui._activate_chat_session(context)
+        session = ui._active_chat_session
+        request = f"{session.bootstrap}\n\nUser request:\nHow formal is it?"
+        session.history = [("user", request), ("assistant", "Old answer")]
+        session.turns = [
+            tui.ChatTurn("user", "How formal is it?", request_text=request),
+            tui.ChatTurn("assistant", "Old answer"),
+        ]
+
+        ui._retry_chat()
+
+        assert requests[0][0] == key
+        assert requests[0][2] == []
+        assert requests[0][3] == request
+        assert session.history == [("user", request)]
+        assert [turn.role for turn in session.turns] == ["user", "assistant"]
+        assert session.turns[-1].pending is True
+        assert session.turns[-1].text == ""
+    finally:
+        ui.close()
+
+
+def test_gemini_503_surfaces_popup_and_popup_retry_uses_failed_session(monkeypatch):
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    context = tui.chat_module.LexicalContext("fabric", "percale", "a fine cotton fabric", "noun")
+    requests = []
+    monkeypatch.setattr(ui._chat_controller, "send", lambda request: requests.append(request) or True)
+    try:
+        key = ui._activate_chat_session(context)
+        session = ui._active_chat_session
+        request = f"{session.bootstrap}\n\nUser request:\nHow formal is it?"
+        session.history = [("user", request)]
+        session.turns = [
+            tui.ChatTurn("user", "How formal is it?", request_text=request),
+            tui.ChatTurn("assistant", "", pending=True),
+        ]
+        provider = tui.chat_module.ProviderSettings(
+            "gemini", "https://example.test", "gemini-test", "GEMINI_KEY"
+        )
+
+        ui._receive_chat_error(
+            tui.ChatSessionRequestError(
+                key,
+                provider,
+                tui.chat_module.ChatRequestError("Provider returned HTTP 503."),
+            )
+        )
+
+        assert ui._chat_error_message is not None
+        assert "Gemini is temporarily unavailable (HTTP 503)" in ui.chat_error_text.text
+        assert session.turns[-1].error == "Provider returned HTTP 503."
+        assert ui.application.layout.current_window == ui.chat_error_retry_button.window
+
+        ui._retry_from_error_popup()
+
+        assert ui._chat_error_message is None
+        assert requests[0][0] == key
+        assert requests[0][1] is provider
+        assert requests[0][3] == request
     finally:
         ui.close()
 
@@ -1165,11 +1292,11 @@ def test_chat_sessions_restore_per_sense_and_survive_provider_changes():
         ui._active_chat_session.history.append(("user", "How formal is it?"))
 
         ui._activate_chat_session(reverence)
-        assert ui._chat_transcript_text == ""
+        assert ui._active_chat_turns() == []
 
         ui._activate_chat_session(percale)
         ui._chat_settings.active_provider = "gemini"
-        assert "How formal is it?" in ui._chat_transcript_text
+        assert ui._active_chat_turns()[0].text == "How formal is it?"
         assert ui._active_chat_session.bootstrap == tui.chat_module.lexical_bootstrap(percale)
     finally:
         ui.close()
@@ -1187,11 +1314,11 @@ def test_changing_the_highlighted_result_switches_the_visible_chat_session():
         ui._selected_index = 1
         ui._render_selection()
 
-        assert ui._chat_transcript_text == ""
+        assert ui._active_chat_turns() == []
 
         ui._selected_index = 0
         ui._render_selection()
-        assert "Tell me about percale." in ui._chat_transcript_text
+        assert ui._active_chat_turns()[0].text == "Tell me about percale."
     finally:
         ui.close()
 
