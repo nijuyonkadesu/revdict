@@ -1130,11 +1130,12 @@ class NativeTui:
 
     def _invoke_function_key(self, key: str) -> None:
         if key == "F1":
-            self._show_help = not self._show_help
+            self._toggle_navigation_mode("help")
         elif key == "F2":
-            self._show_controls = not self._show_controls
-            self.application.layout.focus(self.sort_field if self._show_controls else self.query)
+            self._toggle_navigation_mode("controls")
         elif key == "F3":
+            if self._navigation_mode() != "results":
+                self._set_navigation_mode("results")
             self._show_preview = not self._show_preview
         elif key == "F4":
             self._toggle_chat()
@@ -1156,7 +1157,10 @@ class NativeTui:
             self.application.exit()
 
     def _clear_or_exit(self) -> None:
-        if self.query.control.buffer.complete_state is not None:
+        if self._navigation_mode() != "results":
+            self._set_navigation_mode("results")
+            self.application.invalidate()
+        elif self.query.control.buffer.complete_state is not None:
             self.query.control.buffer.cancel_completion()
         elif self.query.text:
             self.query.text = ""
@@ -1325,21 +1329,66 @@ class NativeTui:
         models = self._chat_settings.gemini_models
         self.chat_known_models.text = "Cached Gemini models: " + (", ".join(models) if models else "none — run chat-config --provider gemini --test")
 
-    def _toggle_chat(self) -> None:
-        self._show_chat = not self._show_chat
+    def _navigation_mode(self) -> str:
+        if self._show_chat_settings:
+            return "settings"
         if self._show_chat:
+            return "chat"
+        if self._show_help:
+            return "help"
+        if self._show_controls:
+            return "controls"
+        return "results"
+
+    def _save_active_chat_draft(self) -> None:
+        if self._active_chat_session_key is not None:
+            self._active_chat_session.draft = self.chat_input.text
+
+    def _set_navigation_mode(self, mode: str) -> None:
+        """Switch between mutually exclusive TUI panels and restore focus."""
+        current = self._navigation_mode()
+        if current == "settings" and mode != "settings":
+            self._save_chat_provider_form()
+            chat_module.save_settings(self._chat_settings)
+            self.status.text = "Chat provider settings saved locally."
+        if current == "chat" and mode != "chat":
+            self._save_active_chat_draft()
+
+        self._show_help = False
+        self._show_controls = False
+        self._show_chat = False
+        self._show_chat_settings = False
+
+        if mode == "help":
+            self._show_help = True
+            self.application.layout.focus(self.query)
+        elif mode == "controls":
+            self._show_controls = True
+            self.application.layout.focus(self.sort_field)
+        elif mode == "chat":
+            self._show_chat = True
             context = self._current_chat_context()
             if context is not None:
                 self._activate_chat_session(context)
-            elif context is None:
+            else:
                 self.status.text = "Select a result first; chat will then include its definition."
             self.application.layout.focus(self.chat_input)
-        else:
-            if self._active_chat_session_key is not None:
-                self._active_chat_session.draft = self.chat_input.text
-            self._show_chat_settings = False
+        elif mode == "settings":
+            self._show_chat_settings = True
+            self._load_chat_provider_form()
+            self.application.layout.focus(self.chat_endpoint_field)
+        elif mode == "results":
             self.application.layout.focus(self.query)
+        else:
+            raise ValueError(f"Unknown navigation mode: {mode}")
         self._update_chat_header()
+
+    def _toggle_navigation_mode(self, mode: str) -> None:
+        target = "results" if self._navigation_mode() == mode else mode
+        self._set_navigation_mode(target)
+
+    def _toggle_chat(self) -> None:
+        self._toggle_navigation_mode("chat")
         self.application.invalidate()
 
     def _change_chat_provider(self) -> None:
@@ -1378,21 +1427,12 @@ class NativeTui:
         self._chat_settings.active_provider = provider_name
 
     def _toggle_chat_settings(self) -> None:
-        if self._show_chat_settings:
-            self._save_chat_provider_form()
-            chat_module.save_settings(self._chat_settings)
-            self._show_chat_settings = False
-            self.status.text = "Chat provider settings saved locally."
-            if self._chat_visible_before_settings:
-                self.application.layout.focus(self.chat_input)
-            else:
-                self.application.layout.focus(self.query)
-            self._show_chat = self._chat_visible_before_settings
+        if self._navigation_mode() == "settings":
+            target = "chat" if self._chat_visible_before_settings else "results"
+            self._set_navigation_mode(target)
         else:
-            self._chat_visible_before_settings = self._show_chat
-            self._show_chat_settings = True
-            self._load_chat_provider_form()
-            self.application.layout.focus(self.chat_endpoint_field)
+            self._chat_visible_before_settings = self._navigation_mode() == "chat"
+            self._set_navigation_mode("settings")
         self.application.invalidate()
 
     def _focus_chat_setting(self, step: int) -> None:

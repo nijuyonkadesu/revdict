@@ -718,6 +718,99 @@ def test_bottom_function_buttons_invoke_the_same_actions_as_f_keys():
         ui.close()
 
 
+@pytest.mark.parametrize(
+    ("first_key", "second_key", "expected_mode", "focus_name"),
+    [
+        ("F4", "F1", "help", "query"),
+        ("F1", "F2", "controls", "sort"),
+        ("F2", "F4", "chat", "chat"),
+        ("F4", "F5", "settings", "settings"),
+        ("F5", "F1", "help", "query"),
+    ],
+)
+def test_function_keys_replace_the_previous_view(
+    monkeypatch, first_key, second_key, expected_mode, focus_name
+):
+    monkeypatch.setattr(tui.chat_module, "save_settings", lambda _settings: None)
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    try:
+        ui._invoke_function_key(first_key)
+        ui._invoke_function_key(second_key)
+
+        expected_focus = {
+            "query": ui.query.window,
+            "sort": ui.sort_field.window,
+            "chat": ui.chat_input.window,
+            "settings": ui.chat_endpoint_field.window,
+        }[focus_name]
+        assert ui._navigation_mode() == expected_mode
+        assert sum(
+            (ui._show_help, ui._show_controls, ui._show_chat, ui._show_chat_settings)
+        ) == 1
+        assert ui.application.layout.current_window == expected_focus
+    finally:
+        ui.close()
+
+
+@pytest.mark.parametrize("key", ["F1", "F2", "F4", "F5"])
+def test_repeating_a_function_key_returns_to_results(monkeypatch, key):
+    monkeypatch.setattr(tui.chat_module, "save_settings", lambda _settings: None)
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    try:
+        ui._invoke_function_key(key)
+        ui._invoke_function_key(key)
+
+        assert ui._navigation_mode() == "results"
+        assert ui.application.layout.current_window == ui.query.window
+    finally:
+        ui.close()
+
+
+def test_f5_returns_to_chat_when_setup_was_opened_from_chat(monkeypatch):
+    monkeypatch.setattr(tui.chat_module, "save_settings", lambda _settings: None)
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    try:
+        ui._invoke_function_key("F4")
+        ui._invoke_function_key("F5")
+        assert ui._navigation_mode() == "settings"
+
+        ui._invoke_function_key("F5")
+
+        assert ui._navigation_mode() == "chat"
+        assert ui.application.layout.current_window == ui.chat_input.window
+    finally:
+        ui.close()
+
+
+def test_f3_closes_an_open_view_before_toggling_preview():
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    try:
+        ui._invoke_function_key("F4")
+        ui._invoke_function_key("F3")
+
+        assert ui._navigation_mode() == "results"
+        assert ui._show_preview is False
+        assert ui.application.layout.current_window == ui.query.window
+    finally:
+        ui.close()
+
+
+def test_escape_closes_an_open_view_before_clearing_the_query():
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    ui._controller.close()
+    ui.query.text = "closely woven pill"
+    try:
+        ui._invoke_function_key("F4")
+
+        ui._clear_or_exit()
+
+        assert ui._navigation_mode() == "results"
+        assert ui.query.text == "closely woven pill"
+        assert ui.application.layout.current_window == ui.query.window
+    finally:
+        ui.close()
+
+
 def test_tui_uses_hairline_sections_instead_of_box_frames():
     ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
     try:

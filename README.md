@@ -151,6 +151,10 @@ The preview ends with a OneLook link for the complete current query. Hold
 Ctrl and click the URL to open the equivalent OneLook reverse-dictionary
 results in your browser.
 
+Help, filters, writing chat, and chat setup are exclusive views: selecting a
+different function key closes the previous view and moves focus to the new
+one. Press the active view's key again, or press `Esc`, to return to results.
+
 The native live UI does not require fzf. `revdict --fzf` retains the earlier
 fzf session for users who prefer it; one-shot interactive queries continue to
 use fzf when it is installed.
