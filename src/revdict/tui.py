@@ -779,17 +779,14 @@ class DaemonCompleter(Completer):
 
     def __init__(self, send_fn: Callable[[str, int], list[str]]) -> None:
         self._send = send_fn
-        self._last_call: float = 0.0
-        self._debounce: float = 0.02
 
     def get_completions(self, document, complete_event):
-        prefix = document.text_before_cursor.strip()
+        text_before_cursor = document.text_before_cursor
+        if not text_before_cursor or text_before_cursor[-1].isspace():
+            return
+        prefix = text_before_cursor.rsplit(maxsplit=1)[-1]
         if not prefix:
             return
-        now = time.monotonic()
-        if now - self._last_call < self._debounce:
-            return
-        self._last_call = now
         for word in self._send(prefix, 20):
             yield Completion(word, start_position=-len(prefix))
 

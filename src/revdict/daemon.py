@@ -1,5 +1,6 @@
 # src/revdict/daemon.py
 import bisect
+import heapq
 import json
 import os
 import signal
@@ -24,6 +25,69 @@ from revdict.progress import ProgressReporter
 
 
 PROGRESS_PROTOCOL = "progress-v1"
+
+
+def _autocomplete_rank_key(word: str, literary_frequency: dict[str, float]) -> tuple:
+    """Prefer attested/common completions, then concise single headwords."""
+    return (
+        -literary_frequency.get(word, 0.0),
+        " " in word,
+        len(word),
+        word,
+    )
+
+
+def _autocomplete_suggest(
+    prefix: str,
+    limit: int,
+    words: list[str],
+    words_by_length: dict[int, list[str]],
+    literary_frequency: dict[str, float],
+) -> list[str]:
+    """Return prefix-first suggestions without letting rare phrases crowd them out."""
+    from rapidfuzz import fuzz, process
+
+    if not prefix or limit <= 0:
+        return []
+
+    start = bisect.bisect_left(words, prefix)
+    end = bisect.bisect_right(words, prefix + "\U0010ffff")
+    prefix_matches = (word for word in words[start:end] if word != prefix)
+    matches = heapq.nsmallest(
+        limit,
+        prefix_matches,
+        key=lambda word: _autocomplete_rank_key(word, literary_frequency),
+    )
+    if len(matches) >= limit:
+        return matches
+
+    target_len = len(prefix)
+    candidates: list[str] = []
+    for delta in range(4):
+        candidates.extend(words_by_length.get(target_len - delta, []))
+        if delta > 0:
+            candidates.extend(words_by_length.get(target_len + delta, []))
+    if candidates:
+        remaining = limit - len(matches)
+        fuzzy = process.extract(
+            prefix,
+            candidates,
+            scorer=fuzz.ratio,
+            limit=max(remaining * 5, remaining),
+            score_cutoff=70,
+        )
+        fuzzy.sort(
+            key=lambda item: (
+                -item[1],
+                _autocomplete_rank_key(item[0], literary_frequency),
+            )
+        )
+        for word, _score, _idx in fuzzy:
+            if word != prefix and word not in matches:
+                matches.append(word)
+                if len(matches) >= limit:
+                    break
+    return matches
 
 
 @dataclass(frozen=True)
@@ -570,11 +634,14 @@ def run_server() -> None:
         configure_offline_quiet_env()
         from revdict import search as search_mod
         from revdict import dictionary as dict_mod
+        from revdict.index_bundle import resolve_active_index_dir
 
-        _autocomplete_words = sorted(dict_mod.load_word_index(INDEX_DIR).keys())
+        active_index_dir = resolve_active_index_dir(INDEX_DIR)
+        _autocomplete_words = sorted(dict_mod.load_word_index(active_index_dir).keys())
         _autocomplete_by_length: dict[int, list[str]] = {}
         for word in _autocomplete_words:
             _autocomplete_by_length.setdefault(len(word), []).append(word)
+        _autocomplete_frequency = search_mod._load_literary_frequency(active_index_dir)
 
         DAEMON_SOCKET_PATH.parent.mkdir(parents=True, exist_ok=True)
 
@@ -596,38 +663,6 @@ def run_server() -> None:
 
         print(f"revdict daemon listening on {DAEMON_SOCKET_PATH} (pid {os.getpid()})")
 
-        def _autocomplete_suggest(prefix: str, limit: int) -> list[str]:
-            from rapidfuzz import fuzz, process
-
-            if not prefix:
-                return []
-            start = bisect.bisect_left(_autocomplete_words, prefix)
-            matches: list[str] = []
-            for i in range(start, len(_autocomplete_words)):
-                word = _autocomplete_words[i]
-                if not word.startswith(prefix):
-                    break
-                if word != prefix:
-                    matches.append(word)
-                if len(matches) >= limit:
-                    return matches
-            if len(matches) < limit:
-                target_len = len(prefix)
-                candidates: list[str] = []
-                for delta in range(4):
-                    candidates.extend(_autocomplete_by_length.get(target_len - delta, []))
-                    if delta > 0:
-                        candidates.extend(_autocomplete_by_length.get(target_len + delta, []))
-                if candidates:
-                    fuzzy = process.extract(
-                        prefix, candidates, scorer=fuzz.ratio,
-                        limit=limit - len(matches), score_cutoff=70,
-                    )
-                    for word, _score, _idx in fuzzy:
-                        if word != prefix and word not in matches:
-                            matches.append(word)
-            return matches[:limit]
-
         while True:
             conn, _ = server.accept()
             try:
@@ -647,7 +682,13 @@ def run_server() -> None:
                     elif request.get("op") == "autocomplete":
                         prefix = request.get("prefix", "").lower()
                         limit = request.get("limit", 20)
-                        suggestions = _autocomplete_suggest(prefix, limit)
+                        suggestions = _autocomplete_suggest(
+                            prefix,
+                            limit,
+                            _autocomplete_words,
+                            _autocomplete_by_length,
+                            _autocomplete_frequency,
+                        )
                         conn.sendall(json.dumps({"suggestions": suggestions}).encode("utf-8"))
                     elif request.get("protocol") == PROGRESS_PROTOCOL:
                         def emit(event: dict) -> None:

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 from prompt_toolkit.buffer import CompletionState
 from prompt_toolkit.completion import Completion
+from prompt_toolkit.document import Document
 from prompt_toolkit.application.current import create_app_session
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.input.defaults import create_pipe_input
@@ -772,6 +773,44 @@ def test_accept_completion_applies_first_when_none_highlighted():
         assert buf.text == "happy"
     finally:
         ui.close()
+
+
+def test_daemon_completer_uses_only_the_word_being_typed():
+    calls = []
+    completer = tui.DaemonCompleter(
+        lambda prefix, limit: calls.append((prefix, limit)) or ["pillow"]
+    )
+
+    completions = list(
+        completer.get_completions(Document("closely woven pill"), None)
+    )
+
+    assert calls == [("pill", 20)]
+    assert [(item.text, item.start_position) for item in completions] == [
+        ("pillow", -4)
+    ]
+
+
+def test_daemon_completer_never_drops_the_latest_rapid_call():
+    calls = []
+    completer = tui.DaemonCompleter(
+        lambda prefix, _limit: calls.append(prefix) or [prefix + "ow"]
+    )
+
+    first = list(completer.get_completions(Document("pil"), None))
+    latest = list(completer.get_completions(Document("pill"), None))
+
+    assert calls == ["pil", "pill"]
+    assert first[0].text == "pilow"
+    assert latest[0].text == "pillow"
+
+
+def test_daemon_completer_does_not_reopen_for_a_completed_word():
+    completer = tui.DaemonCompleter(
+        lambda _prefix, _limit: pytest.fail("no request expected after whitespace")
+    )
+
+    assert list(completer.get_completions(Document("closely woven "), None)) == []
 
 
 def test_accept_completion_applies_highlighted_item():

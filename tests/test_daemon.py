@@ -12,6 +12,32 @@ import pytest
 from revdict import daemon
 
 
+def test_autocomplete_ranks_common_prefix_matches_ahead_of_rare_phrases():
+    words = sorted(
+        [
+            "pill",
+            "pill bottle",
+            "pill bug",
+            "pillage",
+            "pillar",
+            "pillow",
+        ]
+    )
+    by_length = {}
+    for word in words:
+        by_length.setdefault(len(word), []).append(word)
+
+    suggestions = daemon._autocomplete_suggest(
+        "pill",
+        3,
+        words,
+        by_length,
+        {"pillow": 4.4, "pillar": 3.7, "pillage": 2.7},
+    )
+
+    assert suggestions == ["pillow", "pillar", "pillage"]
+
+
 def _run_echo_server(socket_path, response_payload, ready_event):
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(str(socket_path))
