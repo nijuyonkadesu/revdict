@@ -146,12 +146,15 @@ they remain visibly interactive even when colours are disabled.
 | `Ctrl-R` | Cycle sort order |
 | `Ctrl-N` / `Ctrl-P` | Select next/previous result |
 | `Enter` | Copy the selected headword |
+| `Alt-Enter` | Copy and open the selected result's OneLook link |
 | `Esc` | Clear the query; press again on an empty query to quit |
 | `Ctrl-C` | Quit immediately |
 
-The preview ends with a OneLook link for the complete current query. Hold
-Ctrl and click the URL to open the equivalent OneLook reverse-dictionary
-results in your browser.
+The preview ends with a terminal-native OneLook link for the selected result.
+Hold Ctrl and click the URL to open that result in your browser.
+In a local session, `Alt-Enter` also opens the browser after copying the URL.
+Over SSH it copies through OSC 52 without trying to launch a browser on the
+remote host; use the OSC 8 preview link to open it on the client machine.
 
 Help, filters, writing chat, and chat setup are exclusive views: selecting a
 different function key closes the previous view and moves focus to the new

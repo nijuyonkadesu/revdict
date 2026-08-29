@@ -10,7 +10,7 @@ from prompt_toolkit.application.current import create_app_session
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.input.defaults import create_pipe_input
 from prompt_toolkit.keys import Keys
-from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType, MouseModifier
+from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from prompt_toolkit.output import DummyOutput
 from prompt_toolkit.output.color_depth import ColorDepth
 from prompt_toolkit.styles import Style
@@ -459,73 +459,203 @@ def test_preview_wrapper_preserves_link_mouse_handlers_when_wrapping():
     assert all(sum(len(fragment[1]) for fragment in line) <= 15 for line in lines)
 
 
-def test_onelook_preview_link_opens_only_on_control_click():
-    opened = []
-    fragments = tui.onelook_link_fragments(
-        "closely woven pill",
-        open_url=lambda url: opened.append(url) or True,
-    )
-    handler = fragments[-1][2]
+def test_onelook_preview_link_uses_osc8_for_the_selected_result():
+    url = "https://www.onelook.com/thesaurus/?loc=revfp&s=periost"
 
-    ordinary_click = MouseEvent(
-        position=Point(x=0, y=0),
-        event_type=MouseEventType.MOUSE_UP,
-        button=MouseButton.LEFT,
-        modifiers=frozenset(),
-    )
-    control_click = MouseEvent(
-        position=Point(x=0, y=0),
-        event_type=MouseEventType.MOUSE_UP,
-        button=MouseButton.LEFT,
-        modifiers=frozenset({MouseModifier.CONTROL}),
-    )
+    lines = word_wrap_fragments(tui.onelook_link_fragments("periost"), width=120)
+    fragments = [fragment for line in lines for fragment in line]
 
-    assert handler(ordinary_click) is NotImplemented
-    assert opened == []
-    assert handler(control_click) is None
-    assert opened == [
-        "https://www.onelook.com/thesaurus/?loc=revfp&s=closely+woven+pill"
+    assert ("class:muted", "OneLook:") in fragments
+    assert (
+        "[ZeroWidthEscape]",
+        f"\x1b]8;;{url}\x1b\\",
+    ) in fragments
+    assert any(text == url and "underline" in style for style, text, *_ in fragments)
+    assert ("[ZeroWidthEscape]", "\x1b]8;;\x1b\\") in fragments
+    assert "\u200b" not in "".join(text for _style, text, *_ in fragments)
+    assert all(len(fragment) == 2 for fragment in fragments)
+
+
+def test_wrapped_preview_preserves_osc8_sequences_without_counting_their_width():
+    url = "https://www.onelook.com/thesaurus/?loc=revfp&s=periost"
+    lines = word_wrap_fragments(tui.onelook_link_fragments("periost"), width=32)
+    link_lines = [
+        line for line in lines if any("class:osc8.link" in style for style, *_ in line)
     ]
 
-
-def test_wrapped_preview_routes_control_click_to_onelook_link():
-    opened = []
-    control = tui.WordWrappedControl()
-    control.fragments = tui.onelook_link_fragments(
-        "closely woven pill",
-        open_url=lambda url: opened.append(url) or True,
+    assert len(link_lines) > 1
+    assert all(
+        sum(text.startswith("\x1b]8;;") for _style, text, *_ in line) == 2
+        for line in link_lines
     )
-    content = control.create_content(width=32, height=10)
-    link_position = next(
-        (Point(x=offset, y=line_number)
-         for line_number in range(content.line_count)
-         for offset, fragment in _fragment_offsets(content.get_line(line_number))
-         if len(fragment) == 3),
-        None,
+    assert "".join(
+        text
+        for line in link_lines
+        for style, text, *_ in line
+        if "class:osc8.link" in style
+    ) == url
+    assert all(line[-1][1] == " " for line in link_lines)
+    assert all("\u200b" not in "".join(text for _style, text, *_ in line) for line in lines)
+    assert all(
+        sum(
+            len(text)
+            for style, text, *_ in line
+            if "[ZeroWidthEscape]" not in style
+        ) <= 32
+        for line in lines
     )
-    assert link_position is not None
 
-    handled = control.mouse_handler(
-        MouseEvent(
-            position=link_position,
-            event_type=MouseEventType.MOUSE_UP,
-            button=MouseButton.LEFT,
-            modifiers=frozenset({MouseModifier.CONTROL}),
+
+def test_alt_enter_binding_copies_the_selected_link():
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    actions = []
+    ui._copy_selected_link = lambda: actions.append("copy-link")
+    try:
+        binding = next(
+            binding
+            for binding in ui.application.key_bindings.get_bindings_for_keys(
+                (Keys.Escape, Keys.Enter)
+            )
+            if binding.filter()
         )
+        binding.handler(SimpleNamespace(app=ui.application))
+
+        assert actions == ["copy-link"]
+    finally:
+        ui.close()
+
+
+def test_plain_enter_binding_keeps_accept_or_copy_behavior():
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    actions = []
+    ui._accept_or_copy = lambda: actions.append("accept-or-copy-word")
+    try:
+        binding = next(
+            binding
+            for binding in ui.application.key_bindings.get_bindings_for_keys(
+                (Keys.Enter,)
+            )
+            if binding.filter()
+        )
+        binding.handler(SimpleNamespace(app=ui.application))
+
+        assert actions == ["accept-or-copy-word"]
+    finally:
+        ui.close()
+
+
+def test_copy_selected_link_copies_and_opens_the_current_results_exact_onelook_url(monkeypatch):
+    copied = []
+    opened = []
+    monkeypatch.setattr("revdict.cli._is_remote_session", lambda: False)
+    monkeypatch.setattr(
+        "revdict.cli._run_copy_selection",
+        lambda value: copied.append(value) or 0,
     )
+    monkeypatch.setattr(
+        tui.onelook,
+        "open_url",
+        lambda value: opened.append(value) or True,
+        raising=False,
+    )
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    ui.query.text = "percale"
+    ui._rows = [
+        {
+            "headword": "periost",
+            "pos": "noun",
+            "definition": "the connective tissue surrounding bone",
+            "stress": None,
+            "synonyms": [],
+            "examples": [],
+            "label": "neutral",
+            "polarity": "neutral",
+            "relevance": 90,
+        }
+    ]
+    try:
+        ui._copy_selected_link()
 
-    assert handled is None
-    assert len(opened) == 1
+        assert copied == [
+            "https://www.onelook.com/thesaurus/?loc=revfp&s=periost"
+        ]
+        assert opened == copied
+        assert ui.status.text == "Copied and opened: periost"
+    finally:
+        ui.close()
 
 
-def _fragment_offsets(fragments):
-    offset = 0
-    for fragment in fragments:
-        yield offset, fragment
-        offset += len(fragment[1])
+def test_copy_selected_link_still_copies_when_browser_cannot_open(monkeypatch):
+    copied = []
+    monkeypatch.setattr("revdict.cli._is_remote_session", lambda: False)
+    monkeypatch.setattr(
+        "revdict.cli._run_copy_selection",
+        lambda value: copied.append(value) or 0,
+    )
+    monkeypatch.setattr(tui.onelook, "open_url", lambda _value: False, raising=False)
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    ui._rows = [
+        {
+            "headword": "periost",
+            "pos": "noun",
+            "definition": "the connective tissue surrounding bone",
+            "stress": None,
+            "synonyms": [],
+            "examples": [],
+            "label": "neutral",
+            "polarity": "neutral",
+            "relevance": 90,
+        }
+    ]
+    try:
+        ui._copy_selected_link()
+
+        assert copied == [
+            "https://www.onelook.com/thesaurus/?loc=revfp&s=periost"
+        ]
+        assert ui.status.text == "Copied link; browser did not open: periost"
+    finally:
+        ui.close()
 
 
-def test_selected_result_preview_ends_with_the_current_query_onelook_url():
+def test_copy_selected_link_does_not_launch_a_remote_browser_over_ssh(monkeypatch):
+    copied = []
+    monkeypatch.setattr("revdict.cli._is_remote_session", lambda: True)
+    monkeypatch.setattr(
+        "revdict.cli._run_copy_selection",
+        lambda value: copied.append(value) or 0,
+    )
+    monkeypatch.setattr(
+        tui.onelook,
+        "open_url",
+        lambda _value: pytest.fail("remote session must not launch a browser"),
+    )
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    ui._rows = [
+        {
+            "headword": "epigeum",
+            "pos": "noun",
+            "definition": "a surface structure",
+            "stress": None,
+            "synonyms": [],
+            "examples": [],
+            "label": "neutral",
+            "polarity": "neutral",
+            "relevance": 90,
+        }
+    ]
+    try:
+        ui._copy_selected_link()
+
+        assert copied == [
+            "https://www.onelook.com/thesaurus/?loc=revfp&s=epigeum"
+        ]
+        assert ui.status.text == "Copied link over SSH: epigeum"
+    finally:
+        ui.close()
+
+
+def test_selected_result_preview_url_targets_the_selected_headword():
     ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
     ui._controller.close()
     ui.query.text = "closely woven pill"
@@ -545,10 +675,55 @@ def test_selected_result_preview_ends_with_the_current_query_onelook_url():
     try:
         ui._render_selection()
 
-        preview = "".join(text for _style, text, *_ in ui.preview_control.fragments)
-        assert preview.endswith(
-            "https://www.onelook.com/thesaurus/?loc=revfp&s=closely+woven+pill"
+        url = next(
+            text
+            for _style, text, *_ in ui.preview_control.fragments
+            if text.startswith("https://")
         )
+        assert url == "https://www.onelook.com/thesaurus/?loc=revfp&s=pillow"
+    finally:
+        ui.close()
+
+
+def test_selected_result_preview_url_changes_with_the_selection():
+    ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
+    ui._controller.close()
+    ui.query.text = "percale"
+    ui._rows = [
+        {
+            "headword": headword,
+            "pos": "adjective",
+            "definition": "thecal",
+            "stress": None,
+            "synonyms": [],
+            "examples": [],
+            "label": "neutral",
+            "polarity": "neutral",
+            "relevance": 0,
+        }
+        for headword in ("percale", "periost")
+    ]
+    try:
+        ui._selected_index = 0
+        ui._render_selection()
+        first_url = next(
+            text
+            for _style, text, *_ in ui.preview_control.fragments
+            if text.startswith("https://")
+        )
+
+        ui._selected_index = 1
+        ui._render_selection()
+        second_url = next(
+            text
+            for _style, text, *_ in ui.preview_control.fragments
+            if text.startswith("https://")
+        )
+
+        assert first_url == "https://www.onelook.com/thesaurus/?loc=revfp&s=percale"
+        assert second_url == "https://www.onelook.com/thesaurus/?loc=revfp&s=periost"
+        assert "%3Apercale" not in first_url
+        assert "percale" not in second_url
     finally:
         ui.close()
 
@@ -953,8 +1128,8 @@ def test_escape_clears_a_nonempty_query_before_it_can_quit():
         ui._clear_or_exit()
 
         assert ui.query.text == ""
-        assert any(
-            binding.eager()
+        assert all(
+            not binding.eager()
             for binding in ui.application.key_bindings.get_bindings_for_keys((Keys.Escape,))
         )
         assert ui.application.ttimeoutlen <= 0.02

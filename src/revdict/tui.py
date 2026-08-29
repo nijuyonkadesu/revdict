@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from io import StringIO
 import os
 import re
@@ -20,7 +21,7 @@ from prompt_toolkit.layout import Float, FloatContainer, HSplit, VSplit, Window
 from prompt_toolkit.layout.controls import UIContent, UIControl
 from prompt_toolkit.layout.margins import ScrollbarMargin
 from prompt_toolkit.layout.menus import CompletionsMenu
-from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType, MouseModifier
+from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.output.color_depth import ColorDepth
 from prompt_toolkit.utils import get_cwidth
@@ -45,6 +46,12 @@ RESULT_MARKER_WIDTH = 2
 RESULT_HEADWORD_COL_WIDTH = 16
 RESULT_POS_COL_WIDTH = 12
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+@dataclass(frozen=True)
+class Osc8Link:
+    url: str
+    link_id: str
 
 
 @dataclass(frozen=True)
@@ -298,6 +305,7 @@ ACTIONS = (
     UiAction("Ctrl-Z (chat)", "Undo the latest chat turn"),
     UiAction("Ctrl-Y (chat)", "Retry the latest chat response"),
     UiAction("Ctrl-N / Ctrl-P", "Select next / previous result"), UiAction("Enter (query)", "Copy selected headword"),
+    UiAction("Alt-Enter (query)", "Copy and open selected OneLook link"),
     UiAction("Esc", "Clear query, then quit"), UiAction("Ctrl-C", "Quit"),
 )
 QUERY_HELP = (
@@ -418,26 +426,21 @@ def candidate_preview_fragments(candidate: dict, *, no_color: bool | None = None
     return fragments
 
 
-def onelook_link_fragments(
-    query: str,
-    *,
-    open_url: Callable[[str], bool] = onelook.open_url,
-):
-    """Render a browser link for the exact query shown in the TUI."""
-    url = onelook.build_search_url(query)
+def osc8_link_fragments(url: str, label: str | None = None):
+    """Mark text for redraw-safe OSC 8 expansion during line wrapping."""
+    label = url if label is None else label
+    link_id = hashlib.sha256(url.encode("utf-8")).hexdigest()[:12]
+    link_style = f"class:osc8.link.{link_id} underline"
+    return [(link_style, label, Osc8Link(url, link_id))]
 
-    def handle_click(mouse_event: MouseEvent):
-        if (
-            mouse_event.event_type == MouseEventType.MOUSE_UP
-            and MouseModifier.CONTROL in mouse_event.modifiers
-        ):
-            open_url(url)
-            return None
-        return NotImplemented
+
+def onelook_link_fragments(headword: str):
+    """Render an OSC 8 link for the selected OneLook result."""
+    url = onelook.build_result_url(headword)
 
     return [
         ("class:muted", "\n\nOneLook: "),
-        ("underline", url, handle_click),
+        *osc8_link_fragments(url),
     ]
 
 
@@ -510,16 +513,94 @@ def word_wrap_fragments(fragments, width: int):
         else:
             target.append((style, text, *extra))
 
+    def osc8_link_in_word() -> Osc8Link | None:
+        return next(
+            (
+                extra[0]
+                for _style, _text, *extra in word
+                if extra and isinstance(extra[0], Osc8Link)
+            ),
+            None,
+        )
+
+    def append_osc8_segment(
+        target: list[tuple],
+        segment: list[tuple[str, str]],
+        link: Osc8Link,
+    ) -> None:
+        target.append(
+            ("[ZeroWidthEscape]", f"\x1b]8;;{link.url}\x1b\\")
+        )
+        target.extend(segment)
+        target.append(("[ZeroWidthEscape]", "\x1b]8;;\x1b\\"))
+        # The ordinary blank cell gives prompt_toolkit a position at which to
+        # emit the zero-width closer. Unlike a Unicode zero-width sentinel, it
+        # cannot leave a glyph behind during differential redraws.
+        target.append((f"class:osc8.sentinel.{link.link_id}", " "))
+
+    def flush_osc8_word(link: Osc8Link) -> None:
+        nonlocal line, word, used, word_width, pending_space
+        separator = 1 if pending_space and line else 0
+        required = separator + word_width + 1
+        if line and used + required > width:
+            lines.append(line)
+            line = []
+            used = 0
+            separator = 0
+        if separator:
+            append_fragment(line, "", " ")
+            used += 1
+
+        visible = [(style, text) for style, text, *_extra in word]
+        if word_width + 1 <= width:
+            append_osc8_segment(line, visible, link)
+            used += word_width + 1
+        else:
+            maximum_text_width = max(1, width - 1)
+            segment: list[tuple[str, str]] = []
+            segment_width = 0
+            for style, text in visible:
+                for character in text:
+                    character_width = get_cwidth(character)
+                    if segment and segment_width + character_width > maximum_text_width:
+                        wrapped: list[tuple] = []
+                        append_osc8_segment(wrapped, segment, link)
+                        lines.append(wrapped)
+                        segment = []
+                        segment_width = 0
+                    append_fragment(segment, style, character)
+                    segment_width += character_width
+            if segment:
+                wrapped = []
+                append_osc8_segment(wrapped, segment, link)
+                lines.append(wrapped)
+            line = []
+            used = 0
+
+        word = []
+        word_width = 0
+        pending_space = False
+
     def flush_word() -> None:
         nonlocal line, word, used, word_width, pending_space
         if not word:
             return
-        if word_width > width and any(len(fragment) >= 3 for fragment in word):
+        osc8_link = osc8_link_in_word()
+        if osc8_link is not None:
+            flush_osc8_word(osc8_link)
+            return
+        if word_width > width and any(
+            len(fragment) >= 3 or "[ZeroWidthEscape]" in fragment[0]
+            for fragment in word
+        ):
             if line:
                 lines.append(line)
                 line = []
                 used = 0
             for style, text, *extra in word:
+                if "[ZeroWidthEscape]" in style:
+                    append_fragment(line, style, text, tuple(extra))
+                    continue
                 for character in text:
                     character_width = get_cwidth(character)
                     if line and used + character_width > width:
@@ -548,6 +629,16 @@ def word_wrap_fragments(fragments, width: int):
         pending_space = False
 
     for style, text, *extra in fragments:
+        if extra and isinstance(extra[0], Osc8Link):
+            flush_word()
+            for character in text:
+                append_fragment(word, style, character, tuple(extra))
+                word_width += get_cwidth(character)
+            flush_word()
+            continue
+        if "[ZeroWidthEscape]" in style:
+            append_fragment(word, style, text, tuple(extra))
+            continue
         for character in text:
             if character == "\n":
                 flush_word()
@@ -1151,6 +1242,8 @@ class NativeTui:
         def previous_result(event): self._move_selection(-1); event.app.invalidate()
         @bindings.add("enter", filter=Condition(lambda: self.application.layout.current_window == self.query.window))
         def accept_or_copy(event): self._accept_or_copy(); event.app.invalidate()
+        @bindings.add("escape", "enter", filter=Condition(lambda: self.application.layout.current_window == self.query.window))
+        def copy_selected_link(event): self._copy_selected_link(); event.app.invalidate()
         @bindings.add("tab", filter=Condition(lambda: self.application.layout.current_window == self.query.window and self.query.control.buffer.complete_state is not None))
         def complete_next_tab(event): self._navigate_completion(1); event.app.invalidate()
         @bindings.add("s-tab", filter=Condition(lambda: self.application.layout.current_window == self.query.window and self.query.control.buffer.complete_state is not None))
@@ -1161,7 +1254,7 @@ class NativeTui:
         def complete_up(event): self._navigate_completion(-1); event.app.invalidate()
         @bindings.add("enter", filter=Condition(lambda: self.application.layout.current_window == self.chat_input.window))
         def send_chat(event): self._send_chat()
-        @bindings.add("escape", eager=True)
+        @bindings.add("escape")
         def clear_or_exit(event):
             self._clear_or_exit()
         @bindings.add("c-c")
@@ -1377,13 +1470,14 @@ class NativeTui:
     def _render_selection(self) -> None:
         self.preview_control.reset_scroll()
         if self._rows:
+            candidate = self._rows[self._selected_index]
             fragments = candidate_preview_fragments(
-                self._rows[self._selected_index],
+                candidate,
                 no_color=self.theme.no_color,
             )
             query = self.query.text.strip()
             if query:
-                fragments.extend(onelook_link_fragments(query))
+                fragments.extend(onelook_link_fragments(candidate["headword"]))
             self.preview_control.fragments = fragments
         else:
             self.preview_control.fragments = []
@@ -1881,6 +1975,20 @@ class NativeTui:
         if self._rows:
             from revdict.cli import _run_copy_selection
             headword = self._rows[self._selected_index]["headword"]; _run_copy_selection(headword); self.status.text = f"Copied: {headword}"
+
+    def _copy_selected_link(self) -> None:
+        if self._rows:
+            from revdict.cli import _is_remote_session, _run_copy_selection
+
+            headword = self._rows[self._selected_index]["headword"]
+            url = onelook.build_result_url(headword)
+            _run_copy_selection(url)
+            if _is_remote_session():
+                self.status.text = f"Copied link over SSH: {headword}"
+            elif onelook.open_url(url):
+                self.status.text = f"Copied and opened: {headword}"
+            else:
+                self.status.text = f"Copied link; browser did not open: {headword}"
 
 
 def run(*, truecolor: bool | None = None) -> None:
