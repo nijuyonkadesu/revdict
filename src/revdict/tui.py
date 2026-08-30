@@ -305,7 +305,7 @@ ACTIONS = (
     UiAction("Ctrl-Z (chat)", "Undo the latest chat turn"),
     UiAction("Ctrl-Y (chat)", "Retry the latest chat response"),
     UiAction("Ctrl-N / Ctrl-P", "Select next / previous result"), UiAction("Enter (query)", "Copy selected headword"),
-    UiAction("Alt-Enter (query)", "Copy and open selected OneLook link"),
+    UiAction("Ctrl-O (query)", "Copy and open selected OneLook link"),
     UiAction("Esc", "Clear query, then quit"), UiAction("Ctrl-C", "Quit"),
 )
 QUERY_HELP = (
@@ -1242,7 +1242,7 @@ class NativeTui:
         def previous_result(event): self._move_selection(-1); event.app.invalidate()
         @bindings.add("enter", filter=Condition(lambda: self.application.layout.current_window == self.query.window))
         def accept_or_copy(event): self._accept_or_copy(); event.app.invalidate()
-        @bindings.add("escape", "enter", filter=Condition(lambda: self.application.layout.current_window == self.query.window))
+        @bindings.add("c-o", filter=Condition(lambda: self.application.layout.current_window == self.query.window))
         def copy_selected_link(event): self._copy_selected_link(); event.app.invalidate()
         @bindings.add("tab", filter=Condition(lambda: self.application.layout.current_window == self.query.window and self.query.control.buffer.complete_state is not None))
         def complete_next_tab(event): self._navigate_completion(1); event.app.invalidate()
@@ -1254,7 +1254,7 @@ class NativeTui:
         def complete_up(event): self._navigate_completion(-1); event.app.invalidate()
         @bindings.add("enter", filter=Condition(lambda: self.application.layout.current_window == self.chat_input.window))
         def send_chat(event): self._send_chat()
-        @bindings.add("escape")
+        @bindings.add("escape", eager=True)
         def clear_or_exit(event):
             self._clear_or_exit()
         @bindings.add("c-c")

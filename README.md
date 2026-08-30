@@ -146,13 +146,13 @@ they remain visibly interactive even when colours are disabled.
 | `Ctrl-R` | Cycle sort order |
 | `Ctrl-N` / `Ctrl-P` | Select next/previous result |
 | `Enter` | Copy the selected headword |
-| `Alt-Enter` | Copy and open the selected result's OneLook link |
+| `Ctrl-O` | Copy and open the selected result's OneLook link |
 | `Esc` | Clear the query; press again on an empty query to quit |
 | `Ctrl-C` | Quit immediately |
 
 The preview ends with a terminal-native OneLook link for the selected result.
 Hold Ctrl and click the URL to open that result in your browser.
-In a local session, `Alt-Enter` also opens the browser after copying the URL.
+In a local session, `Ctrl-O` also opens the browser after copying the URL.
 Over SSH it copies through OSC 52 without trying to launch a browser on the
 remote host; use the OSC 8 preview link to open it on the client machine.
 

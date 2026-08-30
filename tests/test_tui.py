@@ -506,7 +506,7 @@ def test_wrapped_preview_preserves_osc8_sequences_without_counting_their_width()
     )
 
 
-def test_alt_enter_binding_copies_the_selected_link():
+def test_control_o_binding_copies_the_selected_link_without_using_escape_prefix():
     ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
     actions = []
     ui._copy_selected_link = lambda: actions.append("copy-link")
@@ -514,13 +514,16 @@ def test_alt_enter_binding_copies_the_selected_link():
         binding = next(
             binding
             for binding in ui.application.key_bindings.get_bindings_for_keys(
-                (Keys.Escape, Keys.Enter)
+                (Keys.ControlO,)
             )
             if binding.filter()
         )
         binding.handler(SimpleNamespace(app=ui.application))
 
         assert actions == ["copy-link"]
+        assert ui.application.key_bindings.get_bindings_for_keys(
+            (Keys.Escape, Keys.Enter)
+        ) == []
     finally:
         ui.close()
 
@@ -1121,17 +1124,20 @@ def test_results_and_preview_stack_on_narrow_terminals():
         ui.close()
 
 
-def test_escape_clears_a_nonempty_query_before_it_can_quit():
+def test_escape_is_eager_and_not_a_prefix_when_clearing_the_query():
     ui = NativeTui(lambda _query, **_kwargs: {"exact_match": None, "candidates": []})
     ui.query.text = "tailor"
     try:
         ui._clear_or_exit()
 
         assert ui.query.text == ""
-        assert all(
-            not binding.eager()
+        assert any(
+            binding.eager()
             for binding in ui.application.key_bindings.get_bindings_for_keys((Keys.Escape,))
         )
+        assert ui.application.key_bindings.get_bindings_starting_with_keys(
+            (Keys.Escape,)
+        ) == []
         assert ui.application.ttimeoutlen <= 0.02
     finally:
         ui.close()
