@@ -8,6 +8,7 @@ import re
 import sqlite3
 import threading
 import uuid
+from contextlib import closing
 from pathlib import Path
 from typing import cast
 
@@ -174,14 +175,15 @@ class EmotionClassifier:
     def _read_cache(self, key: str) -> dict[str, float] | None:
         if not self._cache_path.is_file():
             return None
-        with sqlite3.connect(self._cache_path) as connection:
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS predictions "
-                "(cache_key TEXT PRIMARY KEY, scores_json TEXT NOT NULL)"
-            )
-            row = connection.execute(
-                "SELECT scores_json FROM predictions WHERE cache_key = ?", (key,)
-            ).fetchone()
+        with closing(sqlite3.connect(self._cache_path)) as connection:
+            with connection:
+                connection.execute(
+                    "CREATE TABLE IF NOT EXISTS predictions "
+                    "(cache_key TEXT PRIMARY KEY, scores_json TEXT NOT NULL)"
+                )
+                row = connection.execute(
+                    "SELECT scores_json FROM predictions WHERE cache_key = ?", (key,)
+                ).fetchone()
         if row is None:
             return None
         try:
@@ -194,16 +196,17 @@ class EmotionClassifier:
 
     def _write_cache(self, key: str, scores: dict[str, float]) -> None:
         self._cache_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self._cache_path) as connection:
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS predictions "
-                "(cache_key TEXT PRIMARY KEY, scores_json TEXT NOT NULL)"
-            )
-            connection.execute(
-                "INSERT OR REPLACE INTO predictions(cache_key, scores_json) VALUES (?, ?)",
-                (key, json.dumps(scores, sort_keys=True)),
-            )
+        with closing(sqlite3.connect(self._cache_path)) as connection:
+            with connection:
+                connection.execute("PRAGMA journal_mode=WAL")
+                connection.execute(
+                    "CREATE TABLE IF NOT EXISTS predictions "
+                    "(cache_key TEXT PRIMARY KEY, scores_json TEXT NOT NULL)"
+                )
+                connection.execute(
+                    "INSERT OR REPLACE INTO predictions(cache_key, scores_json) VALUES (?, ?)",
+                    (key, json.dumps(scores, sort_keys=True)),
+                )
 
     def _quarantine_corrupt_cache(self) -> None:
         marker = uuid.uuid4().hex

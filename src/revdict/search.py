@@ -1,4 +1,3 @@
-import json
 import math
 from contextvars import ContextVar
 
@@ -10,6 +9,7 @@ from revdict import phonetics
 from revdict import query_syntax
 from revdict import sort
 from revdict import structural_search
+from revdict.compact_index import CompactFacets
 from revdict.progress import ProgressReporter
 from revdict.models import phonetics as phonetics_models
 from revdict.models import stress
@@ -18,10 +18,14 @@ from revdict.models.embedder import MODEL_REVISION as EMBEDDING_MODEL_REVISION
 from revdict.models.embedder import Embedder
 from revdict.models.emotion import EmotionClassifier, format_emotion_label, tag_emotion
 from revdict.models.reranker import Reranker
-from revdict.index_bundle import load_manifest, resolve_active_index_dir, validate_loaded_index
+from revdict.index_bundle import (
+    SCHEMA_VERSION, load_manifest, read_manifest_unchecked,
+    resolve_active_index_dir, validate_loaded_index,
+)
 from revdict.paths import INDEX_DIR
 
 _state: dict = {}
+RERANK_CANDIDATE_POOL = 600
 _load_progress: ContextVar[ProgressReporter | None] = ContextVar("revdict_load_progress", default=None)
 
 
@@ -80,6 +84,50 @@ def cosine_top_k_mapped(
         (int(selected_records[local]), float(scores[local]))
         for local in top_local
     ]
+
+
+def rerank_retrieved(
+    query: str,
+    retrieved: list[tuple[int, float]],
+    metadata,
+    reranker: Reranker,
+    record_embedding_indices: np.ndarray | None = None,
+) -> list[float]:
+    """Score every retrieved record while evaluating each definition once.
+
+    The compact record-to-embedding mapping is also the authoritative mapping
+    from sense rows to unique definition text. Multiple records in the
+    600-record retrieval pool often share one definition, and a cross-encoder
+    receives exactly the same pair for each of them. Score one representative
+    and expand its result back to every original record position so the pool,
+    frequency adjustment, headword deduplication, and tie behavior all retain
+    their existing inputs.
+    """
+    if not retrieved:
+        return []
+
+    if record_embedding_indices is None:
+        definitions = [metadata[row]["definition"] for row, _ in retrieved]
+        return reranker.score(query, definitions)
+
+    unique_definitions: list[str] = []
+    unique_by_embedding: dict[int, int] = {}
+    record_to_unique: list[int] = []
+    for row, _ in retrieved:
+        embedding_id = int(record_embedding_indices[row])
+        unique_index = unique_by_embedding.get(embedding_id)
+        if unique_index is None:
+            unique_index = len(unique_definitions)
+            unique_by_embedding[embedding_id] = unique_index
+            unique_definitions.append(metadata[row]["definition"])
+        record_to_unique.append(unique_index)
+
+    unique_scores = reranker.score(query, unique_definitions)
+    if len(unique_scores) != len(unique_definitions):
+        raise RuntimeError(
+            "Reranker returned a different number of scores than definitions"
+        )
+    return [unique_scores[index] for index in record_to_unique]
 
 
 def dedupe_by_headword(
@@ -162,7 +210,7 @@ def filter_by_phonetics(
 
 
 def matching_filter_row_indices(
-    metadata: list[dict],
+    metadata: list[dict] | CompactFacets,
     candidate_rows: list[int] | None,
     *,
     category: str | None,
@@ -178,6 +226,17 @@ def matching_filter_row_indices(
     )
     if not has_category and not has_phonetics:
         return candidate_rows
+    if isinstance(metadata, CompactFacets):
+        matched = metadata.matching_rows(
+            candidate_rows,
+            category=category,
+            syllables=syllables,
+            primary_vowel=primary_vowel,
+            rhyme_key=rhyme_key,
+            sounds_like_phonemes=sounds_like_phonemes,
+            meter=meter,
+        )
+        return None if matched is None else matched.tolist()
     rows = range(len(metadata)) if candidate_rows is None else candidate_rows
     matched = []
     for row in rows:
@@ -290,13 +349,11 @@ def combine_score(
     return raw_score + freq
 
 
-def _load_literary_frequency(index_dir=None) -> dict[str, float]:
+def _load_literary_frequency(index_dir=None, word_index=None):
+    """Compatibility seam backed only by compact frequency artifacts."""
     index_dir = resolve_active_index_dir(INDEX_DIR) if index_dir is None else index_dir
-    path = index_dir / "literary_frequency.json"
-    if not path.exists():
-        return {}
-    with path.open(encoding="utf-8") as f:
-        return json.load(f)
+    words = word_index if word_index is not None else dictionary.load_word_index(index_dir)
+    return dictionary.CompactFrequency(words)
 
 
 def _load_state() -> dict:
@@ -305,49 +362,83 @@ def _load_state() -> dict:
         # publish a newer bundle, but this process finishes loading one
         # immutable, internally consistent version.
         index_dir = resolve_active_index_dir(INDEX_DIR)
-        manifest = load_manifest(index_dir)
-        if manifest is not None:
+        raw_manifest = read_manifest_unchecked(index_dir)
+        manifest = raw_manifest if raw_manifest and raw_manifest.get("schema_version") == SCHEMA_VERSION else None
+        if manifest is None:
+            version = None if raw_manifest is None else raw_manifest.get("schema_version")
+            raise RuntimeError(
+                f"Index optimization is required (found schema {version!r}, expected {SCHEMA_VERSION}); "
+                "start the daemon to perform the atomic upgrade"
+            )
+        loading = {}
+        try:
+            _load_detail("Loading embedding index")
+            loading["embeddings"] = np.load(index_dir / "embeddings.npy", mmap_mode="r")
+            loading["record_embedding_indices"] = np.load(
+                index_dir / "record_embeddings.npy", mmap_mode="r"
+            )
             indexed_model = manifest.get("models", {}).get("embedding", {})
-            expected_model = {
-                "name": EMBEDDING_MODEL_NAME,
-                "revision": EMBEDDING_MODEL_REVISION,
-            }
+            expected_model = {"name": EMBEDDING_MODEL_NAME, "revision": EMBEDDING_MODEL_REVISION}
             if indexed_model != expected_model:
                 raise RuntimeError(
                     "Index embedding model does not match this revdict version; "
                     "run `revdict build-index` to rebuild it"
                 )
-        _load_detail("Loading embedding index")
-        _state["embeddings"] = np.load(index_dir / "embeddings.npy", mmap_mode="r")
-        mapping_path = index_dir / "record_embeddings.npy"
-        _state["record_embedding_indices"] = (
-            np.load(mapping_path, mmap_mode="r") if mapping_path.is_file() else None
-        )
-        _load_detail("Calculating embedding norms")
-        _state["embedding_norms"] = np.linalg.norm(_state["embeddings"], axis=1) + 1e-12
-        _load_detail("Loading dictionary metadata")
-        _state["metadata"] = dictionary.load_metadata(index_dir)
-        _load_detail("Loading word index")
-        _state["word_index"] = dictionary.load_word_index(index_dir)
-        validate_loaded_index(
-            index_dir,
-            _state["embeddings"],
-            _state["metadata"],
-            _state["word_index"],
-            _state["record_embedding_indices"],
-        )
-        _load_detail("Starting embedding model")
-        _state["embedder"] = Embedder()
-        _load_detail("Starting reranker")
-        _state["reranker"] = Reranker()
-        _load_detail("Loading frequency data")
-        _state["literary_frequency"] = _load_literary_frequency(index_dir)
-        _state["index_dir"] = index_dir
-        _state["manifest"] = manifest
-        _state["classifier"] = None
+            _load_detail("Calculating embedding norms")
+            loading["embedding_norms"] = np.linalg.norm(loading["embeddings"], axis=1) + 1e-12
+            _load_detail("Loading dictionary metadata")
+            loading["metadata"] = dictionary.load_metadata(index_dir)
+            _load_detail("Loading word index")
+            loading["word_index"] = dictionary.load_word_index(index_dir)
+            if isinstance(loading["word_index"], dictionary.CompactWordIndex):
+                loading["facets"] = CompactFacets.open(index_dir)
+                loading["headwords"] = list(loading["word_index"])
+            validate_loaded_index(
+                index_dir,
+                loading["embeddings"],
+                loading["metadata"],
+                loading["word_index"],
+                loading["record_embedding_indices"],
+            )
+            _load_detail("Starting embedding model")
+            loading["embedder"] = Embedder()
+            _load_detail("Starting reranker")
+            loading["reranker"] = Reranker()
+            _load_detail("Loading frequency data")
+            if isinstance(loading["word_index"], dictionary.CompactWordIndex):
+                loading["literary_frequency"] = dictionary.CompactFrequency(
+                    loading["word_index"]
+                )
+            else:
+                loading["literary_frequency"] = _load_literary_frequency(index_dir)
+            loading["index_dir"] = index_dir
+            loading["manifest"] = manifest
+            loading["classifier"] = None
+        except Exception:
+            _close_state_values(loading)
+            raise
+        _state.update(loading)
     else:
         _load_detail("Using warm search state")
     return _state
+
+
+def _close_state_values(state: dict) -> None:
+    for name in ("facets", "metadata", "word_index"):
+        value = state.get(name)
+        close = getattr(value, "close", None)
+        if close is not None:
+            close()
+    for name in ("embeddings", "record_embedding_indices"):
+        mapping = getattr(state.get(name), "_mmap", None)
+        if mapping is not None:
+            mapping.close()
+
+
+def close_state() -> None:
+    """Release every mapping and descriptor owned by the warm runtime."""
+    _close_state_values(_state)
+    _state.clear()
 
 
 def get_classifier(state: dict) -> EmotionClassifier:
@@ -512,7 +603,7 @@ def search(
     # The retrieval pool must stay bigger than top_n even after dedup and
     # exact-match exclusion shrink it, so a larger -n still has enough real
     # candidates to draw from instead of silently returning fewer than asked.
-    retrieval_pool_size = max(75, top_n * 3)
+    retrieval_pool_size = max(RERANK_CANDIDATE_POOL, top_n * 3)
 
     restrict_row_indices = None
     suppress_exact_match = False
@@ -524,7 +615,7 @@ def search(
     # merely the first 75 retrieved rows. Otherwise a valid match outside that
     # arbitrary pool can never reach the UI.
     restrict_row_indices = matching_filter_row_indices(
-        metadata,
+        state.get("facets", metadata),
         restrict_row_indices,
         category=category,
         syllables=syllables,
@@ -537,13 +628,12 @@ def search(
     meaning_query = parsed.meaning_text if parsed.meaning_text is not None else query
     progress.completed("scope")
 
-    # query_vec is only computed on the branches that actually need cosine
-    # retrieval -- when the structural filter has already narrowed the pool
-    # to <= retrieval_pool_size rows, there's nothing to retrieve by
-    # embedding similarity, so encoding the query would be pure waste.
+    # Every non-empty semantic scope receives exhaustive cosine scores. When
+    # filters leave fewer than the pool floor, all eligible rows are reranked
+    # and cosine order remains the stable tie-break for equal reranker scores.
     progress.active("retrieve")
-    if restrict_row_indices is not None and len(restrict_row_indices) <= retrieval_pool_size:
-        retrieved = [(index, 0.0) for index in restrict_row_indices]
+    if restrict_row_indices is not None and not restrict_row_indices:
+        retrieved = []
     elif restrict_row_indices is not None:
         query_vec = state["embedder"].encode_query(meaning_query)
         if state.get("record_embedding_indices") is not None:
@@ -583,13 +673,18 @@ def search(
             )
     progress.completed("retrieve")
 
-    definitions = [metadata[index]["definition"] for index, _ in retrieved]
     # A structural filter that matches zero headwords (e.g. an anagram with
-    # no real solutions) reaches here with an empty `retrieved`/`definitions`
+    # no real solutions) reaches here with an empty `retrieved`
     # -- skip the reranker call entirely rather than relying on
     # CrossEncoder.predict's undocumented behavior on an empty batch.
-    if definitions:
-        rerank_scores = state["reranker"].score(meaning_query, definitions)
+    if retrieved:
+        rerank_scores = rerank_retrieved(
+            meaning_query,
+            retrieved,
+            metadata,
+            state["reranker"],
+            state.get("record_embedding_indices"),
+        )
     else:
         rerank_scores = []
     literary_frequency = state["literary_frequency"]

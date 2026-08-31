@@ -1,5 +1,3 @@
-from revdict import category as category_module
-from revdict import phonetics
 from revdict.pattern_matcher import compile_clauses
 from revdict.progress import ProgressReporter
 from revdict.query_syntax import ParsedQuery
@@ -76,22 +74,46 @@ def run_structural(
 
     progress = progress or ProgressReporter()
     progress.active("scope")
-    headwords = matching_headwords(parsed, word_index)
+    headwords = matching_headwords(parsed, state.get("headwords", word_index))
     progress.completed("scope")
     progress.active("retrieve")
-    if category and category != "all":
-        headwords = [
-            word
-            for word in headwords
-            if category_module.matches_category(metadata[word_index[word][0]], category)
-        ]
+    facets = state.get("facets")
+    has_filters = bool(category and category != "all") or syllables is not None or any(
+        [primary_vowel, rhyme_key, sounds_like_phonemes, meter]
+    )
+    selected_rows = {word: word_index[word][0] for word in headwords}
+    if facets is not None and has_filters:
+        candidate_rows = []
+        for word in headwords:
+            candidate_rows.extend(word_index[word])
+        matched_rows = facets.matching_rows(
+            candidate_rows,
+            category=category,
+            syllables=syllables,
+            primary_vowel=primary_vowel,
+            rhyme_key=rhyme_key,
+            sounds_like_phonemes=sounds_like_phonemes,
+            meter=meter,
+        )
+        accepted = set(matched_rows.tolist())
+        selected_rows = {}
+        for word in headwords:
+            matching_rows = (row for row in word_index[word] if row in accepted)
+            row = next(matching_rows, None)
+            if row is not None:
+                selected_rows[word] = row
+        headwords = list(selected_rows)
+    elif category and category != "all":
+        from revdict import category as category_module
+        headwords = [word for word in headwords if category_module.matches_category(metadata[word_index[word][0]], category)]
     # syllables is checked with `is not None` rather than folded into the
     # same any([...]) truthiness check as the other 4 -- 0 is a real,
     # meaningful filter value for syllable count (no real word has 0
     # syllables, so syllables=0 should exclude everything), but Python's
     # any() treats 0 as falsy, which would otherwise make this guard
     # silently skip filtering whenever syllables was exactly 0.
-    if syllables is not None or any([primary_vowel, rhyme_key, sounds_like_phonemes, meter]):
+    if facets is None and (syllables is not None or any([primary_vowel, rhyme_key, sounds_like_phonemes, meter])):
+        from revdict import phonetics
         headwords = [
             word
             for word in headwords
@@ -108,10 +130,10 @@ def run_structural(
     relevances = relative_relevance([score for _, score in ranked])
 
     progress.active("enrich")
-    selected_records = [metadata[word_index[headword][0]] for headword, _ in ranked]
+    selected_records = [metadata[selected_rows[headword]] for headword, _ in ranked]
     preload_emotions(selected_records, state)
     candidates = [
-        build_candidate(metadata[word_index[headword][0]], relevance, state)
+        build_candidate(metadata[selected_rows[headword]], relevance, state)
         for (headword, _), relevance in zip(ranked, relevances)
     ]
     progress.completed("enrich")

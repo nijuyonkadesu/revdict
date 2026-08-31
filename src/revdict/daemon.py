@@ -162,7 +162,7 @@ def _process_start_identity(pid: int) -> str | None:
 
 
 def _write_daemon_record(descriptor: int, phase: str) -> None:
-    if phase not in {"starting", "ready"}:
+    if phase not in {"starting", "optimizing-index", "ready"}:
         raise ValueError(f"invalid daemon phase: {phase}")
     identity = _process_start_identity(os.getpid())
     if identity is None:
@@ -196,7 +196,7 @@ def _read_daemon_record() -> DaemonRecord | None:
         not isinstance(pid, int)
         or isinstance(pid, bool)
         or not isinstance(identity, str)
-        or phase not in {"starting", "ready"}
+        or phase not in {"starting", "optimizing-index", "ready"}
     ):
         return None
     return DaemonRecord(pid=pid, identity=identity, phase=phase)
@@ -543,6 +543,8 @@ def daemon_status() -> str:
     mem_str = f", {mem:.2f} GB" if mem is not None else ""
     if record.phase == "starting":
         return f"revdict daemon is starting (pid {record.pid}{mem_str})."
+    if record.phase == "optimizing-index":
+        return f"revdict daemon is optimizing its index (pid {record.pid}{mem_str})."
     if _socket_is_reachable():
         return f"revdict daemon is running (pid {record.pid}{mem_str})."
     return (
@@ -632,16 +634,20 @@ def run_server() -> None:
         from revdict.query_env import configure_offline_quiet_env
 
         configure_offline_quiet_env()
-        from revdict import search as search_mod
-        from revdict import dictionary as dict_mod
-        from revdict.index_bundle import resolve_active_index_dir
+        from revdict.index_bundle import ensure_schema_v3, index_schema_version, resolve_active_index_dir
 
         active_index_dir = resolve_active_index_dir(INDEX_DIR)
-        _autocomplete_words = sorted(dict_mod.load_word_index(active_index_dir).keys())
+        if index_schema_version(active_index_dir) != 3:
+            _write_daemon_record(lock_descriptor, "optimizing-index")
+        ensure_schema_v3(INDEX_DIR)
+
+        from revdict import search as search_mod
+        search_state = search_mod._load_state()
+        _autocomplete_words = search_state["headwords"]
         _autocomplete_by_length: dict[int, list[str]] = {}
         for word in _autocomplete_words:
             _autocomplete_by_length.setdefault(len(word), []).append(word)
-        _autocomplete_frequency = search_mod._load_literary_frequency(active_index_dir)
+        _autocomplete_frequency = search_state["literary_frequency"]
 
         DAEMON_SOCKET_PATH.parent.mkdir(parents=True, exist_ok=True)
 
@@ -701,6 +707,9 @@ def run_server() -> None:
             except Exception as error:
                 print(f"revdict daemon: error handling a request: {error}")
     finally:
+        search_module = locals().get("search_mod")
+        if search_module is not None:
+            search_module.close_state()
         if server is not None:
             server.close()
         if owns_socket:

@@ -22,6 +22,7 @@ from revdict.data.wiktionary_source import (
     stream_filtered_entries_from_gzip,
 )
 from revdict.data.wordnet_source import load_wordnet_senses, wordnet_provenance
+from revdict.compact_index import write_compact_artifacts
 from revdict.index_bundle import (
     build_manifest,
     create_staging_index,
@@ -152,6 +153,8 @@ def validate_build_arrays(
     validate_records(records)
     if embeddings.ndim != 2 or embeddings.shape[0] == 0 or embeddings.shape[1] == 0:
         raise ValueError(f"Embedding model returned an invalid shape: {embeddings.shape}")
+    if embeddings.dtype != np.dtype("float32"):
+        raise ValueError(f"Embedding model returned {embeddings.dtype}; schema v3 requires float32")
     if record_embedding_indices.shape != (len(records),):
         raise ValueError("Record-to-embedding mapping has the wrong length")
     if int(record_embedding_indices.min()) < 0 or int(record_embedding_indices.max()) >= len(embeddings):
@@ -299,9 +302,9 @@ def _build(refresh_data: bool = False) -> None:
 
         with (staging_dir / "word_index.json").open("w", encoding="utf-8") as f:
             json.dump(word_index, f)
-
         with (staging_dir / "literary_frequency.json").open("w", encoding="utf-8") as f:
             json.dump(literary_frequency, f)
+        write_compact_artifacts(staging_dir, word_index, literary_frequency)
 
         manifest = build_manifest(
             staging_dir,

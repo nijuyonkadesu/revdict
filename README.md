@@ -54,8 +54,19 @@ scoped staging directory, records corpus hashes, source metadata, model
 revisions, artifact checksums, schema version, dimensions, row counts, and
 coverage statistics in `manifest.json`, and validates every reference before
 atomically switching the `index/current` symlink. If validation or publication
-fails, the previous index remains current. Legacy indexes stored directly in
-the index directory remain readable until a successful rebuild.
+fails, the previous index remains current. On daemon startup, schema-v2 and
+legacy indexes are upgraded locally under the same build lock before the
+socket opens. Status reports this as `optimizing-index`; concurrent launchers
+wait for the live owner without a timeout. The upgrade reuses immutable source
+artifacts, derives compact schema-v3 arrays, validates exact equivalence, and
+atomically switches `current`. It does not download data, regenerate
+embeddings, or delete the previous bundle.
+
+Normal search never loads the corpus-wide JSON dictionaries. Metadata records
+are decoded only for exact senses, the reranker pool, and displayed results;
+headwords, frequencies, filters, and phonetic structures use read-only mapped
+schema-v3 artifacts. Missing or invalid compact artifacts fail with an index
+optimization error instead of falling back to a full JSON scan.
 
 Downloaded datasets have adjacent `.source.json` provenance files. Existing
 files are never treated as valid merely because they exist: their hashes and
@@ -215,8 +226,8 @@ data until you stop it — `build-index` will remind you if this applies.
 
 Daemon startup messages and request errors are written to
 `~/.cache/rev_dictionary/daemon.log`; tail it to troubleshoot a daemon
-that won't start or keeps crashing. Status distinguishes a daemon that is
-still `starting` from a `ready` process whose socket has become `unhealthy`.
+that won't start or keeps crashing. Status distinguishes `starting`,
+`optimizing-index`, and a `ready` process whose socket has become `unhealthy`.
 
 ## Clipboard copy on Enter
 
