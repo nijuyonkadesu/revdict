@@ -23,6 +23,7 @@ from revdict.index_bundle import (
     resolve_active_index_dir, validate_loaded_index,
 )
 from revdict.paths import INDEX_DIR
+from revdict.structural_index import CompactStructuralIndex
 
 _state: dict = {}
 RERANK_CANDIDATE_POOL = 600
@@ -211,7 +212,7 @@ def filter_by_phonetics(
 
 def matching_filter_row_indices(
     metadata: list[dict] | CompactFacets,
-    candidate_rows: list[int] | None,
+    candidate_rows: list[int] | np.ndarray | None,
     *,
     category: str | None,
     syllables: int | None,
@@ -219,7 +220,7 @@ def matching_filter_row_indices(
     rhyme_key: str | None,
     sounds_like_phonemes: list[str] | None,
     meter: str | None,
-) -> list[int] | None:
+) -> list[int] | np.ndarray | None:
     has_category = bool(category and category != "all")
     has_phonetics = syllables is not None or any(
         [primary_vowel, rhyme_key, sounds_like_phonemes, meter]
@@ -236,7 +237,7 @@ def matching_filter_row_indices(
             sounds_like_phonemes=sounds_like_phonemes,
             meter=meter,
         )
-        return None if matched is None else matched.tolist()
+        return matched
     rows = range(len(metadata)) if candidate_rows is None else candidate_rows
     matched = []
     for row in rows:
@@ -393,6 +394,9 @@ def _load_state() -> dict:
             if isinstance(loading["word_index"], dictionary.CompactWordIndex):
                 loading["facets"] = CompactFacets.open(index_dir)
                 loading["headwords"] = list(loading["word_index"])
+                loading["structural_index"] = CompactStructuralIndex.open(
+                    index_dir, len(loading["word_index"])
+                )
             validate_loaded_index(
                 index_dir,
                 loading["embeddings"],
@@ -424,7 +428,7 @@ def _load_state() -> dict:
 
 
 def _close_state_values(state: dict) -> None:
-    for name in ("facets", "metadata", "word_index"):
+    for name in ("structural_index", "facets", "metadata", "word_index"):
         value = state.get(name)
         close = getattr(value, "close", None)
         if close is not None:
@@ -612,6 +616,7 @@ def search(
             parsed,
             state["word_index"],
             state.get("headwords"),
+            state.get("structural_index"),
         )
         suppress_exact_match = True
 
@@ -636,7 +641,7 @@ def search(
     # filters leave fewer than the pool floor, all eligible rows are reranked
     # and cosine order remains the stable tie-break for equal reranker scores.
     progress.active("retrieve")
-    if restrict_row_indices is not None and not restrict_row_indices:
+    if restrict_row_indices is not None and len(restrict_row_indices) == 0:
         retrieved = []
     elif restrict_row_indices is not None:
         query_vec = state["embedder"].encode_query(meaning_query)

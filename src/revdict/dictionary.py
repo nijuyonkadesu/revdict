@@ -186,6 +186,25 @@ class CompactWordIndex(Mapping[str, list[int]]):
         end = int(self._row_offsets[end_word_id])
         return self._rows[start:end]
 
+    def rows_for_ids(self, word_ids: np.ndarray | list[int]) -> np.ndarray:
+        """Return CSR rows for sorted unique word IDs in lexical-ID order."""
+        ids = np.asarray(word_ids, dtype="int64")
+        if not len(ids):
+            return np.empty(0, dtype="uint32")
+        starts = np.asarray(self._row_offsets[ids], dtype="int64")
+        ends = np.asarray(self._row_offsets[ids + 1], dtype="int64")
+        counts = ends - starts
+        total = int(counts.sum())
+        if not total:
+            return np.empty(0, dtype="uint32")
+        group_offsets = np.repeat(np.cumsum(counts) - counts, counts)
+        positions = np.repeat(starts, counts) + np.arange(total) - group_offsets
+        return np.asarray(self._rows[positions], dtype="uint32")
+
+    def first_rows_for_ids(self, word_ids: np.ndarray | list[int]) -> np.ndarray:
+        ids = np.asarray(word_ids, dtype="int64")
+        return np.asarray(self._rows[self._row_offsets[ids]], dtype="uint32")
+
     def first_row_for_id(self, word_id: int) -> int:
         return int(self._rows[int(self._row_offsets[word_id])])
 

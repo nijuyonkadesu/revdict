@@ -8,6 +8,7 @@ import re
 import sqlite3
 import threading
 import uuid
+from collections import OrderedDict
 from contextlib import closing
 from pathlib import Path
 from typing import cast
@@ -31,6 +32,8 @@ _SENTIMENT_FLAGS = {"positive", "negative", "neutral"}
 _SPECIFIC_EMOTIONS = frozenset(EMOTION_POLARITY) - {"neutral", "unknown"}
 CLASSIFIER_MODEL_NAME = "j-hartmann/emotion-english-distilroberta-base"
 CLASSIFIER_MODEL_REVISION = "0e1cd914e3d46199ed785853e12b57304e04178b"
+CLASSIFIER_BATCH_SIZE = 32
+CLASSIFIER_MEMORY_CACHE_SIZE = 4096
 SENTIWORDNET_MIN_MARGIN = 0.25
 CLASSIFIER_MIN_CONFIDENCE = 0.70
 CLASSIFIER_MIN_MARGIN = 0.20
@@ -155,7 +158,13 @@ class EmotionClassifier:
         self._pipe = None
         self._cache_path = Path(EMOTION_CACHE_PATH if cache_path is None else cache_path)
         self._lock = threading.Lock()
-        self._memory_cache: dict[str, dict[str, float]] = {}
+        self._memory_cache: OrderedDict[str, dict[str, float]] = OrderedDict()
+
+    def _remember(self, key: str, scores: dict[str, float]) -> None:
+        self._memory_cache[key] = scores
+        self._memory_cache.move_to_end(key)
+        while len(self._memory_cache) > CLASSIFIER_MEMORY_CACHE_SIZE:
+            self._memory_cache.popitem(last=False)
 
     def _pipeline(self):
         if self._pipe is None:
@@ -164,6 +173,11 @@ class EmotionClassifier:
                 model=CLASSIFIER_MODEL_NAME,
                 revision=CLASSIFIER_MODEL_REVISION,
                 top_k=None,
+                # Transformers otherwise defaults list inference to batches
+                # of one.  The result definitions are independent inputs, so
+                # true CPU batching preserves the pinned model's scores while
+                # avoiding one forward-pass setup per displayed record.
+                batch_size=CLASSIFIER_BATCH_SIZE,
             )
         return self._pipe
 
@@ -173,28 +187,49 @@ class EmotionClassifier:
         return hashlib.sha256(material).hexdigest()
 
     def _read_cache(self, key: str) -> dict[str, float] | None:
+        return self._read_cache_many([key]).get(key)
+
+    def _read_cache_many(self, keys: list[str]) -> dict[str, dict[str, float]]:
+        if not keys:
+            return {}
         if not self._cache_path.is_file():
-            return None
+            return {}
+        rows = []
         with closing(sqlite3.connect(self._cache_path)) as connection:
             with connection:
                 connection.execute(
                     "CREATE TABLE IF NOT EXISTS predictions "
                     "(cache_key TEXT PRIMARY KEY, scores_json TEXT NOT NULL)"
                 )
-                row = connection.execute(
-                    "SELECT scores_json FROM predictions WHERE cache_key = ?", (key,)
-                ).fetchone()
-        if row is None:
-            return None
-        try:
-            value = json.loads(row[0])
-        except json.JSONDecodeError:
-            return None
-        if not isinstance(value, dict):
-            return None
-        return {str(label): float(score) for label, score in value.items()}
+                # Stay below SQLite builds' conservative host-parameter limit.
+                for start in range(0, len(keys), 500):
+                    chunk = keys[start : start + 500]
+                    placeholders = ",".join("?" for _key in chunk)
+                    rows.extend(
+                        connection.execute(
+                            "SELECT cache_key, scores_json FROM predictions "
+                            f"WHERE cache_key IN ({placeholders})",
+                            chunk,
+                        )
+                    )
+        found = {}
+        for cache_key, raw_scores in rows:
+            try:
+                value = json.loads(raw_scores)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                found[cache_key] = {
+                    str(label): float(score) for label, score in value.items()
+                }
+        return found
 
     def _write_cache(self, key: str, scores: dict[str, float]) -> None:
+        self._write_cache_many({key: scores})
+
+    def _write_cache_many(self, entries: dict[str, dict[str, float]]) -> None:
+        if not entries:
+            return
         self._cache_path.parent.mkdir(parents=True, exist_ok=True)
         with closing(sqlite3.connect(self._cache_path)) as connection:
             with connection:
@@ -203,9 +238,12 @@ class EmotionClassifier:
                     "CREATE TABLE IF NOT EXISTS predictions "
                     "(cache_key TEXT PRIMARY KEY, scores_json TEXT NOT NULL)"
                 )
-                connection.execute(
+                connection.executemany(
                     "INSERT OR REPLACE INTO predictions(cache_key, scores_json) VALUES (?, ?)",
-                    (key, json.dumps(scores, sort_keys=True)),
+                    (
+                        (key, json.dumps(scores, sort_keys=True))
+                        for key, scores in entries.items()
+                    ),
                 )
 
     def _quarantine_corrupt_cache(self) -> None:
@@ -225,27 +263,34 @@ class EmotionClassifier:
         """Classify uncached definitions in one transformer batch."""
         unique_texts = list(dict.fromkeys(texts))
         predictions: dict[str, dict] = {}
-        missing = []
         with self._lock:
+            keys = {text: self._cache_key(text) for text in unique_texts}
+            disk_keys = [key for key in keys.values() if key not in self._memory_cache]
+            try:
+                disk_scores = self._read_cache_many(disk_keys)
+            except sqlite3.DatabaseError:
+                self._quarantine_corrupt_cache()
+                disk_scores = {}
+
+            missing = []
             for text in unique_texts:
-                key = self._cache_key(text)
+                key = keys[text]
                 scores = self._memory_cache.get(key)
+                if scores is not None:
+                    self._memory_cache.move_to_end(key)
                 if scores is None:
-                    try:
-                        scores = self._read_cache(key)
-                    except sqlite3.DatabaseError:
-                        self._quarantine_corrupt_cache()
-                        scores = None
+                    scores = disk_scores.get(key)
                 if scores is None:
                     missing.append(text)
                     continue
-                self._memory_cache[key] = scores
+                self._remember(key, scores)
                 predictions[text] = self._prediction(scores)
 
             if missing:
                 raw_groups = self._pipeline()(missing)
                 if len(missing) == 1 and raw_groups and isinstance(raw_groups[0], dict):
                     raw_groups = [raw_groups]
+                pending_writes = {}
                 for text, results in zip(missing, raw_groups, strict=True):
                     scores = {
                         str(item["label"]).lower(): float(item["score"])
@@ -253,14 +298,15 @@ class EmotionClassifier:
                     }
                     if not scores:
                         raise RuntimeError("Emotion classifier returned no labels")
-                    key = self._cache_key(text)
-                    self._memory_cache[key] = scores
-                    try:
-                        self._write_cache(key, scores)
-                    except sqlite3.DatabaseError:
-                        self._quarantine_corrupt_cache()
-                        self._write_cache(key, scores)
+                    key = keys[text]
+                    self._remember(key, scores)
+                    pending_writes[key] = scores
                     predictions[text] = self._prediction(scores)
+                try:
+                    self._write_cache_many(pending_writes)
+                except sqlite3.DatabaseError:
+                    self._quarantine_corrupt_cache()
+                    self._write_cache_many(pending_writes)
         return [predictions[text] for text in texts]
 
     @staticmethod

@@ -1,15 +1,22 @@
 import bisect
 import heapq
 
+import numpy as np
+
 from revdict.pattern_matcher import compile_clauses
 from revdict.progress import ProgressReporter
 from revdict.query_syntax import ParsedQuery
+from revdict.structural_index import (
+    EXPAND_SKIP_WORDS,
+    CompactStructuralIndex,
+    ascii_letter_mask,
+)
 
 # Real acronym expansion skips small function words rather than taking
 # every token's initial literally -- "national aeronautics and space
 # administration" only reduces to n-a-s-a once "and" is dropped (verified
 # by hand: naively including it gives n-a-a-s-a, which never matches).
-_EXPAND_SKIP_WORDS = {"and", "of", "the", "for", "a", "an", "&"}
+_EXPAND_SKIP_WORDS = EXPAND_SKIP_WORDS
 _PREFIX_WILDCARDS = frozenset("*?#@")
 
 
@@ -49,6 +56,131 @@ def _prefix_matches(words: list[str], prefix: str) -> list[str]:
 
 def _frequency_rank(pair: tuple[str, float]) -> tuple[float, str]:
     return -pair[1], pair[0]
+
+
+def _intersect_candidates(candidates: list[np.ndarray]) -> np.ndarray | None:
+    usable = [np.asarray(values, dtype="uint32") for values in candidates if values is not None]
+    if not usable:
+        return None
+    usable.sort(key=len)
+    result = usable[0]
+    for values in usable[1:]:
+        if not len(result):
+            break
+        result = np.intersect1d(result, values, assume_unique=True)
+    return np.asarray(result, dtype="uint32")
+
+
+def _prefix_word_ids(words: list[str], prefix: str) -> np.ndarray:
+    start, end = _prefix_bounds(words, prefix)
+    return np.arange(start, end, dtype="uint32")
+
+
+def _wildcard_clause_plan(
+    clause: str,
+    planner: CompactStructuralIndex,
+    words: list[str],
+) -> tuple[np.ndarray | None, bool]:
+    lowered = clause.lower()
+    wildcard_positions = [
+        index for index, character in enumerate(lowered) if character in _PREFIX_WILDCARDS
+    ]
+    if not wildcard_positions:
+        candidates = [
+            _prefix_word_ids(words, lowered),
+            planner.ids_with_length(len(lowered)),
+        ]
+        return _intersect_candidates(candidates), True
+
+    first_wildcard = wildcard_positions[0]
+    last_wildcard = wildcard_positions[-1]
+    literal_prefix = lowered[:first_wildcard]
+    literal_suffix = lowered[last_wildcard + 1 :]
+    candidates: list[np.ndarray] = []
+    if literal_prefix:
+        candidates.append(_prefix_word_ids(words, literal_prefix))
+    if literal_suffix:
+        candidates.append(planner.suffix_ids(literal_suffix))
+    if "*" not in lowered:
+        candidates.append(planner.ids_with_length(len(lowered)))
+
+    literal_letters = "".join(
+        character for character in lowered if character not in _PREFIX_WILDCARDS
+    )
+    required_mask = ascii_letter_mask(literal_letters)
+    if required_mask:
+        candidates.append(planner.ids_with_letters(required_mask))
+
+    pure_prefix = _literal_prefix([lowered]) is not None
+    pure_suffix = (
+        lowered.startswith("*")
+        and lowered.count("*") == 1
+        and len(lowered) > 1
+        and not any(character in _PREFIX_WILDCARDS for character in lowered[1:])
+    )
+    exact_contains_letter = (
+        len(lowered) == 3
+        and lowered[0] == lowered[2] == "*"
+        and "a" <= lowered[1] <= "z"
+    )
+    return _intersect_candidates(candidates), (
+        lowered == "*" or pure_prefix or pure_suffix or exact_contains_letter
+    )
+
+
+def _clause_plan(
+    clause: str,
+    planner: CompactStructuralIndex,
+    words: list[str],
+) -> tuple[np.ndarray | None, bool]:
+    if "//" in clause:
+        signature = clause.strip("/").lower()
+        return planner.anagram_ids(signature), False
+    if clause.startswith("-"):
+        excluded = set(clause[1:].lower())
+        mask = ascii_letter_mask("".join(excluded))
+        candidates = planner.ids_without_letters(mask) if mask else None
+        return candidates, all("a" <= character <= "z" for character in excluded)
+    if clause.startswith("+"):
+        allowed = set(clause[1:].lower())
+        if all("a" <= character <= "z" for character in allowed):
+            return planner.ids_restricted_to_letters(
+                ascii_letter_mask("".join(allowed))
+            ), True
+        return None, False
+    return _wildcard_clause_plan(clause, planner, words)
+
+
+def planned_word_ids(
+    parsed: ParsedQuery,
+    planner: CompactStructuralIndex,
+    words: list[str],
+) -> np.ndarray:
+    """Return exact matching word IDs using indexes plus predicate confirmation."""
+    if parsed.mode == "expand":
+        return planner.acronym_ids(parsed.expand_target or "")
+    if parsed.mode == "phrase_contains":
+        return planner.phrase_ids(parsed.phrase_word or "")
+    if parsed.mode not in ("structural", "combined"):
+        raise ValueError(f"planned_word_ids does not support mode {parsed.mode!r}")
+
+    clause_plans = [
+        _clause_plan(clause, planner, words)
+        for clause in parsed.pattern_clauses
+    ]
+    candidates = _intersect_candidates(
+        [values for values, _exact in clause_plans if values is not None]
+    )
+    if candidates is None:
+        candidates = np.arange(len(words), dtype="uint32")
+    if all(exact for _values, exact in clause_plans):
+        return candidates
+
+    predicate = compile_clauses(parsed.pattern_clauses)
+    return np.fromiter(
+        (word_id for word_id in candidates if predicate(words[int(word_id)])),
+        dtype="uint32",
+    )
 
 
 def matching_headwords(
@@ -119,6 +251,85 @@ def _score_and_sort(
     return heapq.nsmallest(max(limit, 0), scored, key=_frequency_rank)
 
 
+def _run_compact_structural(
+    parsed: ParsedQuery,
+    state: dict,
+    top_n: int,
+    category: str | None,
+    syllables: int | None,
+    primary_vowel: str | None,
+    rhyme_key: str | None,
+    sounds_like_phonemes: list[str] | None,
+    meter: str | None,
+    progress: ProgressReporter,
+) -> dict:
+    from revdict.search import build_candidate, preload_emotions, relative_relevance
+
+    word_index = state["word_index"]
+    metadata = state["metadata"]
+    facets = state["facets"]
+    planner = state["structural_index"]
+    words = state["headwords"]
+
+    progress.active("scope")
+    word_ids = planned_word_ids(parsed, planner, words)
+    progress.completed("scope")
+
+    progress.active("retrieve")
+    has_filters = bool(category and category != "all") or syllables is not None or any(
+        [primary_vowel, rhyme_key, sounds_like_phonemes, meter]
+    )
+    if has_filters:
+        candidate_rows = word_index.rows_for_ids(word_ids)
+        matched_rows = facets.matching_rows(
+            candidate_rows,
+            category=category,
+            syllables=syllables,
+            primary_vowel=primary_vowel,
+            rhyme_key=rhyme_key,
+            sounds_like_phonemes=sounds_like_phonemes,
+            meter=meter,
+        )
+        matched_rows = np.asarray(matched_rows, dtype="uint32")
+        if len(matched_rows):
+            matched_word_ids = np.asarray(
+                word_index.row_headwords[matched_rows], dtype="uint32"
+            )
+            word_ids, first_positions = np.unique(
+                matched_word_ids, return_index=True
+            )
+            selected_rows = matched_rows[first_positions]
+        else:
+            word_ids = np.empty(0, dtype="uint32")
+            selected_rows = np.empty(0, dtype="uint32")
+    else:
+        selected_rows = word_index.first_rows_for_ids(word_ids)
+
+    frequencies = np.asarray(word_index.frequencies[word_ids], dtype="float64")
+    frequencies = np.nan_to_num(frequencies, copy=True, nan=0.0)
+    ranked_positions = heapq.nsmallest(
+        max(top_n, 0),
+        range(len(word_ids)),
+        key=lambda position: (-float(frequencies[position]), int(word_ids[position])),
+    )
+    ranked_scores = [float(frequencies[position]) for position in ranked_positions]
+    progress.completed("retrieve")
+    progress.active("filter")
+    progress.completed("filter")
+    relevances = relative_relevance(ranked_scores)
+
+    progress.active("enrich")
+    ranked_rows = [int(selected_rows[position]) for position in ranked_positions]
+    selected_records = [metadata[row] for row in ranked_rows]
+    preload_emotions(selected_records, state)
+    candidates = [
+        build_candidate(record, relevance, state)
+        for record, relevance in zip(selected_records, relevances)
+    ]
+    progress.completed("enrich")
+    return {"exact_match": None, "candidates": candidates}
+
+
 def run_structural(
     parsed: ParsedQuery,
     state: dict,
@@ -135,6 +346,26 @@ def run_structural(
     # category.CATEGORIES before calling this function; search() does that
     # eagerly before dispatch, so this function doesn't duplicate it.
 
+    progress = progress or ProgressReporter()
+    if (
+        state.get("structural_index") is not None
+        and state.get("facets") is not None
+        and state.get("headwords") is not None
+        and hasattr(state.get("word_index"), "rows_for_ids")
+    ):
+        return _run_compact_structural(
+            parsed,
+            state,
+            top_n,
+            category,
+            syllables,
+            primary_vowel,
+            rhyme_key,
+            sounds_like_phonemes,
+            meter,
+            progress,
+        )
+
     # Deferred import: search.py imports structural_search for dispatch
     # (Task 6), so importing search.py at module load time here would be
     # circular. Matches the lazy-import pattern already used elsewhere in
@@ -146,7 +377,6 @@ def run_structural(
     metadata = state["metadata"]
     literary_frequency = state["literary_frequency"]
 
-    progress = progress or ProgressReporter()
     progress.active("scope")
     sorted_words = state.get("headwords")
     prefix = _literal_prefix(parsed.pattern_clauses)
@@ -239,7 +469,13 @@ def matching_row_indices(
     parsed: ParsedQuery,
     word_index: dict[str, list[int]],
     sorted_headwords: list[str] | None = None,
-) -> list[int]:
+    structural_index: CompactStructuralIndex | None = None,
+) -> list[int] | np.ndarray:
+    if structural_index is not None and sorted_headwords is not None:
+        word_ids = planned_word_ids(parsed, structural_index, sorted_headwords)
+        rows_for_ids = getattr(word_index, "rows_for_ids", None)
+        if rows_for_ids is not None:
+            return rows_for_ids(word_ids)
     prefix = _literal_prefix(parsed.pattern_clauses)
     if prefix is not None and sorted_headwords is not None:
         start, end = _prefix_bounds(sorted_headwords, prefix)

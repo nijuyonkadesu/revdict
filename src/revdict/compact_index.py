@@ -19,6 +19,14 @@ from rapidfuzz.distance import Levenshtein
 
 from revdict import category as category_module
 from revdict.phonetics import SOUNDS_LIKE_THRESHOLD
+from revdict.structural_index import (
+    PHONEME_LENGTH_BYTES,
+    PHONEME_LENGTH_OFFSETS,
+    PHONEME_LENGTH_SEQUENCE_IDS,
+    STRUCTURAL_ARTIFACTS,
+    CompactStructuralIndex,
+    write_structural_artifacts,
+)
 
 
 METADATA_OFFSETS = "metadata_offsets.npy"
@@ -43,7 +51,7 @@ PHONEME_ARTIFACTS = (
     "phoneme_sequence_offsets.npy",
 )
 
-COMPACT_ARTIFACTS = (
+CORE_COMPACT_ARTIFACTS = (
     METADATA_OFFSETS,
     WORD_BYTES,
     WORD_OFFSETS,
@@ -55,6 +63,7 @@ COMPACT_ARTIFACTS = (
     *TEXT_VOCAB_ARTIFACTS,
     *PHONEME_ARTIFACTS,
 )
+COMPACT_ARTIFACTS = (*CORE_COMPACT_ARTIFACTS, *STRUCTURAL_ARTIFACTS)
 
 FACET_DTYPE = np.dtype(
     [
@@ -229,6 +238,7 @@ def write_compact_artifacts(
         sequence_offsets[index] = sequence_offsets[index - 1] + len(encoded)
     (index_dir / "phoneme_sequence_bytes.bin").write_bytes(b"".join(encoded_sequences))
     np.save(index_dir / "phoneme_sequence_offsets.npy", sequence_offsets)
+    write_structural_artifacts(index_dir, words)
 
 
 class MappedBytes:
@@ -305,7 +315,9 @@ class CompactFacets:
     phoneme_bytes: MappedBytes
     phoneme_offsets: np.ndarray
     token_vocab: TextVocab
-    phoneme_choices: list[bytes] | None = None
+    phoneme_length_bytes: MappedBytes
+    phoneme_length_offsets: np.ndarray
+    phoneme_length_sequence_ids: np.ndarray
     token_ids: dict[str, int] | None = None
 
     @classmethod
@@ -321,13 +333,35 @@ class CompactFacets:
             phoneme_bytes = MappedBytes(index_dir / "phoneme_sequence_bytes.bin")
             phoneme_offsets = np.load(index_dir / "phoneme_sequence_offsets.npy", mmap_mode="r")
             opened.append(phoneme_offsets)
-            result = cls(values, vowels, rhymes, meters, phoneme_bytes, phoneme_offsets, token_vocab)
+            phoneme_length_bytes = MappedBytes(index_dir / PHONEME_LENGTH_BYTES)
+            phoneme_length_offsets = np.load(
+                index_dir / PHONEME_LENGTH_OFFSETS, mmap_mode="r"
+            )
+            phoneme_length_sequence_ids = np.load(
+                index_dir / PHONEME_LENGTH_SEQUENCE_IDS, mmap_mode="r"
+            )
+            opened.extend((phoneme_length_offsets, phoneme_length_sequence_ids))
+            result = cls(
+                values,
+                vowels,
+                rhymes,
+                meters,
+                phoneme_bytes,
+                phoneme_offsets,
+                token_vocab,
+                phoneme_length_bytes,
+                phoneme_length_offsets,
+                phoneme_length_sequence_ids,
+            )
             result.validate()
             return result
         except Exception:
             for value in opened:
                 _close_array(value)
-            for name in ("vowels", "rhymes", "meters", "token_vocab", "phoneme_bytes"):
+            for name in (
+                "vowels", "rhymes", "meters", "token_vocab", "phoneme_bytes",
+                "phoneme_length_bytes",
+            ):
                 value = locals().get(name)
                 if value is not None:
                     value.close()
@@ -338,6 +372,33 @@ class CompactFacets:
             raise ValueError("compact facet array has an invalid layout")
         if self.phoneme_offsets.ndim != 1 or not len(self.phoneme_offsets) or int(self.phoneme_offsets[0]) != 0 or int(self.phoneme_offsets[-1]) != len(self.phoneme_bytes):
             raise ValueError("compact phoneme sequences have an invalid layout")
+        sequence_count = len(self.phoneme_offsets) - 1
+        if (
+            self.phoneme_length_offsets.dtype != np.dtype("uint64")
+            or self.phoneme_length_offsets.ndim != 1
+            or len(self.phoneme_length_offsets) < 2
+            or int(self.phoneme_length_offsets[0]) != 0
+            or int(self.phoneme_length_offsets[-1]) != sequence_count
+            or np.any(self.phoneme_length_offsets[1:] < self.phoneme_length_offsets[:-1])
+            or self.phoneme_length_sequence_ids.dtype != np.dtype("uint32")
+            or self.phoneme_length_sequence_ids.shape != (sequence_count,)
+            or not np.array_equal(
+                np.sort(self.phoneme_length_sequence_ids),
+                np.arange(sequence_count, dtype="uint32"),
+            )
+        ):
+            raise ValueError("length-grouped phoneme index has an invalid layout")
+        lengths = np.diff(self.phoneme_offsets)
+        expected_bytes = 0
+        for length in range(len(self.phoneme_length_offsets) - 1):
+            start = int(self.phoneme_length_offsets[length])
+            end = int(self.phoneme_length_offsets[length + 1])
+            sequence_ids = self.phoneme_length_sequence_ids[start:end]
+            if len(sequence_ids) and np.any(lengths[sequence_ids] != length):
+                raise ValueError("length-grouped phoneme index disagrees with sequences")
+            expected_bytes += (end - start) * length
+        if expected_bytes != len(self.phoneme_length_bytes):
+            raise ValueError("length-grouped phoneme byte table has an invalid size")
         for field, limit, missing in (
             ("vowel", len(self.vowels), MISSING_U16),
             ("rhyme", len(self.rhymes), MISSING_U32),
@@ -367,15 +428,41 @@ class CompactFacets:
         encoded = self._encode_target(target)
         if encoded is None:
             return np.empty(0, dtype="uint32")
-        if self.phoneme_choices is None:
-            self.phoneme_choices = [
-                self._phoneme_sequence(sequence_id)
-                for sequence_id in range(len(self.phoneme_offsets) - 1)
-            ]
+        target_length = len(encoded)
+        max_stored_length = len(self.phoneme_length_offsets) - 2
+        minimum_length = max(1, int(np.ceil(target_length * (1 - SOUNDS_LIKE_THRESHOLD))))
+        maximum_length = min(
+            max_stored_length,
+            int(np.floor(target_length / (1 - SOUNDS_LIKE_THRESHOLD))),
+        )
+        choices: list[bytes] = []
+        choice_ids: list[np.ndarray] = []
+        byte_start = sum(
+            (
+                int(self.phoneme_length_offsets[length + 1])
+                - int(self.phoneme_length_offsets[length])
+            )
+            * length
+            for length in range(minimum_length)
+        )
+        for length in range(minimum_length, maximum_length + 1):
+            id_start = int(self.phoneme_length_offsets[length])
+            id_end = int(self.phoneme_length_offsets[length + 1])
+            byte_end = byte_start + (id_end - id_start) * length
+            group = self.phoneme_length_bytes.slice(byte_start, byte_end)
+            choices.extend(
+                group[offset : offset + length]
+                for offset in range(0, len(group), length)
+            )
+            choice_ids.append(self.phoneme_length_sequence_ids[id_start:id_end])
+            byte_start = byte_end
+        if not choices:
+            return np.empty(0, dtype="uint32")
+        sequence_ids = np.concatenate(choice_ids)
         accepted = []
         coarse = rapidfuzz_process.extract(
             encoded,
-            self.phoneme_choices,
+            choices,
             scorer=Levenshtein.normalized_distance,
             score_cutoff=SOUNDS_LIKE_THRESHOLD,
             limit=None,
@@ -385,7 +472,7 @@ class CompactFacets:
             # this avoids floating point disagreement at exactly 0.34.
             distance = Levenshtein.distance(candidate, encoded)
             if distance / max(len(candidate), len(encoded), 1) <= SOUNDS_LIKE_THRESHOLD:
-                accepted.append(sequence_id)
+                accepted.append(int(sequence_ids[sequence_id]))
         return np.asarray(accepted, dtype="uint32")
 
     def matches_record(self, row: int, record: dict) -> bool:
@@ -468,15 +555,17 @@ class CompactFacets:
         return rows[mask]
 
     def close(self) -> None:
-        self.phoneme_choices = None
         self.token_ids = None
         _close_array(self.values)
         _close_array(self.phoneme_offsets)
+        _close_array(self.phoneme_length_offsets)
+        _close_array(self.phoneme_length_sequence_ids)
         self.vowels.close()
         self.rhymes.close()
         self.meters.close()
         self.token_vocab.close()
         self.phoneme_bytes.close()
+        self.phoneme_length_bytes.close()
 
 
 def validate_compact_artifacts(index_dir: Path, record_count: int) -> None:
@@ -488,8 +577,10 @@ def validate_compact_artifacts(index_dir: Path, record_count: int) -> None:
     offsets = np.load(index_dir / METADATA_OFFSETS, mmap_mode="r")
     row_headwords = np.load(index_dir / ROW_HEADWORDS, mmap_mode="r")
     frequencies = np.load(index_dir / HEADWORD_FREQUENCIES, mmap_mode="r")
-    facets = CompactFacets.open(index_dir)
+    facets = structural = None
     try:
+        facets = CompactFacets.open(index_dir)
+        structural = CompactStructuralIndex.open(index_dir, len(frequencies))
         metadata_size = (index_dir / "metadata.jsonl").stat().st_size
         if offsets.dtype != np.dtype("uint64") or offsets.shape != (record_count + 1,) or int(offsets[0]) != 0 or int(offsets[-1]) != metadata_size or np.any(offsets[1:] < offsets[:-1]):
             raise ValueError("metadata offsets have an invalid layout")
@@ -505,4 +596,7 @@ def validate_compact_artifacts(index_dir: Path, record_count: int) -> None:
         _close_array(offsets)
         _close_array(row_headwords)
         _close_array(frequencies)
-        facets.close()
+        if facets is not None:
+            facets.close()
+        if structural is not None:
+            structural.close()

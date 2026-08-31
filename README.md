@@ -77,6 +77,48 @@ Definition embeddings are stored once per unique definition, with a compact
 record-to-vector mapping. This avoids duplicating vectors for many records
 that share a gloss while retaining record-level ranking.
 
+### Search latency
+
+The table below is an end-to-end daemon benchmark on the real 787,587-headword,
+1,267,250-sense index using an AMD Ryzen 7 7700 (CPU only), `top_n=10` unless
+shown otherwise. Times include Unix-socket transport, result enrichment, and
+JSON encoding. “First call” is the first occurrence of that query string in
+the daemon process; “median” is five calls. There is no query/result cache:
+every request is planned and executed. The persistent definition-emotion
+cache described below is still used, so a result containing previously unseen
+definitions can additionally pay one batched classifier inference.
+
+| Workload | Previous scan | First call | Median of 5 |
+|---|---:|---:|---:|
+| Semantic reverse lookup | — | 632.0 ms | 521.9 ms |
+| Semantic + structural (`bl*:snow`) | — | 478.7 ms | 488.0 ms |
+| Autocomplete, prefix (`blu`) | — | 8.2 ms | 8.2 ms |
+| Autocomplete, fuzzy (`xqz`) | — | 3.2 ms | 2.4 ms |
+| Prefix (`blue*`) | 2.4 ms | 4.0 ms | 2.9 ms |
+| Suffix (`*bird`) | 229.3 ms | 3.4 ms | 2.7 ms |
+| Mixed wildcard (`bl????rd`) | 176.3 ms | 7.5 ms | 6.8 ms |
+| Fixed length (`?????`) | 433.2 ms | 17.1 ms | 15.5 ms |
+| Consonant/vowel pattern (`#@#@`) | 211.4 ms | 7.2 ms | 5.5 ms |
+| Combined clauses (`?????,*y*`) | 220.3 ms | 9.5 ms | 8.3 ms |
+| Anagram (`//joyful`) | 355.8 ms | 0.6 ms | 0.2 ms |
+| Excluded letters (`-abcd`) | 1,135.8 ms | 17.6 ms | 17.1 ms |
+| Restricted alphabet (`+abcd`) | 264.4 ms | 2.5 ms | 1.7 ms |
+| Acronym expansion (`expand:nasa`) | 168.7 ms | 1.0 ms | 0.4 ms |
+| Phrase token (`**winter**`) | 112.3 ms | 4.5 ms | 3.4 ms |
+| Broad prefix + category (`a*`, noun) | 1,244.1 ms | 24.9 ms | 18.9 ms |
+| Broad prefix + syllables (`a*`, 2) | 1,004.1 ms | 15.4 ms | 14.8 ms |
+| Prefix + primary vowel (`blue*`, UW) | 14.9 ms | 3.2 ms | 2.8 ms |
+| Fixed length + rhyme (`??????`, coat) | — | 92.1 ms | 27.9 ms |
+| Prefix + sounds-like (`c*`, cat) | — | 13.3 ms | 12.4 ms |
+| Prefix + meter (`blue*`, `/`) | 15.3 ms | 4.8 ms | 4.2 ms |
+| Combined category + syllables | — | 14.7 ms | 13.1 ms |
+| Suffix + alphabetical sort (`top_n=30`) | — | 46.2 ms | 14.7 ms |
+
+Semantic searches still exhaustively score the complete float32 embedding
+matrix and rerank at least 600 candidates. Structural planning changes only
+how an exact eligible scope is found; it does not reduce the semantic pool or
+approximate any filter.
+
 ### Emotion tagging
 
 Emotion badges use a revision-pinned, sense-definition classifier with NRC

@@ -634,10 +634,14 @@ def run_server() -> None:
         from revdict.query_env import configure_offline_quiet_env
 
         configure_offline_quiet_env()
-        from revdict.index_bundle import ensure_schema_v3, index_schema_version, resolve_active_index_dir
+        from revdict.index_bundle import (
+            ensure_schema_v3,
+            index_optimization_required,
+            resolve_active_index_dir,
+        )
 
         active_index_dir = resolve_active_index_dir(INDEX_DIR)
-        if index_schema_version(active_index_dir) != 3:
+        if index_optimization_required(active_index_dir):
             _write_daemon_record(lock_descriptor, "optimizing-index")
         ensure_schema_v3(INDEX_DIR)
 

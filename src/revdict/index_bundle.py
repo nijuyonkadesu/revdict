@@ -22,8 +22,14 @@ from pathlib import Path
 import numpy as np
 
 from revdict.compact_index import (
-    COMPACT_ARTIFACTS, HEADWORD_FREQUENCIES, METADATA_OFFSETS, ROW_HEADWORDS,
+    COMPACT_ARTIFACTS, CORE_COMPACT_ARTIFACTS, HEADWORD_FREQUENCIES,
+    METADATA_OFFSETS, ROW_HEADWORDS,
     CompactFacets, validate_compact_artifacts, write_compact_artifacts,
+)
+from revdict.structural_index import (
+    STRUCTURAL_ARTIFACTS,
+    validate_structural_artifacts,
+    write_structural_artifacts,
 )
 
 INDEX_FORMAT = "revdict-index"
@@ -39,7 +45,7 @@ LEGACY_REQUIRED_ARTIFACTS = (
 )
 BASE_REQUIRED_ARTIFACTS = (*LEGACY_REQUIRED_ARTIFACTS, "record_embeddings.npy")
 REQUIRED_ARTIFACTS = (*BASE_REQUIRED_ARTIFACTS, *COMPACT_ARTIFACTS)
-COMPACT_WORD_INDEX_ARTIFACTS = COMPACT_ARTIFACTS
+COMPACT_WORD_INDEX_ARTIFACTS = CORE_COMPACT_ARTIFACTS
 _STAGING_FILES = (*REQUIRED_ARTIFACTS, MANIFEST_FILENAME)
 
 
@@ -90,7 +96,15 @@ def index_layout_exists(index_root: Path) -> bool:
         active = resolve_active_index_dir(index_root)
     except (IndexValidationError, OSError):
         return False
-    required = REQUIRED_ARTIFACTS if index_schema_version(active) == SCHEMA_VERSION else LEGACY_REQUIRED_ARTIFACTS
+    # A published v3 bundle from an earlier revdict release can be a valid
+    # optimization source even when it predates newly derived artifacts.  Let
+    # the daemon acquire the build lock and augment that bundle atomically;
+    # rejecting it here would incorrectly tell the user to rebuild embeddings.
+    required = (
+        (*BASE_REQUIRED_ARTIFACTS, *CORE_COMPACT_ARTIFACTS)
+        if index_schema_version(active) == SCHEMA_VERSION
+        else LEGACY_REQUIRED_ARTIFACTS
+    )
     return all((active / filename).is_file() for filename in required)
 
 
@@ -215,6 +229,17 @@ def read_manifest_unchecked(index_dir: Path) -> dict | None:
 def index_schema_version(index_dir: Path) -> int | None:
     manifest = read_manifest_unchecked(index_dir)
     return None if manifest is None else manifest.get("schema_version")
+
+
+def index_optimization_required(index_dir: Path) -> bool:
+    manifest = read_manifest_unchecked(index_dir)
+    if manifest is None or manifest.get("schema_version") != SCHEMA_VERSION:
+        return True
+    artifacts = manifest.get("artifacts")
+    return not isinstance(artifacts, dict) or any(
+        not (Path(index_dir) / filename).is_file() or filename not in artifacts
+        for filename in REQUIRED_ARTIFACTS
+    )
 
 
 def _validate_compact_word_index(index_dir: Path, word_index: dict[str, list[int]]) -> None:
@@ -410,6 +435,7 @@ def validate_index_directory(index_dir: Path, *, verify_hashes: bool = False) ->
                 mapping.close()
     try:
         validate_compact_artifacts(index_dir, metadata_rows)
+        validate_structural_artifacts(index_dir, [word for word, _rows in items])
     except (OSError, ValueError) as error:
         raise IndexValidationError(f"Invalid schema-v3 compact index: {error}") from error
     return manifest
@@ -526,10 +552,70 @@ def _copy_or_link(source: Path, destination: Path, *, immutable: bool) -> None:
     shutil.copy2(source, destination)
 
 
+def _augment_schema_v3_locked(index_root: Path, source: Path, prior_manifest: dict) -> Path:
+    """Atomically add newly required compact artifacts to an older v3 bundle."""
+    artifacts = prior_manifest.get("artifacts")
+    if not isinstance(artifacts, dict):
+        raise IndexValidationError("Schema-v3 source manifest has no artifact table")
+    reusable = (*BASE_REQUIRED_ARTIFACTS, *CORE_COMPACT_ARTIFACTS)
+    for filename in reusable:
+        path = source / filename
+        expected = artifacts.get(filename)
+        if not path.is_file() or not isinstance(expected, dict):
+            raise IndexValidationError(f"Schema-v3 optimization source is missing: {path}")
+        if path.stat().st_size != expected.get("bytes") or _sha256(path) != expected.get("sha256"):
+            raise IndexValidationError(f"Schema-v3 optimization source checksum failed: {path}")
+
+    staging = create_staging_index(index_root)
+    immutable = source.parent.resolve() == (Path(index_root) / VERSIONS_DIR_NAME).resolve()
+    try:
+        for filename in reusable:
+            _copy_or_link(source / filename, staging / filename, immutable=immutable)
+        try:
+            word_index = json.loads((staging / "word_index.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise IndexValidationError(f"Schema-v3 word index is invalid: {error}") from error
+        words = sorted(word_index)
+        write_structural_artifacts(staging, words)
+
+        embeddings = record_embeddings = None
+        try:
+            embeddings = np.load(staging / "embeddings.npy", mmap_mode="r")
+            record_embeddings = np.load(staging / "record_embeddings.npy", mmap_mode="r")
+            manifest = build_manifest(
+                staging,
+                record_count=int(prior_manifest["record_count"]),
+                definition_count=int(prior_manifest["definition_count"]),
+                embeddings=embeddings,
+                record_embedding_indices=record_embeddings,
+                datasets=prior_manifest.get("datasets"),
+                models=prior_manifest.get("models"),
+                statistics=prior_manifest.get("statistics"),
+            )
+            write_manifest(staging, manifest)
+            validate_index_directory(staging, verify_hashes=True)
+            return publish_staged_index(index_root, staging, manifest)
+        finally:
+            for values in (embeddings, record_embeddings):
+                mapping = getattr(values, "_mmap", None)
+                if mapping is not None:
+                    mapping.close()
+    except Exception:
+        discard_staging_index(index_root, staging)
+        raise
+
+
 def _upgrade_locked(index_root: Path) -> Path:
     source = resolve_active_index_dir(index_root)
     if index_schema_version(source) == SCHEMA_VERSION:
         manifest = load_manifest(source, required=True)
+        artifacts = manifest.get("artifacts", {})
+        complete = all(
+            (source / filename).is_file() and filename in artifacts
+            for filename in STRUCTURAL_ARTIFACTS
+        )
+        if not complete:
+            return _augment_schema_v3_locked(index_root, source, manifest)
         try:
             validate_compact_artifacts(source, int(manifest["record_count"]))
         except (KeyError, OSError, ValueError) as error:
