@@ -608,7 +608,11 @@ def search(
     restrict_row_indices = None
     suppress_exact_match = False
     if parsed.mode == "combined":
-        restrict_row_indices = structural_search.matching_row_indices(parsed, state["word_index"])
+        restrict_row_indices = structural_search.matching_row_indices(
+            parsed,
+            state["word_index"],
+            state.get("headwords"),
+        )
         suppress_exact_match = True
 
     # Category and phonetic constraints narrow the cosine search domain, not

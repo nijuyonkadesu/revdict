@@ -180,6 +180,12 @@ class CompactWordIndex(Mapping[str, list[int]]):
         start, end = int(self._row_offsets[word_id]), int(self._row_offsets[word_id + 1])
         return self._rows[start:end]
 
+    def rows_for_id_range(self, start_word_id: int, end_word_id: int) -> np.ndarray:
+        """Return all record rows for a contiguous sorted headword range."""
+        start = int(self._row_offsets[start_word_id])
+        end = int(self._row_offsets[end_word_id])
+        return self._rows[start:end]
+
     def first_row_for_id(self, word_id: int) -> int:
         return int(self._rows[int(self._row_offsets[word_id])])
 
